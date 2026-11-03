@@ -89,7 +89,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 符号查找 */
+        /**
+         * 符号查找
+         * @description 按「全限定名 → 简单名 → 后缀 → 编辑距离」四级依次尝试，**先命中先返回，不跨级别混合**；
+         *     `fuzzy=false` 只做前两级。结果上限 50 条。
+         */
         get: operations["getSymbol"];
         put?: never;
         post?: never;
@@ -106,7 +110,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 反查引用 */
+        /**
+         * 反查引用
+         * @description `symbol` 是方法名或 `Class#method`；数据来自 AST 启发式提取，召回优先。
+         */
         get: operations["getReferences"];
         put?: never;
         post?: never;
@@ -123,7 +130,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 文件骨架 */
+        /**
+         * 文件骨架
+         * @description 包名、imports、类与方法签名和行号，不含方法体；`imports` 实时从源码文件解析。
+         *     版本未注册、索引文件不存在、索引里没有该文件或源码缺失都返回 404。
+         */
         get: operations["getOutline"];
         put?: never;
         post?: never;
@@ -142,7 +153,9 @@ export interface paths {
         };
         /**
          * 源码切片
-         * @description `start`/`end` 必填，不提供整文件读取。
+         * @description `start`/`end` 必填，不提供整文件读取。行号 1-based 闭区间；`start < 1`、`end < start`
+         *     或 `end > total_lines` 都返回 422，`detail` 带上文件总行数。超出 `max_tokens` 时按行
+         *     从尾部截断，`truncated: true` 并把 `end` 下调到截断处。
          */
         get: operations["readFile"];
         put?: never;
@@ -636,7 +649,8 @@ export interface components {
         };
         Outline: {
             path: string;
-            package: string;
+            /** @description 包名；`data/` 下的文件与无包声明的 `.java` 为 null */
+            package: string | null;
             imports?: string[];
             classes: {
                 fqn?: string;
@@ -944,7 +958,7 @@ export interface components {
     parameters: {
         /** @description 目标版本，必须已完成索引；不支持 latest */
         Version: string;
-        /** @description 相对仓库根的路径 */
+        /** @description 相对该版本源码根（`src/<version>/`）的路径 */
         Path: string;
         JobId: string;
         /** @description 邀请链接里的明文 token */
@@ -1107,6 +1121,9 @@ export interface operations {
                     };
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
         };
     };
     getReferences: {
@@ -1133,6 +1150,9 @@ export interface operations {
                     "application/json": components["schemas"]["ReferenceResponse"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
         };
     };
     getOutline: {
@@ -1140,7 +1160,7 @@ export interface operations {
             query: {
                 /** @description 目标版本，必须已完成索引；不支持 latest */
                 version: components["parameters"]["Version"];
-                /** @description 相对仓库根的路径 */
+                /** @description 相对该版本源码根（`src/<version>/`）的路径 */
                 path: components["parameters"]["Path"];
             };
             header?: never;
@@ -1158,7 +1178,9 @@ export interface operations {
                     "application/json": components["schemas"]["Outline"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
         };
     };
     readFile: {
@@ -1166,7 +1188,7 @@ export interface operations {
             query: {
                 /** @description 目标版本，必须已完成索引；不支持 latest */
                 version: components["parameters"]["Version"];
-                /** @description 相对仓库根的路径 */
+                /** @description 相对该版本源码根（`src/<version>/`）的路径 */
                 path: components["parameters"]["Path"];
                 start: number;
                 end: number;
@@ -1187,7 +1209,9 @@ export interface operations {
                     "application/json": components["schemas"]["FileSlice"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
         };
     };
     ask: {

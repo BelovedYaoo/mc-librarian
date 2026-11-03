@@ -12,7 +12,8 @@
   否则它们永远不会再被认领。
 - 阻塞的文件扫描与 sqlite 读写都丢进 `asyncio.to_thread`，不占事件循环。
 
-`#4` 只真正实现 `parse`（统计文件数与 token）；`summarize`/`finalize` 是占位，见 #13。
+`#4` 只真正实现 `parse`：扫描源码树、tree-sitter 解析、原子写出 `db/<version>.sqlite`（issue #5）；
+`summarize`/`finalize` 是占位，见 #7 / #13。
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,8 @@ from typing import Any, Final
 from mc_librarian import audit
 from mc_librarian.config import Settings
 from mc_librarian.db import Database, transaction
+from mc_librarian.indexing.build import BuildError, build_index, place_source_tree
+from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
 from mc_librarian.schemas import LogLevel
 
@@ -41,12 +44,6 @@ STAGES: Final[tuple[str, ...]] = ("parse", "summarize", "finalize")
 # 收尾阶段，取消时用来描述停在哪。
 FINAL_STAGE: Final = "finalize"
 
-# token 估算：不引入 tiktoken 依赖，按「字符数 ÷ 3.5」近似 cl100k 词元数（#13 可换真分词）。
-CHARS_PER_TOKEN: Final = 3.5
-
-JAVA_SUFFIX: Final = ".java"
-DATA_DIR_NAME: Final = "data"
-
 # 停止 runner 时最多等一个任务收尾多久，超时就取消 asyncio 任务。
 STOP_TIMEOUT_S: Final = 5.0
 
@@ -57,8 +54,9 @@ class StageError(RuntimeError):
 
 @dataclass(frozen=True)
 class JobContext:
-    """一个阶段的输入：任务参数 + 数据根 + 日志回调。"""
+    """一个阶段的输入：任务版本 + 参数 + 数据根 + 日志回调。"""
 
+    version: str
     options: dict[str, Any]
     data_dir: Path
     log: Callable[[LogLevel, str], None]
@@ -76,39 +74,11 @@ class JobContext:
         return path if path.is_absolute() else (self.data_dir / path)
 
 
-def tokens_from_chars(chars: int) -> int:
-    """按 `CHARS_PER_TOKEN` 估算 `chars` 个字符的 token 数。"""
-    return int(chars / CHARS_PER_TOKEN)
-
-
-def iter_source_files(root: Path) -> Iterator[Path]:
-    """索引范围内的文件，白名单只有两类：`*.java`（递归）与 `data/` 下全量（D11）。
-
-    白名单之外一律不索引，因此 `assets/` 这类目录（不在白名单内）天然被排除；
-    先 yield 的 `.java` 用 `seen` 去重，`data/` 下的同名文件不会重复产出。
-    """
-    seen: set[Path] = set()
-
-    for path in sorted(root.rglob(f"*{JAVA_SUFFIX}")):
-        if path.is_file():
-            seen.add(path)
-            yield path
-
-    data_root = root / DATA_DIR_NAME
-
-    if not data_root.is_dir():
-        return
-
-    for path in sorted(data_root.rglob("*")):
-        if path.is_file() and path not in seen:
-            yield path
-
-
 def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     """执行一个阶段，返回要并入 checkpoint 的产物。
 
-    `#4` 只实现 `parse`（统计文件数与 token 估算）；`summarize`/`finalize` 待 #13 接真正的
-    流水线，这里只标记完成。
+    `#4`/`#5` 只实现 `parse`（扫描源码树 → 解析 → 写 `db/<version>.sqlite`）；
+    `summarize`/`finalize` 待 #7 / #13 接真正的流水线，这里只标记完成。
     """
     if stage == "parse":
         return _parse_stage(context)
@@ -117,7 +87,11 @@ def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
 
 
 def _parse_stage(context: JobContext) -> dict[str, Any]:
-    """统计 `source_dir` 下 `.java` 与 `data/` 的文件数、token 估算与字节数。"""
+    """就位源码树并把它解析成 `db/<version>.sqlite`（规格补充 §1/§3/§4/§14）。
+
+    源码根固定为 `<data_dir>/src/<version>/`：`options.source_dir` 已经是它就直接解析，
+    否则先复制过去——数据根因此是服务侧唯一的事实来源。
+    """
     root = context.source_dir
 
     if root is None:
@@ -126,26 +100,32 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
     if not root.is_dir():
         raise StageError(f"source_dir 不存在或不是目录：{root}")
 
-    context.log("info", f"parse：开始扫描 {root}")
+    dest = source_root(context.data_dir, context.version)
 
-    files = 0
-    chars = 0
-    size_bytes = 0
+    if root.resolve() != dest.resolve():
+        context.log("info", f"parse：源码树就位到 {dest}")
 
-    for path in iter_source_files(root):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as error:
-            raise StageError(f"读取源码失败：{path}（{error}）") from error
+    try:
+        place_source_tree(root, dest)
+        result = build_index(
+            dest, index_path(context.data_dir, context.version), log=context.log
+        )
+    except BuildError as error:
+        raise StageError(str(error)) from error
 
-        files += 1
-        chars += len(text)
-        size_bytes += path.stat().st_size
+    context.log(
+        "info",
+        f"parse：{result.files} 个文件、约 {result.tokens} token、{result.source_size_bytes} 字节；"
+        f"解析 {result.parsed} 个 .java、跳过 {result.skipped} 个",
+    )
 
-    tokens = tokens_from_chars(chars)
-    context.log("info", f"parse：{files} 个文件、约 {tokens} token、{size_bytes} 字节")
-
-    return {"files": files, "tokens": tokens, "source_size_bytes": size_bytes}
+    return {
+        "files": result.files,
+        "tokens": result.tokens,
+        "source_size_bytes": result.source_size_bytes,
+        "parsed_files": result.parsed,
+        "skipped_files": result.skipped,
+    }
 
 
 class JobRunner:
@@ -230,6 +210,7 @@ class JobRunner:
             current_stage = stage
 
             context = JobContext(
+                version=version,
                 options=options,
                 data_dir=self._settings.data_dir,
                 log=lambda level, message: self._log(job_id, level, message),

@@ -97,13 +97,16 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 ### 5.2 单版本索引 `db/<version>.sqlite`
 
 ```sql
-files(id, path, pkg, loc, tokens, sha1)
+files(id, path, pkg, loc, tokens)
 classes(id, file_id, fqn, simple, kind, superclass, interfaces, annotations, start_line, end_line)
 methods(id, class_id, name, signature, return_type, params, modifiers, annotations, start_line, end_line)
 fields(id, class_id, name, type, modifiers, annotations, start_line, end_line)
-refs(from_method_id, target_name, kind)          -- 启发式
-summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
+refs(id, from_method_id, target_name, kind, line)   -- 启发式；行号 1-based 闭区间
+summaries(fqn, text_zh, keywords, tokens)           -- FTS5, jieba 预分词（#7 追加）
 ```
+
+`files.path` 相对 `<data_dir>/src/<version>/`；数组字段（`interfaces`/`annotations`/`params`/`modifiers`）
+存 JSON 文本。`summaries` 由 #7 追加，本阶段不建。
 
 `summaries.text_zh` 固定 3 行：
 

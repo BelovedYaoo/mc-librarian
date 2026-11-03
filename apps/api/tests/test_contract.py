@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 import yaml
@@ -521,3 +521,126 @@ def test_job_log_and_version_schemas_match() -> None:
     contract_list = _response_schema(_contract(), "/v1/versions")
 
     assert set(runtime_list["properties"]) == set(contract_list["properties"]) == {"versions"}
+
+
+# ----------------------------------------------------------------------
+# issue #5：符号索引与精确检索（symbol / references / outline / read）
+# ----------------------------------------------------------------------
+
+RETRIEVAL_OPERATIONS: Final = (
+    ("/v1/symbol", "get"),
+    ("/v1/references", "get"),
+    ("/v1/outline", "get"),
+    ("/v1/read", "get"),
+)
+
+
+def test_retrieval_paths_are_implemented() -> None:
+    """issue #5 把四个检索/阅读端点从契约落到了实现。"""
+    runtime_paths = set(_runtime()["paths"])
+
+    assert {"/v1/symbol", "/v1/references", "/v1/outline", "/v1/read"} <= runtime_paths
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "operation_id", "tag"),
+    [
+        ("/v1/symbol", "get", "getSymbol", "retrieve"),
+        ("/v1/references", "get", "getReferences", "retrieve"),
+        ("/v1/outline", "get", "getOutline", "read"),
+        ("/v1/read", "get", "readFile", "read"),
+    ],
+)
+def test_retrieval_operation_ids_match(
+    path: str, method: str, operation_id: str, tag: str
+) -> None:
+    runtime = _operation(_runtime(), path, method)
+    contract = _operation(_contract(), path, method)
+
+    assert runtime["operationId"] == contract["operationId"] == operation_id
+    assert runtime["tags"] == contract["tags"] == [tag]
+
+
+def test_retrieval_operations_require_login() -> None:
+    """四个端点都只要求登录（`user` 即可），不覆盖 security，继承全局 cookieAuth / bearerAuth。"""
+    for path, method in RETRIEVAL_OPERATIONS:
+        for spec in (_runtime(), _contract()):
+            assert "security" not in _operation(spec, path, method)
+
+
+def test_retrieval_error_responses_are_declared() -> None:
+    """未认证 / 版本或文件不存在 / 查询参数不合法都是 problem+json（规格 §8/§9/§16）。"""
+    contract = _contract()
+    runtime = _runtime()
+
+    for path, method in RETRIEVAL_OPERATIONS:
+        contract_responses = _operation(contract, path, method)["responses"]
+        runtime_responses = _operation(runtime, path, method)["responses"]
+
+        assert contract_responses["401"]["$ref"].endswith("/Unauthorized")
+        assert contract_responses["404"]["$ref"].endswith("/NotFound")
+        assert contract_responses["422"]["$ref"].endswith("/BadRequest")
+
+        for status in ("401", "404", "422"):
+            assert "application/problem+json" in runtime_responses[status]["content"]
+
+
+def test_symbol_matches_schema_matches() -> None:
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/symbol")
+        detail = _deref(spec, schema["properties"]["matches"]["items"])
+
+        assert schema["required"] == ["matches"]
+        assert detail["required"] == ["fqn", "kind", "path", "lines"]
+        assert set(detail["properties"]) == {
+            "fqn",
+            "kind",
+            "signature",
+            "path",
+            "lines",
+            "superclass",
+            "interfaces",
+            "annotations",
+            "summary",
+            "members",
+        }
+
+
+def test_reference_response_schema_matches() -> None:
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/references")
+        reference = _deref(spec, schema["properties"]["references"]["items"])
+
+        assert schema["required"] == ["symbol", "version", "references"]
+        assert reference["required"] == ["path", "lines"]
+
+
+def test_outline_schema_matches() -> None:
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/outline")
+
+        assert schema["required"] == ["path", "package", "classes"]
+        assert set(schema["properties"]) == {"path", "package", "imports", "classes"}
+
+
+def test_file_slice_schema_matches() -> None:
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/read")
+
+        assert schema["required"] == [
+            "path",
+            "version",
+            "start",
+            "end",
+            "content",
+            "truncated",
+        ]
+        assert set(schema["properties"]) == {
+            "path",
+            "version",
+            "start",
+            "end",
+            "total_lines",
+            "content",
+            "truncated",
+        }
