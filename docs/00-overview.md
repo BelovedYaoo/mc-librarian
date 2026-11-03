@@ -53,6 +53,18 @@ mc-librarian/
 1. **索引文件只读**。服务以 `?mode=ro` 打开 `<version>.sqlite`；所有写入只发生在 `control.sqlite` 与 JobRunner 的临时工作区。
 2. **检索逻辑只有一份**。`/v1/*`、MCP 适配器、`/v1/ask` 的工具调用都走同一个 `retrieval` 服务层。
 
+### 4.1 部署拓扑
+
+| 项 | 值 |
+|---|---|
+| 域名 | `mc-librarian.belovedyaoo.top` |
+| 节点 | `47.122.113.116`（Debian 12，3.5 GiB 内存，Docker 29.5 / Compose 5.1.4） |
+| 入口 | 节点上的 `gateway-nginx` 终止 TLS，反代到 `deploy-net` 内的容器端口 |
+| 证书 | OHTTPS 自动续期的 `*.belovedyaoo.top` 泛域名 |
+| 发版 | **不接 CI/CD**。发版频率低，手工 `docker compose up -d` + 网关 conf 变更 |
+
+**索引不在节点上构建。** 节点只有 3.5 GiB 内存，反编译一个 5–7M token 的版本需要 3–4 GiB，硬跑会拖垮同机的其它服务。索引在本地工作站用 `mc-librarian index --version <v>` 生成，产物 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧的 `index.enabled` 默认关闭，版本页只显示状态与上传入口。
+
 ## 5. 数据模型
 
 ### 5.1 控制面 `control.sqlite`

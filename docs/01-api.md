@@ -88,6 +88,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 | 端点 | 说明 |
 |---|---|
+| `POST /v1/admin/versions` | 注册已上传的索引文件（节点侧不构建索引） |
 | `POST /v1/admin/jobs` | 创建索引任务，立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
 | `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize，`progress` 0–1 |
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；`Accept: text/event-stream` 可增量跟随 |

@@ -15,8 +15,8 @@ info:
     接口只返回 `202 + job_id`。
 
 servers:
-  - url: https://mc.example.com
-    description: 生产（占位域名）
+  - url: https://mc-librarian.belovedyaoo.top
+    description: 生产（公网边缘节点 47.122.113.116）
   - url: http://127.0.0.1:8787
     description: 本地开发
 
@@ -309,6 +309,32 @@ paths:
           schema: { type: string }
       responses:
         "204": { description: 已吊销 }
+
+  /v1/admin/versions:
+    post:
+      tags: [admin]
+      summary: 注册已上传的索引
+      description: |
+        节点侧不构建索引。管理员把本地生成的 `db/<version>.sqlite` 放进数据根后调用本接口，
+        服务端校验文件并写入版本注册表。文件不存在或校验失败返回 422。
+      operationId: registerVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: string, examples: ["26.3"] }
+                obfuscated: { type: boolean, default: true }
+      responses:
+        "201":
+          description: 已注册
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VersionInfo" }
+        "422": { $ref: "#/components/responses/BadRequest" }
 
   /v1/admin/users:
     get:
