@@ -17,6 +17,8 @@ from fastapi.openapi.utils import get_openapi
 from mc_librarian import __version__
 from mc_librarian.api.v1 import api_router
 from mc_librarian.config import Settings, get_settings
+from mc_librarian.db import Database
+from mc_librarian.problems import component_schema, install_exception_handlers
 
 logger = logging.getLogger("mc_librarian")
 
@@ -78,9 +80,14 @@ SECURITY_SCHEMES: Final = {
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
+    database: Database = app.state.db
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     source = "MC_LIBRARIAN_DATA_DIR" if settings.data_dir_from_env else "默认（仓库之外）"
+
+    version = database.initialize()
+
     logger.info("data root: %s（来源：%s）", settings.data_dir, source)
+    logger.info("control db: %s（schema v%d）", database.path, version)
     yield
 
 
@@ -105,6 +112,8 @@ def _build_openapi(app: FastAPI) -> dict[str, Any]:
 
     components = schema.setdefault("components", {})
     components.setdefault("securitySchemes", {}).update(SECURITY_SCHEMES)
+    # 错误响应统一引用 `#/components/schemas/Problem`，这里保证它一定在 components 里。
+    components.setdefault("schemas", {}).setdefault("Problem", component_schema())
     schema["security"] = GLOBAL_SECURITY
 
     app.openapi_schema = schema
@@ -123,7 +132,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.db = Database.for_data_dir(settings.data_dir)
     app.openapi = lambda: _build_openapi(app)  # type: ignore[method-assign]
+    install_exception_handlers(app)
     app.include_router(api_router)
 
     return app

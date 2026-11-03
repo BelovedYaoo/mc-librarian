@@ -1,5 +1,6 @@
 import 'src/global.css';
 
+import { AuthProvider } from 'src/auth';
 import { ThemeProvider } from 'src/theme';
 
 // ----------------------------------------------------------------------
@@ -9,5 +10,9 @@ type AppProps = {
 };
 
 export default function App({ children }: AppProps) {
-  return <ThemeProvider>{children}</ThemeProvider>;
+  return (
+    <ThemeProvider>
+      <AuthProvider>{children}</AuthProvider>
+    </ThemeProvider>
+  );
 }

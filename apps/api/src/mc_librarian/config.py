@@ -18,6 +18,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DATA_DIR_ENV: Final = "MC_LIBRARIAN_DATA_DIR"
 DATA_DIR_NAME: Final = "mc-librarian-data"
 
+# 会话 cookie 名，与 docs/openapi.yaml 的 `components.securitySchemes.cookieAuth` 一致。
+SESSION_COOKIE_NAME: Final = "mc_librarian_session"
+
 # 仓库哨兵：同时存在 `package.json` 与 `apps/api/` 才算仓库根。
 # 刻意不用 `.git`（worktree / 源码快照里可能没有）。
 _REPO_SENTINELS: Final = (Path("package.json"), Path("apps", "api"))
@@ -76,6 +79,12 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default_factory=default_data_dir)
     host: str = "127.0.0.1"
     port: int = 8787
+
+    # 会话 cookie 的 `Secure` 属性：本地 http 下给 true 会让浏览器直接丢弃 cookie，
+    # 所以默认 false（dev）；生产在 HTTPS 边界后面部署时设 `MC_LIBRARIAN_COOKIE_SECURE=true`。
+    cookie_secure: bool = False
+    # 会话有效期（小时），与 `settings.security.session_ttl_hours` 的默认值保持一致。
+    session_ttl_hours: int = Field(default=168, ge=1, le=24 * 365)
 
     @field_validator("data_dir")
     @classmethod

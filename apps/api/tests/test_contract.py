@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from openapi_spec_validator import validate
 
@@ -28,9 +29,16 @@ def _runtime() -> dict[str, Any]:
     return create_app().openapi()
 
 
-def _operation(spec: dict[str, Any], path: str) -> dict[str, Any]:
-    operation: dict[str, Any] = spec["paths"][path]["get"]
+def _operation(spec: dict[str, Any], path: str, method: str = "get") -> dict[str, Any]:
+    operation: dict[str, Any] = spec["paths"][path][method]
     return operation
+
+
+def _request_schema(spec: dict[str, Any], path: str, method: str) -> dict[str, Any]:
+    schema: dict[str, Any] = _operation(spec, path, method)["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    return _deref(spec, schema)
 
 
 def _deref(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
@@ -45,8 +53,10 @@ def _deref(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
-def _response_schema(spec: dict[str, Any], path: str) -> dict[str, Any]:
-    schema: dict[str, Any] = _operation(spec, path)["responses"]["200"]["content"][
+def _response_schema(
+    spec: dict[str, Any], path: str, method: str = "get", status: str = "200"
+) -> dict[str, Any]:
+    schema: dict[str, Any] = _operation(spec, path, method)["responses"][status]["content"][
         "application/json"
     ]["schema"]
     return _deref(spec, schema)
@@ -124,3 +134,118 @@ def test_health_operation_is_public() -> None:
 
     assert runtime["operationId"] == contract["operationId"] == "getHealth"
     assert runtime["security"] == contract["security"] == []
+
+
+def test_auth_paths_are_implemented() -> None:
+    """issue #3 把 setup 与三条 auth 端点从契约落到了实现。"""
+    runtime_paths = set(_runtime()["paths"])
+
+    assert {
+        "/v1/setup",
+        "/v1/auth/login",
+        "/v1/auth/logout",
+        "/v1/auth/me",
+    } <= runtime_paths
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "operation_id"),
+    [
+        ("/v1/setup", "get", "getSetupStatus"),
+        ("/v1/setup", "post", "createFirstAdmin"),
+        ("/v1/auth/login", "post", "login"),
+        ("/v1/auth/logout", "post", "logout"),
+        ("/v1/auth/me", "get", "getMe"),
+    ],
+)
+def test_auth_operation_ids_match(path: str, method: str, operation_id: str) -> None:
+    runtime = _operation(_runtime(), path, method)
+    contract = _operation(_contract(), path, method)
+
+    assert runtime["operationId"] == contract["operationId"] == operation_id
+    assert runtime["tags"] == contract["tags"] == ["auth"]
+
+
+def test_public_operations_declare_empty_security() -> None:
+    """setup / login 是公开端点（前端未登录时也要能调）。"""
+    for path, method in (
+        ("/v1/setup", "get"),
+        ("/v1/setup", "post"),
+        ("/v1/auth/login", "post"),
+    ):
+        assert _operation(_runtime(), path, method)["security"] == []
+        assert _operation(_contract(), path, method)["security"] == []
+
+
+def test_session_operations_require_auth() -> None:
+    """me / logout 不覆盖 security，因此继承全局 cookieAuth / bearerAuth。"""
+    for path, method in (("/v1/auth/me", "get"), ("/v1/auth/logout", "post")):
+        assert "security" not in _operation(_runtime(), path, method)
+        assert "security" not in _operation(_contract(), path, method)
+
+
+def test_setup_status_schema_matches() -> None:
+    runtime = _response_schema(_runtime(), "/v1/setup")
+    contract = _response_schema(_contract(), "/v1/setup")
+
+    assert runtime["required"] == contract["required"] == ["required"]
+    assert set(runtime["properties"]) == set(contract["properties"]) == {"required"}
+
+
+def test_user_schema_matches() -> None:
+    """setup 的 201、login 的 200、/auth/me 的 200 都是同一个 `User`。"""
+    runtime = _response_schema(_runtime(), "/v1/setup", "post", "201")
+    contract = _response_schema(_contract(), "/v1/setup", "post", "201")
+
+    assert runtime["required"] == contract["required"] == ["id", "username", "role", "enabled"]
+    assert set(runtime["properties"]) == set(contract["properties"])
+    assert "password_hash" not in runtime["properties"]
+
+    for path, method, status in (
+        ("/v1/auth/login", "post", "200"),
+        ("/v1/auth/me", "get", "200"),
+    ):
+        assert _response_schema(_runtime(), path, method, status) == runtime
+        assert _response_schema(_contract(), path, method, status) == contract
+
+
+def test_setup_and_login_request_schemas_match() -> None:
+    for path, method in (("/v1/setup", "post"), ("/v1/auth/login", "post")):
+        runtime = _request_schema(_runtime(), path, method)
+        contract = _request_schema(_contract(), path, method)
+
+        assert runtime["required"] == contract["required"] == ["username", "password"]
+        assert set(runtime["properties"]) == set(contract["properties"])
+
+        password = runtime["properties"]["password"]
+        assert password["minLength"] == contract["properties"]["password"]["minLength"] == 8
+        assert password["maxLength"] == contract["properties"]["password"]["maxLength"] == 128
+
+
+def test_setup_completed_error_is_declared() -> None:
+    """已初始化必须回 410，且契约里写明。"""
+    runtime = _operation(_runtime(), "/v1/setup", "post")
+    contract = _operation(_contract(), "/v1/setup", "post")
+
+    assert "410" in runtime["responses"]
+    assert contract["responses"]["410"]["$ref"].endswith("/SetupCompleted")
+
+
+def test_unauthorized_error_is_declared_for_session_endpoints() -> None:
+    for path, method in (
+        ("/v1/auth/login", "post"),
+        ("/v1/auth/logout", "post"),
+        ("/v1/auth/me", "get"),
+    ):
+        assert "401" in _operation(_runtime(), path, method)["responses"]
+        assert "401" in _operation(_contract(), path, method)["responses"]
+
+
+def test_problem_schema_is_present_in_both_specs() -> None:
+    """错误统一 `application/problem+json`，运行时要能 deref 到 `Problem`。"""
+    for spec in (_runtime(), _contract()):
+        problem = spec["components"]["schemas"]["Problem"]
+
+        assert problem["type"] == "object"
+        assert set(problem["properties"]) == {"type", "title", "status", "detail", "instance"}
+        assert {"title", "status"} <= set(problem["required"])

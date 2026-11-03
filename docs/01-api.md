@@ -1,6 +1,6 @@
 # MC Librarian API · v0.2
 
-> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（23 条路径 / 27 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
+> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（24 条路径 / 29 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
 
 ## 1. 定位
 
@@ -19,7 +19,7 @@
 - **无状态**：检索接口不自带会话，`version` 每个请求显式传，**不支持 `latest`**。
 - **预算控制**：`max_tokens` 由调用方给，服务端按 score 降序截断。
 - **错误格式**：RFC 7807 `application/problem+json`。
-- **认证**：两种并列——浏览器用 `mc_librarian_session` cookie（HttpOnly + Secure + SameSite=Lax），脚本用 `mcl_` 前缀的个人 access token。
+- **认证**：两种并列——浏览器用 `mc_librarian_session` cookie（HttpOnly + SameSite=Lax，`Secure` 由服务端 `MC_LIBRARIAN_COOKIE_SECURE` 控制），脚本用 `mcl_` 前缀的个人 access token。本地开发走 http，`Secure` 必须为 false，否则浏览器会直接丢弃 cookie；生产在 HTTPS 边界后面部署时置为 true。
 - **授权**：`user` 可用检索与问答；`admin` 额外可用 `/v1/admin/*`。前端隐藏菜单只是体验，后端每个端点独立校验。
 
 ## 3. 端点总览
@@ -27,13 +27,14 @@
 | 分组 | 端点 | 角色 |
 |---|---|---|
 | meta | `GET /v1/health`、`GET /v1/versions` | 公开 / 登录 |
+| setup | `GET /v1/setup`、`POST /v1/setup` | 公开（仅首次启动可用） |
 | retrieve | `POST /v1/search`、`GET /v1/symbol`、`GET /v1/references` | user |
 | read | `GET /v1/outline`、`GET /v1/read` | user |
 | answer | `POST /v1/ask`（SSE） | user |
 | auth | `POST /v1/auth/login`、`POST /v1/auth/logout`、`GET /v1/auth/me`、`GET /v1/auth/tokens`、`POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}` | 公开 / 本人 |
 | admin | `POST /v1/admin/versions`、`GET /v1/admin/users`、`POST /v1/admin/users`、`PATCH /v1/admin/users/{userId}`、`GET /v1/admin/jobs`、`POST /v1/admin/jobs`、`GET /v1/admin/jobs/{jobId}`、`GET /v1/admin/jobs/{jobId}/logs`、`POST /v1/admin/jobs/{jobId}/cancel`、`GET /v1/admin/settings`、`PUT /v1/admin/settings`、`GET /v1/admin/usage`、`GET /v1/admin/audit` | admin |
 
-合计 23 条路径 / 27 个操作，与 `openapi.yaml` 一一对应。
+合计 24 条路径 / 29 个操作，与 `openapi.yaml` 一一对应。
 
 ## 4. 检索接口
 
@@ -80,11 +81,21 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 ## 6. 账号体系
 
-- **首次启动**：检测 `users` 表为空 → 强制进入 setup 向导创建唯一管理员；创建成功后 `/setup` 永久关闭。
+- **首次启动**：`GET /v1/setup` 检测 `users` 表是否为空 → `required: true` 时前端强制进入 setup 向导；
+  `POST /v1/setup` 创建唯一管理员，**成功即下发会话 cookie**（201），因此创建完直接进后台，
+  不需要再登录一次。已初始化后 `GET` 恒为 `required: false`、`POST` 返回 `410`，不复用也不覆盖现有账号。
+- **登录**：`POST /v1/auth/login` 换 `mc_librarian_session` cookie；服务端 `sessions` 表存 **token 的 sha256**，
+  明文只存在浏览器 cookie 里。用户名不存在、密码错、账号被禁用一律 `401` + 同一句文案（
+  「用户名或密码不正确」），且不存在的用户也会跑一次等价开销的 argon2 校验来抹平时序差。
+  成功后更新 `last_login_at`。
+- **会话**：`GET /v1/auth/me` 读当前用户，`POST /v1/auth/logout` 删服务端会话行并清 cookie；
+  登出后旧 cookie 再用即 `401`——不是靠前端删 cookie 实现的。有效期默认 168 小时（`MC_LIBRARIAN_SESSION_TTL_HOURS`）。
 - **建号**：管理员创建用户，返回**一次性邀请链接**（48 小时有效），用户自行设置密码——管理员不需要也不应该知道别人的密码。
 - **角色**：`admin` / `user`，可提升可降级；**最后一个 admin 不允许降级或停用**。
 - **PAT**：每人可签发多个，单独吊销，展示 `last_used_at` 与前缀。
 - **审计**：角色变更、禁用、PAT 签发/吊销、设置修改、任务创建全部落 `audit` 表。
+
+密码用 **argon2id** 哈希存库（argon2-cffi 默认参数），接口与日志里都不会出现明文。
 
 ## 7. 管理接口
 
@@ -117,3 +128,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 |---|---|---|
 | 2026-11-03 | 0.1.0 | 初稿：search / symbol / references / outline / read / ask |
 | 2026-11-03 | 0.2.0 | 加账号体系、PAT、admin（users/jobs/settings/usage/audit）、ask 改 SSE、`latest` 移除 |
+| 2026-11-03 | 0.2.0 | issue #3：契约补 `GET/POST /v1/setup`、`Session` 相关错误响应（`Unauthorized`/`Forbidden`/`SetupCompleted`）；实现 setup 与 login/logout/me，控制面 SQLite 落地 `users`/`sessions` + `schema_version`。属 v0.2 设计内的增量补齐，`info.version` 不变 |

@@ -51,6 +51,50 @@ paths:
                   status: { type: string, const: ok }
                   version: { type: string, example: "0.2.0" }
 
+  /v1/setup:
+    get:
+      tags: [auth]
+      summary: 是否需要初始化管理员
+      description: |
+        控制面 `users` 表为空时返回 `required: true`，前端据此把首次访问引导到 `/setup`；
+        创建唯一管理员后永久返回 `false`。公开端点，无需会话。
+      security: []
+      operationId: getSetupStatus
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+    post:
+      tags: [auth]
+      summary: 创建唯一管理员并直接登录
+      description: |
+        仅在 `users` 表为空时可用。成功后返回 `201`、创建出的管理员，并**直接下发会话 cookie**
+        （与 `POST /v1/auth/login` 同一套 cookie），前端创建完即可进入后台。
+        已初始化时返回 `410`，不再重建、也不覆盖现有账号。公开端点，无需会话。
+      security: []
+      operationId: createFirstAdmin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetupRequest" }
+      responses:
+        "201":
+          description: 已创建并登录
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: |
+                `mc_librarian_session`，HttpOnly + SameSite=Lax；`Secure` 由服务端配置
+                `MC_LIBRARIAN_COOKIE_SECURE` 控制（本地 http 为 false，生产为 true）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "410": { $ref: "#/components/responses/SetupCompleted" }
+        "422": { $ref: "#/components/responses/BadRequest" }
+
   /v1/versions:
     get:
       tags: [meta]
@@ -214,6 +258,9 @@ paths:
     post:
       tags: [auth]
       summary: 登录（换取 session cookie）
+      description: |
+        用户名不存在、密码错误、账号被禁用一律返回同一个 `401` 与同一句文案，
+        不暴露「用户是否存在」。成功后更新 `last_login_at` 并下发新的会话 cookie。
       security: []
       operationId: login
       requestBody:
@@ -227,7 +274,10 @@ paths:
           headers:
             Set-Cookie:
               schema: { type: string }
-              description: HttpOnly + Secure + SameSite=Lax，有效期见设置
+              description: |
+                `mc_librarian_session`，HttpOnly + SameSite=Lax；`Secure` 由服务端配置
+                `MC_LIBRARIAN_COOKIE_SECURE` 控制（本地 http 为 false，生产为 true），
+                有效期见服务端 `session_ttl_hours`
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
@@ -237,9 +287,13 @@ paths:
     post:
       tags: [auth]
       summary: 注销当前会话
+      description: |
+        删除服务端会话行并清除 cookie。登出后同一个 cookie 再用即 401；
+        没有有效会话时同样返回 401（调用方可以忽略并直接跳登录页）。
       operationId: logout
       responses:
         "204": { description: 已注销 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/auth/me:
     get:
@@ -620,7 +674,19 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
     Unauthorized:
-      description: 未认证
+      description: |
+        未认证：缺少/过期/已注销的会话 cookie，或登录凭据不正确。
+        登录失败的 `detail` 恒定，不区分「用户不存在」与「密码错误」。
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: 已认证但无权访问（例如 `user` 访问 `/v1/admin/*`）
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    SetupCompleted:
+      description: 已完成初始化：唯一管理员已存在，不再开放 setup
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -859,6 +925,23 @@ components:
       required: [username, password]
       properties:
         username: { type: string }
+        password: { type: string, minLength: 8, maxLength: 128 }
+
+    SetupStatus:
+      type: object
+      required: [required]
+      properties:
+        required: { type: boolean, description: 控制面还没有任何用户，需要先创建管理员 }
+
+    SetupRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 32
+          pattern: "^[a-zA-Z0-9_.-]+$"
         password: { type: string, minLength: 8, maxLength: 128 }
 
     User:

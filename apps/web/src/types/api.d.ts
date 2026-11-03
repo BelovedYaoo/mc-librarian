@@ -21,6 +21,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 是否需要初始化管理员
+         * @description 控制面 `users` 表为空时返回 `required: true`，前端据此把首次访问引导到 `/setup`；
+         *     创建唯一管理员后永久返回 `false`。公开端点，无需会话。
+         */
+        get: operations["getSetupStatus"];
+        put?: never;
+        /**
+         * 创建唯一管理员并直接登录
+         * @description 仅在 `users` 表为空时可用。成功后返回 `201`、创建出的管理员，并**直接下发会话 cookie**
+         *     （与 `POST /v1/auth/login` 同一套 cookie），前端创建完即可进入后台。
+         *     已初始化时返回 `410`，不再重建、也不覆盖现有账号。公开端点，无需会话。
+         */
+        post: operations["createFirstAdmin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/versions": {
         parameters: {
             query?: never;
@@ -156,7 +183,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 登录（换取 session cookie） */
+        /**
+         * 登录（换取 session cookie）
+         * @description 用户名不存在、密码错误、账号被禁用一律返回同一个 `401` 与同一句文案，
+         *     不暴露「用户是否存在」。成功后更新 `last_login_at` 并下发新的会话 cookie。
+         */
         post: operations["login"];
         delete?: never;
         options?: never;
@@ -173,7 +204,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 注销当前会话 */
+        /**
+         * 注销当前会话
+         * @description 删除服务端会话行并清除 cookie。登出后同一个 cookie 再用即 401；
+         *     没有有效会话时同样返回 401（调用方可以忽略并直接跳登录页）。
+         */
         post: operations["logout"];
         delete?: never;
         options?: never;
@@ -619,6 +654,14 @@ export interface components {
             username: string;
             password: string;
         };
+        SetupStatus: {
+            /** @description 控制面还没有任何用户，需要先创建管理员 */
+            required: boolean;
+        };
+        SetupRequest: {
+            username: string;
+            password: string;
+        };
         User: {
             id: string;
             username: string;
@@ -770,8 +813,29 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
-        /** @description 未认证 */
+        /**
+         * @description 未认证：缺少/过期/已注销的会话 cookie，或登录凭据不正确。
+         *     登录失败的 `detail` 恒定，不区分「用户不存在」与「密码错误」。
+         */
         Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description 已认证但无权访问（例如 `user` 访问 `/v1/admin/*`） */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description 已完成初始化：唯一管理员已存在，不再开放 setup */
+        SetupCompleted: {
             headers: {
                 [name: string]: unknown;
             };
@@ -825,6 +889,57 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    getSetupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupStatus"];
+                };
+            };
+        };
+    };
+    createFirstAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupRequest"];
+            };
+        };
+        responses: {
+            /** @description 已创建并登录 */
+            201: {
+                headers: {
+                    /**
+                     * @description `mc_librarian_session`，HttpOnly + SameSite=Lax；`Secure` 由服务端配置
+                     *     `MC_LIBRARIAN_COOKIE_SECURE` 控制（本地 http 为 false，生产为 true）
+                     */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            410: components["responses"]["SetupCompleted"];
+            422: components["responses"]["BadRequest"];
         };
     };
     listVersions: {
@@ -1039,7 +1154,11 @@ export interface operations {
             /** @description OK */
             200: {
                 headers: {
-                    /** @description HttpOnly + Secure + SameSite=Lax，有效期见设置 */
+                    /**
+                     * @description `mc_librarian_session`，HttpOnly + SameSite=Lax；`Secure` 由服务端配置
+                     *     `MC_LIBRARIAN_COOKIE_SECURE` 控制（本地 http 为 false，生产为 true），
+                     *     有效期见服务端 `session_ttl_hours`
+                     */
                     "Set-Cookie"?: string;
                     [name: string]: unknown;
                 };
@@ -1066,6 +1185,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            401: components["responses"]["Unauthorized"];
         };
     };
     getMe: {

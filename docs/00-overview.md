@@ -77,15 +77,21 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 
 | 表 | 关键字段 |
 |---|---|
+| `schema_version` | version, applied_at（迁移记账，启动时幂等补齐） |
 | `users` | id, username, password_hash, role(admin/user), enabled, created_by, last_login_at |
 | `pats` | id, user_id, name, token_hash, prefix, expires_at, last_used_at, revoked_at |
 | `invites` | id, user_id, token_hash, expires_at, used_at |
-| `sessions` | id, user_id, expires_at, ip, user_agent |
+| `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
 | `jobs` | id, kind, version, status, stage, progress, error, created_by, timestamps |
 | `job_logs` | id, job_id, ts, level, message |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
 | `audit` | id, actor_id, action, target, detail_json, ip, created_at |
 | `settings` | key, value_json, encrypted |
+
+迁移机制刻意做得很薄（只用标准库 `sqlite3`，不引入 ORM）：`schema_version` 表记已应用的版本号，
+每个迁移就是「版本号 + 一组 `CREATE ... IF NOT EXISTS`」，启动时按序补齐未应用的版本，因此重启幂等，
+后续 ticket 加表只需在 `apps/api/src/mc_librarian/db.py` 的 `MIGRATIONS` 末尾追加一条。
+密码存 **argon2id** 哈希，会话表只存 cookie token 的 **sha256**。
 
 ### 5.2 单版本索引 `db/<version>.sqlite`
 

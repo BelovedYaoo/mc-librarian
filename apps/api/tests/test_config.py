@@ -91,3 +91,24 @@ def test_settings_host_and_port_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert settings.host == "127.0.0.1"
     assert settings.port == 8787
+
+
+def test_cookie_secure_defaults_to_false_for_local_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认必须是 false：本地 http 下 Secure 会让浏览器直接丢掉 cookie。"""
+    monkeypatch.delenv("MC_LIBRARIAN_COOKIE_SECURE", raising=False)
+
+    assert Settings().cookie_secure is False
+
+
+def test_cookie_secure_env_var_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MC_LIBRARIAN_COOKIE_SECURE", "true")
+
+    assert Settings().cookie_secure is True
+
+
+def test_session_ttl_defaults_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MC_LIBRARIAN_SESSION_TTL_HOURS", raising=False)
+    assert Settings().session_ttl_hours == 168
+
+    monkeypatch.setenv("MC_LIBRARIAN_SESSION_TTL_HOURS", "24")
+    assert Settings().session_ttl_hours == 24
