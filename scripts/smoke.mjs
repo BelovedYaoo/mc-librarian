@@ -16,6 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 import { waitForHealth } from './lib/health.mjs';
 import { killTree } from './lib/process.mjs';
 import { venvPython } from './lib/python.mjs';
+import { withDevSecret } from './lib/secret.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const API_DIR = join(ROOT, 'apps', 'api');
@@ -201,13 +202,13 @@ console.log(`\u001b[36m==>\u001b[0m 临时数据根 ${DATA_DIR}\n`);
 
 spawnLogged('api', '\u001b[32m', python, ['-m', 'mc_librarian'], {
   cwd: API_DIR,
-  env: {
+  env: withDevSecret({
     ...process.env,
     MC_LIBRARIAN_HOST: HOST,
     MC_LIBRARIAN_PORT: PORT,
     MC_LIBRARIAN_DATA_DIR: DATA_DIR,
     MC_LIBRARIAN_COOKIE_SECURE: 'false',
-  },
+  }),
 });
 
 spawnLogged('web', '\u001b[35m', BUN, ['run', 'dev'], {

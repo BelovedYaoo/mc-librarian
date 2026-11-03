@@ -2,8 +2,8 @@
 
 三条硬约束（规格补充 §3–§7）：
 
-1. **阈值只从环境配置读**，入口是 `config.resolve_alerts_config`（`#11` 落地后在那里加
-   数据库覆盖，本模块不动）；
+1. **阈值读取收敛在 `config.resolve_alerts_config`**（`#11` 之后带数据库覆盖：设置页写进
+   `settings` 表的值优先于环境配置），本模块只调它，不自己拼阈值；
 2. **同日同指标只告警一次**：`alert_events` 的 `UNIQUE(day, metric)` 配
    `INSERT ... ON CONFLICT DO NOTHING` + `rowcount` 判定，不先查后写；
 3. **不阻断请求**：`schedule` 把检查丢到后台线程，调用方（`/v1/ask`、`GET /v1/admin/usage`）
@@ -64,17 +64,18 @@ def _run(database: Database, settings: Settings) -> None:
 
 def check(database: Database, settings: Settings) -> None:
     """检查当天的 token 数与成本是否超过阈值；超过且当天该指标还没告警过就推 Webhook。"""
-    config = resolve_alerts_config(settings)
-
-    if config.webhook_url is None:
-        # 没有投递目标：连检查都省了（阈值配着但没有 Webhook，等于没配）。
-        logger.debug("未配置告警 Webhook，跳过用量告警检查")
-
-        return
-
     day = usage.local_day()
 
     with database.connect() as conn:
+        # 带连接解析：设置页写进 `settings` 表的阈值覆盖优先于环境配置（#11）。
+        config = resolve_alerts_config(settings, conn)
+
+        if config.webhook_url is None:
+            # 没有投递目标：连检查都省了（阈值配着但没有 Webhook，等于没配）。
+            logger.debug("未配置告警 Webhook，跳过用量告警检查")
+
+            return
+
         totals = usage.day_totals(conn, day=day)
 
         for metric, value, threshold in (

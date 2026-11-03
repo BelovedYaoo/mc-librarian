@@ -38,6 +38,7 @@ cd apps/api
 | `MC_LIBRARIAN_PORT` | `8787` | 监听端口（与 `docs/openapi.yaml` 的本地 server 一致） |
 | `MC_LIBRARIAN_ENV` | `dev` | `dev` / `production`。`production` 下会启用 cookie 硬性护栏（见下） |
 | `MC_LIBRARIAN_COOKIE_SECURE` | `false` | 会话 cookie 的 `Secure` 属性。本地是 http，置 true 会让浏览器直接丢弃 cookie；**生产必须 true** |
+| `MC_LIBRARIAN_SECRET` | 空（**必填**） | `settings` 表里密钥值的 AES-GCM 主密钥（至少 16 个字符）。缺失/过短时**启动即失败**；本地 `bun run dev` / `bun run smoke` 会补一个固定的开发默认值，生产必须显式设置（见下） |
 | `MC_LIBRARIAN_SESSION_TTL_HOURS` | `168` | 会话有效期（小时） |
 | `MC_LIBRARIAN_INVITE_TTL_HOURS` | `48` | 一次性邀请链接的有效期（小时） |
 | `MC_LIBRARIAN_JAVA` | `java` | 跑 Vineflower / SpecialSource 用的 `java` 可执行文件 |
@@ -49,6 +50,13 @@ cd apps/api
 生产护栏：`MC_LIBRARIAN_ENV=production` 而 `MC_LIBRARIAN_COOKIE_SECURE` 仍为 false 时，
 进程**启动即失败**并提示需要开 `Secure`——避免公网部署把会话 cookie 裸跑在 http 上。
 本地开发不要设 `MC_LIBRARIAN_ENV=production`。
+
+主密钥：`settings` 表里的 `llm.api_key` / `alerts.webhook_url` 用 AES-GCM 加密，主密钥来自
+`MC_LIBRARIAN_SECRET`（至少 16 个字符），**缺失或过短时进程启动即失败**——自动生成并落盘会让
+重启后旧密文解不开（见 `src/mc_librarian/secretbox.py`）。本地开发与冒烟测试不需要真实的密钥
+材料，所以 `bun run dev` / `bun run smoke` 在环境里没有它时会补一个**固定的开发默认值**并在
+日志里明确打印一行提示（不静默注入）；**生产必须显式设置**，且不能用那个写在仓库里的开发
+默认值——谁都能拿它解开用它加密的密文。
 
 ## 接口
 

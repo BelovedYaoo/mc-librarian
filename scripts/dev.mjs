@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { waitForHealth } from './lib/health.mjs';
 import { killTree } from './lib/process.mjs';
 import { venvPython } from './lib/python.mjs';
+import { withDevSecret } from './lib/secret.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const API_DIR = join(ROOT, 'apps', 'api');
@@ -80,7 +81,7 @@ console.log(`\u001b[36mapi\u001b[0m http://${HOST}:${PORT}   \u001b[36mweb\u001b
 
 spawnLogged('api', '\u001b[32m', venvPython(API_DIR), ['-m', 'mc_librarian', '--reload'], {
   cwd: API_DIR,
-  env: { ...process.env, MC_LIBRARIAN_HOST: HOST, MC_LIBRARIAN_PORT: PORT },
+  env: withDevSecret({ ...process.env, MC_LIBRARIAN_HOST: HOST, MC_LIBRARIAN_PORT: PORT }),
 });
 
 spawnLogged('web', '\u001b[35m', BUN, ['run', 'dev'], {

@@ -360,8 +360,12 @@ def test_cli_measures_tool_steps_when_llm_configured(
 ) -> None:
     """配了 LLM：走 `/v1/ask` 的循环，按每题的工具调用轮数取平均。"""
     settings = make_settings(tmp_path / "data", llm=True)
+    # 步数取服务端设置（也是 `/v1/ask` 在 `AskRequest` 省略 `max_steps` 时用的值）。用非默认值
+    # 才看得出不是硬编码的 6；而 `AskRequest.max_steps` 本身是 `None`，拿它当整数用会崩在
+    # `range(None)` 上（#11 去掉了契约里的 default）。
+    settings.ask_max_steps = 3
     build_fixture_index(settings.data_dir)
-    # 每次都要求调一次 search：循环跑满 max_steps（6 轮）后强制收尾。
+    # 每次都要求调一次 search：循环跑满 max_steps（3 轮）后强制收尾。
     fake_chat.always_tools = tool_call("search", query="Mob")["tool_calls"]
     out_dir = tmp_path / "out"
 
@@ -369,8 +373,19 @@ def test_cli_measures_tool_steps_when_llm_configured(
 
     payload = json.loads((out_dir / f"eval-{VERSION}.json").read_text(encoding="utf-8"))
     assert payload["has_llm_metrics"] is True
-    assert payload["metrics"]["mean_tool_steps"] == 6.0
-    assert [item["tool_steps"] for item in payload["questions"]] == [6, 6, 6]
+    assert payload["metrics"]["mean_tool_steps"] == 3.0
+    assert [item["tool_steps"] for item in payload["questions"]] == [3, 3, 3]
+
+
+def _markdown_without_generated_at(run_dir: Path) -> str:
+    """markdown 报告去掉 `- 生成时间：` 一行后的正文。
+
+    `generated_at` 是秒级时间戳，每次运行都不同——它不是稳定性的一部分，两次运行跨过一秒
+    边界时整文件比较会假红（实测约 50%）。其余行逐字节比较，指标漂移照样能抓到。
+    """
+    lines = (run_dir / f"eval-{VERSION}.md").read_text(encoding="utf-8").splitlines()
+
+    return "\n".join(line for line in lines if not line.startswith("- 生成时间："))
 
 
 def test_cli_results_are_identical_on_two_runs(
@@ -390,9 +405,11 @@ def test_cli_results_are_identical_on_two_runs(
     assert [item["hits"] for item in first["questions"]] == [
         item["hits"] for item in second["questions"]
     ]
-    assert (tmp_path / "run-1" / f"eval-{VERSION}.md").read_text(encoding="utf-8") == (
-        tmp_path / "run-2" / f"eval-{VERSION}.md"
-    ).read_text(encoding="utf-8")
+    # markdown 侧只排除 `- 生成时间：` 一行（`generated_at` 每次运行都不同，不是稳定性的一部分）；
+    # JSON 侧本来就只比 `metrics` 与逐题 `hits`，从不比整份文档，同样没把时间戳算进去。
+    assert _markdown_without_generated_at(tmp_path / "run-1") == _markdown_without_generated_at(
+        tmp_path / "run-2"
+    )
 
 
 def test_cli_exits_2_when_index_missing(

@@ -8,9 +8,9 @@ import pytest
 from pydantic import ValidationError
 
 from mc_librarian.config import (
-    ALERT_DAILY_COST_THRESHOLD_ENV,
-    ALERT_DAILY_TOKEN_THRESHOLD_ENV,
-    ALERT_WEBHOOK_URL_ENV,
+    ALERTS_DAILY_COST_THRESHOLD_ENV,
+    ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
+    ALERTS_WEBHOOK_URL_ENV,
     DATA_DIR_ENV,
     DATA_DIR_NAME,
     Settings,
@@ -169,9 +169,9 @@ def test_unknown_env_is_rejected(tmp_path: Path) -> None:
 def test_alerts_default_to_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """#12：默认没有 Webhook、阈值为 0（不告警）。"""
     for name in (
-        ALERT_WEBHOOK_URL_ENV,
-        ALERT_DAILY_TOKEN_THRESHOLD_ENV,
-        ALERT_DAILY_COST_THRESHOLD_ENV,
+        ALERTS_WEBHOOK_URL_ENV,
+        ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
+        ALERTS_DAILY_COST_THRESHOLD_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -183,10 +183,10 @@ def test_alerts_default_to_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 
 def test_resolve_alerts_config_reads_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """阈值与 Webhook 地址都从 `MC_LIBRARIAN_ALERT_*` 读（`#11` 落地前只有这一条来源）。"""
-    monkeypatch.setenv(ALERT_WEBHOOK_URL_ENV, "https://hook.example/alerts")
-    monkeypatch.setenv(ALERT_DAILY_TOKEN_THRESHOLD_ENV, "1000000")
-    monkeypatch.setenv(ALERT_DAILY_COST_THRESHOLD_ENV, "5.5")
+    """阈值与 Webhook 地址从 `MC_LIBRARIAN_ALERTS_*` 读（库里有覆盖时优先，见 test_settings）。"""
+    monkeypatch.setenv(ALERTS_WEBHOOK_URL_ENV, "https://hook.example/alerts")
+    monkeypatch.setenv(ALERTS_DAILY_TOKEN_THRESHOLD_ENV, "1000000")
+    monkeypatch.setenv(ALERTS_DAILY_COST_THRESHOLD_ENV, "5.5")
 
     config = resolve_alerts_config(Settings(data_dir=tmp_path / "data"))
 

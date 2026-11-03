@@ -343,12 +343,13 @@ def test_webhook_url_is_write_only_and_encrypted(
 def test_resolve_alerts_config_reads_database_overrides(
     admin_client: TestClient, conn: sqlite3.Connection, settings: Settings
 ) -> None:
-    """`resolve_alerts_config(settings, conn)` 是 `#12` 的入口：带数据库覆盖，未配置留 None。"""
+    """`resolve_alerts_config(settings, conn)` 是 `#12` 的入口：带数据库覆盖，未配置的阈值是 0。"""
     empty = resolve_alerts_config(settings, conn)
 
     assert empty.webhook_url is None
-    assert empty.daily_token_threshold is None
-    assert empty.daily_cost_threshold_usd is None
+    assert empty.daily_token_threshold == 0
+    assert empty.daily_cost_threshold_usd == 0.0
+    assert empty == resolve_alerts_config(settings), "库里没有覆盖时，带 conn 与不带 conn 等价"
 
     put(
         admin_client,
@@ -359,7 +360,7 @@ def test_resolve_alerts_config_reads_database_overrides(
 
     assert configured.webhook_url == WEBHOOK_URL
     assert configured.daily_token_threshold == 500_000
-    assert configured.daily_cost_threshold_usd is None, "没配的阈值保持 None，不编 0"
+    assert configured.daily_cost_threshold_usd == 0.0, "没配的阈值归一成 0（≤ 0 即不告警）"
 
 
 # ----------------------------------------------------------------------
@@ -428,9 +429,9 @@ def test_llm_config_change_takes_effect_immediately(
 def test_ask_request_uses_server_side_defaults(
     admin_client: TestClient, settings: Settings, conn: sqlite3.Connection, fake_chat: FakeChat
 ) -> None:
-    """`AskRequest` 省略 `max_steps` 时用设置页的值（不是硬编码的 6）。"""
+    """`AskRequest` 省略这两个字段时用设置页的值（不是硬编码的 6 / 8000）。"""
     register_fixture_index(settings, conn)
-    put(admin_client, {"ask": {"max_steps": 2}})
+    put(admin_client, {"ask": {"max_steps": 2, "max_answer_tokens": 1500}})
     fake_chat.always_tools = tools_of(tool_call("search", query="Mob", detail="locate"))
 
     response = admin_client.post("/v1/ask", json={"question": "Mob", "version": VERSION})
@@ -442,6 +443,8 @@ def test_ask_request_uses_server_side_defaults(
 
     assert len(executed) == 2, "跑满 2 步就强制收尾（用硬编码的 6 会是 6 步）"
     assert events[-1]["reason"] == "max_steps"
+    # 两次带工具的调用 + 一次强制收尾，`max_answer_tokens` 每次都取设置页的值。
+    assert [call["max_tokens"] for call in fake_chat.calls] == [1500, 1500, 1500]
 
 
 # ----------------------------------------------------------------------

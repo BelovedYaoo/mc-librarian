@@ -228,7 +228,10 @@ curl -s -X POST https://mc-librarian.belovedyaoo.top/v1/admin/versions \
   ```
 
 - 主密钥缺失：`settings` 表里的密钥用 AES-GCM 加密，缺 `MC_LIBRARIAN_SECRET`（或短于 16 字符）
-  时进程启动即失败并提示怎么设。它**不能临时生成**——生成后重启，库里已存的密文就解不开了：
+  时进程启动即失败并提示怎么设。它**不能临时生成**——生成后重启，库里已存的密文就解不开了。
+  本地开发与冒烟测试不需要真实的密钥材料，`scripts/dev.mjs` / `scripts/smoke.mjs` 在环境里
+  没有它时会补一个**固定的开发默认值**并在日志里明确打印一行提示（不静默注入）；
+  **生产必须显式设置**（§3.3），不能用那个写在仓库里的开发默认值：
 
   ```
   缺少主密钥 MC_LIBRARIAN_SECRET（至少 16 个字符）：`settings` 表里的密钥（`llm.api_key` /

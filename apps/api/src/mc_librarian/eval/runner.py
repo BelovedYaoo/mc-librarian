@@ -7,7 +7,8 @@
   ok/hits；`context_budget` 伪事件也不算）；
 - 没配 `MC_LIBRARIAN_LLM_*` 时不碰 LLM，第三个指标如实记成「未测」，其余指标与报告照常出。
 
-配了 LLM 时每题跑一次问答（30 题最多 30 次循环、每次最多 `AskRequest.max_steps` 轮）。
+配了 LLM 时每题跑一次问答（30 题最多 30 次循环、每次最多 `settings.ask.max_steps` 轮，
+即 `AskRequest.max_steps` 省略时服务端用的那个值）。
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from mc_librarian.eval.report import (
 from mc_librarian.indexing import query
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.retrieval import search
-from mc_librarian.schemas import AskRequest, SearchRequest
+from mc_librarian.schemas import SearchRequest
 
 # 没配 LLM 时写进报告的未测原因（规格 §3 定死的文案）。
 UNTESTED_LLM_REASON: Final = "未测（需配置 MC_LIBRARIAN_LLM_*）"
@@ -159,15 +160,16 @@ async def _measure_steps(
     counts: list[int] = []
 
     for question in questions:
-        # 步数与答案上限取契约 `AskRequest` 的默认值，避免和 `/v1/ask` 各自维护一套常数。
-        request = AskRequest(question=question.question, version=version)
+        # 步数与答案上限用服务端设置（`settings.ask.max_steps` / `max_answer_tokens`，也是
+        # `/v1/ask` 在 `AskRequest` 省略这两个字段时用的值）：契约里的 `AskRequest.max_steps`
+        # 是 `int | None`（#11 去掉了 default），拿它当整数用会崩在 `range(None)` 上。
         run = AskRun(
             client=client,
             toolbox=toolbox,
             question=question.question,
             version=version,
-            max_steps=request.max_steps,
-            max_answer_tokens=request.max_answer_tokens,
+            max_steps=settings.ask_max_steps,
+            max_answer_tokens=settings.ask_max_answer_tokens,
             max_context_tokens=settings.ask_max_context_tokens,
             timeout_s=float(settings.ask_timeout_s),
             llm_timeout_s=settings.llm_timeout_s,

@@ -427,8 +427,8 @@ def test_ask_returns_ok_when_alert_webhook_fails(
     usage_rows: Any,
 ) -> None:
     """#12 验收第 4 条：超阈值不阻断请求——Webhook 抛异常时 `/v1/ask` 仍正常返回并记账。"""
-    settings.alert_webhook_url = "https://hook.invalid/alerts"
-    settings.alert_daily_token_threshold = 1
+    settings.alerts_webhook_url = "https://hook.invalid/alerts"
+    settings.alerts_daily_token_threshold = 1
     fake_chat.script = [final_answer("答案。")]
 
     def boom(url: str, payload: dict[str, object], timeout: float) -> None:

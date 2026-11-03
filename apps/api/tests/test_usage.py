@@ -290,8 +290,8 @@ def webhook(monkeypatch: pytest.MonkeyPatch) -> RecordingWebhook:
 
 def alert_settings(settings: Settings, **overrides: Any) -> Settings:
     """打开告警并把阈值调到测试值（默认只开 token 阈值）。"""
-    settings.alert_webhook_url = "https://hook.invalid/alerts"
-    settings.alert_daily_token_threshold = 100
+    settings.alerts_webhook_url = "https://hook.invalid/alerts"
+    settings.alerts_daily_token_threshold = 100
 
     for key, value in overrides.items():
         setattr(settings, key, value)
@@ -333,7 +333,7 @@ def test_alert_fires_once_per_day_and_metric(
 
     assert len(webhook.calls) == 1
     call = webhook.calls[0]
-    assert call["url"] == settings.alert_webhook_url
+    assert call["url"] == settings.alerts_webhook_url
     assert call["timeout"] == alerts.WEBHOOK_TIMEOUT_S
     assert call["payload"] == {
         "day": usage.local_day(),
@@ -356,7 +356,7 @@ def test_alert_fires_per_metric(
 ) -> None:
     """两个指标各自去重：token 告警过不影响成本告警。"""
     insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=150, cost=3.0)
-    alert_settings(settings, alert_daily_cost_threshold_usd=1.0)
+    alert_settings(settings, alerts_daily_cost_threshold_usd=1.0)
 
     alerts.check(database_of(client), settings)
 
@@ -376,9 +376,9 @@ def test_alert_skips_non_positive_thresholds(
 ) -> None:
     """规格 §3：阈值 ≤ 0 表示该指标不告警。"""
     insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=10**9, cost=100.0)
-    settings.alert_webhook_url = "https://hook.invalid/alerts"
-    settings.alert_daily_token_threshold = 0
-    settings.alert_daily_cost_threshold_usd = 0.0
+    settings.alerts_webhook_url = "https://hook.invalid/alerts"
+    settings.alerts_daily_token_threshold = 0
+    settings.alerts_daily_cost_threshold_usd = 0.0
 
     alerts.check(database_of(client), settings)
 
@@ -411,8 +411,8 @@ def test_alert_skips_when_webhook_missing(
 ) -> None:
     """阈值配了但没有 Webhook 地址：没有投递目标，不发也不记。"""
     insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=150)
-    settings.alert_webhook_url = "   "
-    settings.alert_daily_token_threshold = 100
+    settings.alerts_webhook_url = "   "
+    settings.alerts_daily_token_threshold = 100
 
     alerts.check(database_of(client), settings)
 

@@ -49,10 +49,11 @@ LLM_API_KEY_ENV: Final = "MC_LIBRARIAN_LLM_API_KEY"
 LLM_INPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M"
 LLM_OUTPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M"
 
-# 用量告警（#12）的环境变量。阈值 ≤ 0 表示该指标不告警（默认 0，即默认不告警）。
-ALERT_WEBHOOK_URL_ENV: Final = "MC_LIBRARIAN_ALERT_WEBHOOK_URL"
-ALERT_DAILY_TOKEN_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERT_DAILY_TOKEN_THRESHOLD"
-ALERT_DAILY_COST_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERT_DAILY_COST_THRESHOLD_USD"
+# 用量告警（#12）的环境变量，名字与契约块 `Settings.alerts` 对齐（`MC_LIBRARIAN_` 前缀由
+# `Settings` 补）。阈值 ≤ 0 表示该指标不告警（默认 0，即默认不告警）。
+ALERTS_WEBHOOK_URL_ENV: Final = "MC_LIBRARIAN_ALERTS_WEBHOOK_URL"
+ALERTS_DAILY_TOKEN_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_TOKEN_THRESHOLD"
+ALERTS_DAILY_COST_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHOLD_USD"
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -162,12 +163,6 @@ class Settings(BaseSettings):
     llm_input_price_per_m: float | None = None
     llm_output_price_per_m: float | None = None
 
-    # 用量告警（#12）：超阈值推一条 Webhook，**不设自动预算上限**（D23）。
-    # 阈值 ≤ 0（默认）表示该指标不告警；未配 Webhook 时也不检查。
-    alert_webhook_url: str | None = None
-    alert_daily_token_threshold: int = Field(default=0, ge=0)
-    alert_daily_cost_threshold_usd: float = Field(default=0.0, ge=0)
-
     # 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）：关掉后 `POST /v1/admin/jobs` 返回 403。
     # 完整五段（下载 + 反编译 + 全树解析）跑在服务进程内，反编译一个版本要 3–4 GiB；
     # 生产节点内存不够，所以在节点上设 false，索引在本地工作站产出后用
@@ -175,8 +170,9 @@ class Settings(BaseSettings):
     # 契约里 `settings.index.enabled` 标成只读：它是部署级配置，只能改环境变量。
     index_enabled: bool = True
 
-    # 用量告警（`#12` 读它）：超阈值只推 Webhook，不自动暂停服务。未配置的阈值保持 None
-    # （「没配」和「配成 0」是两回事），由 `resolve_alerts_config` 整理后交给 #12。
+    # 用量告警（`#12` 读它）：超阈值只推 Webhook，不自动暂停服务（D23，不设自动预算上限）。
+    # 契约里「未配置」用 `None`（`GET /v1/admin/settings` 整字段省略），阈值下限是 1 / > 0；
+    # `resolve_alerts_config` 把 `None` 归一成 0（≤ 0 即不告警）再交给 #12。
     alerts_webhook_url: str | None = None
     alerts_daily_token_threshold: int | None = Field(default=None, ge=1)
     alerts_daily_cost_threshold_usd: float | None = Field(default=None, gt=0)
@@ -237,11 +233,14 @@ class LlmConfig:
 
 @dataclass(frozen=True)
 class AlertsConfig:
-    """用量告警配置（`#12` 读它）：未配置的阈值是 `None`，不是 0。"""
+    """用量告警配置（`#12` 读它）。
+
+    阈值 ≤ 0 表示该指标不告警；`webhook_url` 为空表示没有投递目标。
+    """
 
     webhook_url: str | None
-    daily_token_threshold: int | None
-    daily_cost_threshold_usd: float | None
+    daily_token_threshold: int
+    daily_cost_threshold_usd: float
 
 
 @dataclass(frozen=True)
@@ -291,8 +290,11 @@ def resolve_alerts_config(
     """用量告警配置（`#12` 的入口）：数据库覆盖 + 环境配置兜底。
 
     给了 `conn`（控制面连接）就连同 `settings` 表里的覆盖一起解析，否则只用传进来的
-    `Settings`（环境配置，或已叠好覆盖的 `effective_settings` 结果）——两种调法等价。
-    未配置的字段保持 `None`：`#12` 据此判断「这个阈值要不要告警」，不编 0 之类的假值。
+    `Settings`（环境配置，或已叠好覆盖的 `effective_settings` 结果）——库里没有覆盖时两种调法等价。
+
+    契约里「未配置」的阈值是 `None`（`GET /v1/admin/settings` 整字段省略），这里统一成 `0`：
+    `#12` 的口径是「阈值 ≤ 0 表示该指标不告警」，「没配」与「0」是同一件事，
+    不再让 `None` 流到调用方，免得每处各自判一遍。
     """
     if conn is not None:
         # 局部导入：只有真的要从库里读覆盖时才需要 `settings_store`（它连带 `db`/`audit`），
@@ -303,8 +305,8 @@ def resolve_alerts_config(
 
     return AlertsConfig(
         webhook_url=_blank_to_none(settings.alerts_webhook_url),
-        daily_token_threshold=settings.alerts_daily_token_threshold,
-        daily_cost_threshold_usd=settings.alerts_daily_cost_threshold_usd,
+        daily_token_threshold=settings.alerts_daily_token_threshold or 0,
+        daily_cost_threshold_usd=settings.alerts_daily_cost_threshold_usd or 0.0,
     )
 
 
@@ -324,25 +326,3 @@ def resolve_llm_pricing(settings: Settings) -> LlmPricing:
 def pricing_configured(settings: Settings) -> bool:
     """是否配了**有效**单价（> 0）。未配时 `cost_usd` 恒为 0（只记 token），用量页据此标注口径。"""
     return bool(settings.llm_input_price_per_m or settings.llm_output_price_per_m)
-
-
-@dataclass(frozen=True)
-class AlertsConfig:
-    """用量告警配置；阈值 ≤ 0 表示该指标不告警，`webhook_url` 为空表示没有投递目标。"""
-
-    webhook_url: str | None
-    daily_token_threshold: int
-    daily_cost_threshold_usd: float
-
-
-def resolve_alerts_config(settings: Settings) -> AlertsConfig:
-    """用量告警阈值的**唯一**读取入口（#11 落地后把「数据库覆盖」加进这里，调用点不动）。
-
-    本票只从环境配置读（`MC_LIBRARIAN_ALERT_*`，经 `Settings` 的 `MC_LIBRARIAN_` 前缀映射）。
-    空白的 Webhook 地址按「未配置」处理，避免配了个空格就当有投递目标。
-    """
-    return AlertsConfig(
-        webhook_url=(settings.alert_webhook_url or "").strip() or None,
-        daily_token_threshold=settings.alert_daily_token_threshold,
-        daily_cost_threshold_usd=settings.alert_daily_cost_threshold_usd,
-    )
