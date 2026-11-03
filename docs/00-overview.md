@@ -82,7 +82,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `pats` | id, user_id, name, token_hash, prefix, expires_at, last_used_at, revoked_at |
 | `invites` | id, user_id, token_hash, expires_at, used_at |
 | `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
-| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`#4` 的 `stage` 只取 parse/summarize/finalize） |
+| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；`#4` 用后三段，`#21` 补前两段） |
 | `job_logs` | id, job_id, ts, level, message |
 | `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，不改已注册行） |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |

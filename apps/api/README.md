@@ -29,6 +29,10 @@ cd apps/api
 | `MC_LIBRARIAN_COOKIE_SECURE` | `false` | 会话 cookie 的 `Secure` 属性。本地是 http，置 true 会让浏览器直接丢弃 cookie；**生产必须 true** |
 | `MC_LIBRARIAN_SESSION_TTL_HOURS` | `168` | 会话有效期（小时） |
 | `MC_LIBRARIAN_INVITE_TTL_HOURS` | `48` | 一次性邀请链接的有效期（小时） |
+| `MC_LIBRARIAN_JAVA` | `java` | 跑 Vineflower / SpecialSource 用的 `java` 可执行文件 |
+| `MC_LIBRARIAN_VINEFLOWER_JAR` | 空 | Vineflower jar 路径（反编译必需） |
+| `MC_LIBRARIAN_SPECIALSOURCE_JAR` | 空 | SpecialSource shaded jar 路径（≤ 1.21.11 的版本 remap 必需） |
+| `MC_LIBRARIAN_DECOMPILE_MEMORY` | `4G` | Vineflower 的 `-Xmx`，形如 `4G` / `512M` |
 
 生产护栏：`MC_LIBRARIAN_ENV=production` 而 `MC_LIBRARIAN_COOKIE_SECURE` 仍为 false 时，
 进程**启动即失败**并提示需要开 `Secure`——避免公网部署把会话 cookie 裸跑在 http 上。
@@ -53,6 +57,29 @@ cd apps/api
 
 控制面数据库 `<data_dir>/control.sqlite` 在启动时自动迁移（`schema_version` 表 + 幂等建表），
 表结构定义见 `src/mc_librarian/db.py`。
+
+## 下载与反编译（issue #21）
+
+把某个版本的官方 client jar 变成一棵只含 `.java` 的源码树：
+
+```bash
+cd apps/api
+# 26.x（Mojang 已不混淆，直接反编译）
+MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
+  .venv/Scripts/python -m mc_librarian fetch --version 26.3 --out ../mc-librarian-data/src/26.3
+
+# ≤ 1.21.11（先下载官方 mappings 并 remap，再反编译）
+MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
+MC_LIBRARIAN_SPECIALSOURCE_JAR=/path/SpecialSource-1.11.5-shaded.jar \
+  .venv/Scripts/python -m mc_librarian fetch --version 1.20.1 --out ../mc-librarian-data/src/1.20.1
+```
+
+安装后也可用 `mc-librarian fetch --version <v> --out <dir>`（同一个入口）。
+
+- jar / mappings / checkpoint 默认缓存在 `<data_dir>/cache/<version>/`（`--cache` 可改）；
+  中断后重跑会跳过已完成的阶段，不重复下载与反编译。
+- 是否 remap 由版本清单里有没有 `client_mappings` 决定，不比较版本号（26.x 与 1.14.4 之前的版本都没有）。
+- 真实链路（联网 + 真反编译）的测试默认跳过：`.venv/Scripts/python -m pytest --run-network`。
 
 ## 校验
 

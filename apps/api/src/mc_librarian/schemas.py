@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 Role = Literal["admin", "user"]
 JobKind = Literal["index"]
 JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
-JobStage = Literal["parse", "summarize", "finalize"]
+JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
 
 __all__ = [

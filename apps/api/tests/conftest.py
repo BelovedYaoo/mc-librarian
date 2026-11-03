@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,6 +20,29 @@ ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin-password-1"
 USER_USERNAME = "worker"
 USER_PASSWORD = "worker-password-1"
+
+NETWORK_ENV = "MC_LIBRARIAN_NETWORK"
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-network",
+        action="store_true",
+        default=False,
+        help="运行标了 @pytest.mark.network 的联网测试（默认跳过）",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """`network` 测试默认跳过：它们会真下载 jar 并跑真反编译，太慢且依赖外网。"""
+    if config.getoption("--run-network") or os.environ.get(NETWORK_ENV) == "1":
+        return
+
+    skip = pytest.mark.skip(reason=f"默认跳过联网测试；加 --run-network 或 {NETWORK_ENV}=1 启用")
+
+    for item in items:
+        if "network" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture
