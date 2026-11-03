@@ -27,6 +27,7 @@ from mc_librarian.db import (
     transaction,
     utc_now,
 )
+from mc_librarian.indexing.build import build_index
 from mc_librarian.indexing.layout import index_path
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
@@ -395,7 +396,8 @@ def test_index_job_lifecycle(
     assert registered["tokens"] > 0
     # parse-only 任务未声明 `obfuscated`：缺省按「已 remap」记录（`#21` 收尾改为 true）。
     assert registered["obfuscated"] is True
-    assert registered["has_summaries"] is False
+    # 任务跑过 `summarize`（#7）：版本行标为已带摘要。
+    assert registered["has_summaries"] is True
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
     assert any("parse" in line["message"] for line in logs)
@@ -778,10 +780,9 @@ def test_runner_requeues_interrupted_running_jobs(settings: Settings, source_dir
         )
         # 模拟「上一次进程在 parse 完成后被杀」：status 停在 running，checkpoint 已落盘。
         # 给了 source_dir，阶段序列从 parse 开始，所以 checkpoint 里只有 parse。
-        # parse 已完成意味着索引库已写出（`_finish` 会断言它存在），一并造出来。
+        # parse 已完成意味着索引库已写出，一并造出一个合法索引（续跑的 `summarize` 会读它）。
         index = index_path(settings.data_dir, "26.3")
-        index.parent.mkdir(parents=True, exist_ok=True)
-        index.write_bytes(b"sqlite")
+        build_index(source_dir, index, log=lambda level, message: None)
         conn.execute(
             "UPDATE jobs SET status = 'running', checkpoint = ? WHERE id = ?",
             (json.dumps({"stages": ["parse"]}), job.id),
@@ -939,18 +940,22 @@ def test_finish_message_reflects_actual_stages(settings: Settings) -> None:
 def test_missing_index_file_fails_job_instead_of_stuck_running(
     settings: Settings, source_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`parse` 写出索引后文件在收尾前消失：任务落到 `failed`，不能永久停在 `running`。"""
+    """索引文件在收尾前消失（`summarize` 之后、`finalize` 之前）：任务落到 `failed`，
+
+    不能永久停在 `running`。这里把删除放在 `summarize` 之后，才能真的走到 `_finish` 的
+    「索引文件缺失」守卫（`summarize` 本身找不到索引时会先报错）。
+    """
     database = Database.for_data_dir(settings.data_dir)
     database.initialize()
 
-    real_parse = runner_module._parse_stage
+    real_summarize = runner_module._summarize_stage
 
-    def parse_then_delete(context: runner_module.JobContext) -> dict[str, Any]:
-        result = real_parse(context)
+    def summarize_then_delete(context: runner_module.JobContext) -> dict[str, Any]:
+        result = real_summarize(context)
         index_path(context.data_dir, context.version).unlink()
         return result
 
-    monkeypatch.setattr(runner_module, "_parse_stage", parse_then_delete)
+    monkeypatch.setattr(runner_module, "_summarize_stage", summarize_then_delete)
 
     with database.connect() as conn, transaction(conn):
         job = store.create(

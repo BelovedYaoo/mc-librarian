@@ -120,11 +120,14 @@ classes(id, file_id, fqn, simple, kind, superclass, interfaces, annotations, sta
 methods(id, class_id, name, signature, return_type, params, modifiers, annotations, start_line, end_line)
 fields(id, class_id, name, type, modifiers, annotations, start_line, end_line)
 refs(id, from_method_id, target_name, kind, line)   -- 启发式；行号 1-based 闭区间
-summaries(fqn, text_zh, keywords, tokens)           -- FTS5, jieba 预分词（#7 追加）
+summaries(id, class_id, fqn, text_zh, keywords, content_hash, tokens, created_at)   -- 类级摘要（#7）
+summaries_fts(fqn, text_zh)   -- FTS5（unicode61），存 jieba 预分词后的 text_zh
 ```
 
 `files.path` 相对 `<data_dir>/src/<version>/`；数组字段（`interfaces`/`annotations`/`params`/`modifiers`）
-存 JSON 文本。`summaries` 由 #7 追加，本阶段不建。
+存 JSON 文本。`summaries` 两张表由 #7 的 `summarize` 阶段创建：普通表记 `content_hash`（幂等），
+FTS5 表存 jieba 预分词结果——`trigram` 对两字词（「刷怪」）不友好，`unicode61` 又不切中文，
+所以入库前切好、查询时对 query 做同样切分。
 
 `summaries.text_zh` 固定 3 行：
 

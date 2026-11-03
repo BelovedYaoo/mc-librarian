@@ -94,7 +94,7 @@ export type SearchResponse =
 /** 一条融合命中；`why` 是来源通道数组。 */
 export type Hit = components['schemas']['Hit'];
 
-/** 命中来源通道（`summary` 由 #7 落地后才会出现）。 */
+/** 命中来源通道（`summary` 需要索引库里有 `summaries_fts`，见 issue #7）。 */
 export type HitChannel = Hit['why'][number];
 
 /** 反查引用的响应体（`GET /v1/references`）。 */

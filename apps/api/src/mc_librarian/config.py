@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
@@ -32,6 +33,11 @@ _REPO_SENTINELS: Final = (Path("package.json"), Path("apps", "api"))
 
 # `-Xmx` 的值：数字 + 单位，避免把任意字符串拼进 java 命令行。
 DECOMPILE_MEMORY_PATTERN: Final = re.compile(r"^\d+[kKmMgG]$")
+
+# 摘要层（#7）的 LLM 配置环境变量（`#11` 未落地，只从环境变量读）。
+LLM_BASE_URL_ENV: Final = "MC_LIBRARIAN_LLM_BASE_URL"
+LLM_MODEL_ENV: Final = "MC_LIBRARIAN_LLM_MODEL"
+LLM_API_KEY_ENV: Final = "MC_LIBRARIAN_LLM_API_KEY"
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -105,6 +111,18 @@ class Settings(BaseSettings):
     specialsource_jar: Path | None = None
     decompile_memory: str = "4G"
 
+    # 中文摘要（#7）：LLM 配置只从环境变量读（`#11` 落地后改为「数据库覆盖 + 环境变量兜底」，
+    # 读取收敛在 `resolve_llm_config` 一个函数里）。未配置时 `summarize` 阶段明确失败，不静默跳过。
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+    # 单次 LLM 请求的超时（秒）。
+    llm_timeout_s: float = Field(default=120.0, gt=0)
+    # 摘要按 package 分批，每批类数（规格 §3 建议 30–50，默认 40）。
+    summary_batch_size: int = Field(default=40, ge=1, le=500)
+    # 摘要生成的并发批次上限（规格 §3 定死 4，用 asyncio 信号量限制）。
+    summary_concurrency: int = Field(default=4, ge=1, le=64)
+
     # 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）：关掉后 `POST /v1/admin/jobs` 返回 403。
     # 完整五段（下载 + 反编译 + 全树解析）跑在服务进程内，反编译一个版本要 3–4 GiB；
     # 生产节点内存不够，所以在节点上设 false，索引在本地工作站产出后用
@@ -153,3 +171,44 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """进程级单例，便于在路由中注入。"""
     return Settings()
+
+
+@dataclass(frozen=True)
+class LlmConfig:
+    """摘要层调用 LLM 需要的最小配置（OpenAI 兼容端点）。"""
+
+    base_url: str
+    model: str
+    api_key: str
+
+
+class LlmConfigError(RuntimeError):
+    """LLM 未配置；`summarize` 阶段把它翻成可操作的失败，不静默跳过。"""
+
+
+def resolve_llm_config(settings: Settings) -> LlmConfig:
+    """摘要层的 LLM 配置入口（`#11` 落地后改「数据库覆盖 + 环境变量兜底」时只改这里）。
+
+    只从环境变量读（`MC_LIBRARIAN_LLM_BASE_URL` / `MC_LIBRARIAN_LLM_MODEL` /
+    `MC_LIBRARIAN_LLM_API_KEY`，经 `Settings` 的 `MC_LIBRARIAN_` 前缀映射）。缺任何一项都
+    抛 `LlmConfigError` 并列出缺哪个——静默跳过会让索引看起来「有摘要」但实际为空。
+    """
+    values = {
+        LLM_BASE_URL_ENV: settings.llm_base_url,
+        LLM_MODEL_ENV: settings.llm_model,
+        LLM_API_KEY_ENV: settings.llm_api_key,
+    }
+    missing = [name for name, value in values.items() if not (value or "").strip()]
+
+    if missing:
+        raise LlmConfigError(
+            "未配置 LLM，请设置 "
+            + " / ".join(missing)
+            + "（OpenAI 兼容端点；`#11` 未落地前只读环境变量）"
+        )
+
+    return LlmConfig(
+        base_url=str(settings.llm_base_url).rstrip("/"),
+        model=str(settings.llm_model),
+        api_key=str(settings.llm_api_key),
+    )

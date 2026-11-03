@@ -139,6 +139,8 @@ export function VersionsView() {
 // ----------------------------------------------------------------------
 
 function VersionRow({ version }: { version: VersionInfo }) {
+  const coverage = coverageLabel(version);
+
   return (
     <Stack spacing={1}>
       <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
@@ -159,8 +161,21 @@ function VersionRow({ version }: { version: VersionInfo }) {
         文件 {version.files.toLocaleString('zh-CN')} · token 估算{' '}
         {version.tokens.toLocaleString('zh-CN')} · 索引于 {formatTime(version.indexed_at)}
       </Typography>
+
+      {coverage && (
+        <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+          摘要覆盖 {coverage}
+        </Typography>
+      )}
     </Stack>
   );
+}
+
+/** 摘要覆盖率（已生成 / 类总数，issue #7 规格 §8）；索引未登记或读不到时返回 null。 */
+function coverageLabel(version: VersionInfo): string | null {
+  if (version.class_count == null) return null;
+
+  return `${(version.summary_count ?? 0).toLocaleString('zh-CN')} / ${version.class_count.toLocaleString('zh-CN')}`;
 }
 
 function formatTime(value: string): string {

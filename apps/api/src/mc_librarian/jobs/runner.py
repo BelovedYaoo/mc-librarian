@@ -25,7 +25,8 @@
 
 `#4`/`#5` 实现 `parse`：就位源码树、tree-sitter 解析、原子写出 `db/<version>.sqlite`；
 `#21` 补上 `download`/`decompile` 两段（实现在 `mc_librarian.fetch.pipeline`，这里只做编排）；
-`summarize`/`finalize` 是占位，见 #7 / #13。
+`#7` 把 `summarize` 接上 LLM（实现在 `mc_librarian.indexing.summarize`）：按类内容哈希幂等、
+按 package 分批并发生成中文摘要；`finalize` 仍是收尾占位。
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from mc_librarian import audit
-from mc_librarian.config import Settings
+from mc_librarian.config import LlmConfigError, Settings, resolve_llm_config
 from mc_librarian.db import Database, transaction
 from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.pipeline import (
@@ -64,6 +65,15 @@ from mc_librarian.indexing.build import (
     source_tree_size_bytes,
 )
 from mc_librarian.indexing.layout import index_path, source_root
+from mc_librarian.indexing.summarize import (
+    FAILURE_SAMPLE,
+    OpenAiCompatClient,
+    SummaryClient,
+    SummaryError,
+    export_summaries,
+    restore_summaries,
+    summarize_index,
+)
 from mc_librarian.jobs import store
 from mc_librarian.schemas import LogLevel
 
@@ -105,10 +115,11 @@ class StageError(RuntimeError):
 
 @dataclass(frozen=True)
 class JobContext:
-    """一个阶段的输入：任务版本 + 参数 + 数据根 + 日志回调 + checkpoint/工具链。
+    """一个阶段的输入：任务版本 + 参数 + 数据根 + 日志回调 + checkpoint/工具链/运行时配置。
 
-    `checkpoint` 与 `tools` 供 `download`/`decompile` 两段使用；`parse` 只需要
-    `version`/`options`/`data_dir`/`log`，parse-only 任务不传 `tools`。
+    `checkpoint` 与 `tools` 供 `download`/`decompile` 两段使用；`settings` 供 `summarize` 读
+    LLM 配置（`#11` 未落地前只从环境变量读）；`parse` 只需要 `version`/`options`/`data_dir`/`log`，
+    parse-only 任务不传 `tools`。
     """
 
     version: str
@@ -117,6 +128,7 @@ class JobContext:
     log: Callable[[LogLevel, str], None]
     checkpoint: Mapping[str, Any] = field(default_factory=dict)
     tools: PipelineTools | None = None
+    settings: Settings | None = None
 
     @property
     def source_dir(self) -> Path | None:
@@ -343,8 +355,8 @@ def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     """执行一个阶段，返回要并入 checkpoint 的产物。
 
     `parse` 由 `mc_librarian.indexing` 实现（就位源码树 → 解析 → 写 `db/<version>.sqlite`）；
-    `download`/`decompile` 交给 `mc_librarian.fetch.pipeline`；
-    `summarize`/`finalize` 待 #7 接真正的流水线，这里只标记完成。
+    `download`/`decompile` 交给 `mc_librarian.fetch.pipeline`；`summarize` 调 LLM 生成中文摘要
+    （`mc_librarian.indexing.summarize`）；`finalize` 待后续 ticket，这里只标记完成。
     未知阶段直接报错，而不是静默返回空产物——否则新增阶段时漏改会产出残缺索引。
     """
     if stage == "parse":
@@ -353,7 +365,10 @@ def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     if stage in FETCH_STAGES:
         return _fetch_stage(stage, context)
 
-    if stage in ("summarize", "finalize"):
+    if stage == "summarize":
+        return _summarize_stage(context)
+
+    if stage == "finalize":
         return {}
 
     raise StageError(f"未知阶段：{stage}")
@@ -394,6 +409,10 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
     源码根固定为 `<data_dir>/src/<version>/`：`options.source_dir` 已经是它就直接解析，
     否则先复制过去。没给 `options.source_dir` 时直接用它——完整五段里 `decompile` 已经把
     源码树写在那里，`place_source_tree` 在源根相同时是 no-op。
+
+    `build_index` 是原子替换整库（#7 的 `summaries` 表也一起没了），所以重建前先把已有摘要
+    搬出来、重建后按 fqn 搬回去：否则「重跑同一个版本」每次都会把摘要清掉重生成，内容哈希
+    幂等就白做了。类被删掉的摘要直接丢弃（不留下指向错误类的行）。
     """
     dest = source_root(context.data_dir, context.version)
     root = context.source_dir or dest
@@ -404,13 +423,21 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
     if root.resolve() != dest.resolve():
         context.log("info", f"parse：源码树就位到 {dest}")
 
+    index = index_path(context.data_dir, context.version)
+    carried = export_summaries(index)
+
     try:
         place_source_tree(root, dest)
-        result = build_index(
-            dest, index_path(context.data_dir, context.version), log=context.log
-        )
+        result = build_index(dest, index, log=context.log)
     except BuildError as error:
         raise StageError(str(error)) from error
+
+    if carried:
+        restored = restore_summaries(index, carried)
+        context.log(
+            "info",
+            f"parse：保留 {restored}/{len(carried)} 条已有摘要（类未变时 summarize 不重新生成）",
+        )
 
     context.log(
         "info",
@@ -424,6 +451,64 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
         "source_size_bytes": result.source_size_bytes,
         "parsed_files": result.parsed,
         "skipped_files": result.skipped,
+    }
+
+
+def _summarize_stage(context: JobContext) -> dict[str, Any]:
+    """生成中文摘要并写回索引库（issue #7）。
+
+    幂等：内容哈希未变的类不重新调 LLM；因此重跑同一个版本（或重试失败任务）只重跑失败的类，
+    不重复计费。类有失败时抛 `StageError`，让任务标 `failed`——但已生成的摘要已经落库，
+    不会被回滚（规格 §5）。LLM 未配置同样在这里明确失败，不静默跳过（规格 §2）。
+    """
+    settings = context.settings
+
+    if settings is None:
+        raise StageError("summarize 阶段缺少运行时配置（Settings）")
+
+    path = index_path(context.data_dir, context.version)
+
+    if not path.is_file():
+        raise StageError(f"索引文件不存在：{path}")
+
+    def client_factory() -> SummaryClient:
+        # 只在确有类要生成时才会被调用（见 `summarize_index`）：全量复用时不要求 LLM 配置。
+        return OpenAiCompatClient(
+            resolve_llm_config(settings), timeout=settings.llm_timeout_s
+        )
+
+    try:
+        stats = asyncio.run(
+            summarize_index(
+                path,
+                client_factory=client_factory,
+                batch_size=settings.summary_batch_size,
+                concurrency=settings.summary_concurrency,
+                log=context.log,
+            )
+        )
+    except (LlmConfigError, SummaryError) as error:
+        raise StageError(str(error)) from error
+    except sqlite3.Error as error:
+        # 索引库不是合法 sqlite（被外部改坏/截断）：当阶段失败，不把异常直接冒到 `_loop`。
+        raise StageError(f"索引库不可读：{path}（{error}）") from error
+
+    covered = stats.generated + stats.reused
+    context.log(
+        "info",
+        f"摘要：生成 {stats.generated}、复用 {stats.reused}、失败 {stats.failed}"
+        f"（覆盖 {covered}/{stats.classes}）",
+    )
+
+    if stats.failed:
+        sample = "；".join(stats.failures[:FAILURE_SAMPLE])
+        raise StageError(f"摘要失败 {stats.failed} 个类（已生成的摘要保留）：{sample}")
+
+    return {
+        "summaries": stats.generated,
+        "summaries_reused": stats.reused,
+        "summary_classes": stats.classes,
+        "summary_failed": stats.failed,
     }
 
 
@@ -572,6 +657,7 @@ class JobRunner:
                 log=lambda level, message: self._log(job_id, level, message),
                 checkpoint=checkpoint,
                 tools=self._tools,
+                settings=self._settings,
             )
 
             try:
@@ -725,6 +811,8 @@ class JobRunner:
                         # parse-only 缺省按「已 remap」记录（见 `resolve_obfuscated`）。
                         obfuscated=resolve_obfuscated(options, checkpoint),
                         source_size_bytes=checkpoint_int(checkpoint, "source_size_bytes"),
+                        # 跑过 `summarize` 才可能真的产出了摘要（#7）。
+                        has_summaries="summarize" in completed,
                         db_path=str(index_file),
                     )
 

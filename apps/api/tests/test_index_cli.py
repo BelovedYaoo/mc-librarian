@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,21 @@ def job_logs(settings: Settings) -> list[str]:
         rows = conn.execute("SELECT message FROM job_logs ORDER BY id").fetchall()
 
     return [str(row["message"]) for row in rows]
+
+
+def files_snapshot(index: Path) -> list[tuple[object, ...]]:
+    """`parse` 的产物（`files` 表）；摘要阶段会写 `created_at`（#7），所以整库字节不再确定。"""
+    conn = sqlite3.connect(f"file:{index}?mode=ro", uri=True)
+
+    try:
+        return [
+            tuple(row)
+            for row in conn.execute(
+                "SELECT path, pkg, loc, tokens FROM files ORDER BY path"
+            )
+        ]
+    finally:
+        conn.close()
 
 
 # ----------------------------------------------------------------------
@@ -386,12 +402,16 @@ def test_force_rebuilds_index(
     source_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--force`：即使索引已存在也重新 `parse`（写临时文件后原子替换，产物字节仍确定）。"""
+    """`--force`：即使索引已存在也重新 `parse`（写临时文件后原子替换，解析产物仍确定）。
+
+    摘要阶段（#7）会写入 `created_at`，整库字节不再逐字节确定；这里比 `parse` 的产物
+    （`files` 表）是否一致。
+    """
     calls = record_stages(monkeypatch)
     index = index_path(settings.data_dir, "26.3")
 
     assert index_cli.main(["--version", "26.3", "--source-dir", str(source_dir)]) == 0
-    first = hashlib.sha256(index.read_bytes()).hexdigest()
+    first = files_snapshot(index)
 
     calls.clear()
     assert (
@@ -399,7 +419,7 @@ def test_force_rebuilds_index(
     )
 
     assert calls == ["parse", "summarize", "finalize"]
-    assert hashlib.sha256(index.read_bytes()).hexdigest() == first
+    assert files_snapshot(index) == first
 
 
 def test_reuse_requires_legal_index(

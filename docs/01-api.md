@@ -64,8 +64,9 @@
 
 字面量通道是 ripgrep 子进程（`--json --max-count 50 --max-columns 200 --max-filesize 2M --no-ignore`，
 超时 5 秒）；超时或不可用时该路返回空并写 `warn`，不影响另外几路。引用通道在 query 命中某个符号名时
-反查 `refs` 表；摘要通道本票只留接口（`summaries` 表由 #7 建，不存在时返回空、不报错；表在但不是
-FTS5、或 query 含 FTS 语法（`"`、`*`、`-`……）时同样返回空并写 `warn`，不把该路的问题升级成 500）。
+反查 `refs` 表；摘要通道查 `summaries_fts`（`#7` 建，FTS5；表不存在时返回空、不报错；表在但不是 FTS5、
+或 query 分词后仍含 FTS 语法（`"`、`*`、`-`……）时同样返回空并写 `warn`，不把该路的问题升级成 500）。
+query 与入库时一样先过 jieba 分词，否则两字词（「刷怪」）命中不了。
 
 ### 4.2 `GET /v1/symbol`
 
@@ -132,7 +133,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
 | `GET /v1/admin/audit` | 审计日志 |
 
-**任务只保留 `kind: index`**：`reindex` / `summarize` 待 #7 / #13 引入，当前不提供，避免出现「跑成功但什么都没做」的任务。
+**任务只保留 `kind: index`**：`reindex` / `summarize` 是后续 ticket 的事，当前不提供，避免出现「跑成功但什么都没做」的任务。
 
 **阶段序列由 `options.source_dir` 决定：**
 
@@ -150,7 +151,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 **版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
-**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行，并把产出的 `db_path`、`obfuscated` 与 `source_size_bytes`（`parse` 阶段写入）一并登记（`has_summaries` 仍为 `false`，摘要由 #7 产出），已注册版本一个字段都不动。`obfuscated` 的取值：`options.obfuscated` 显式声明优先；未声明时跑过 `download` 用 checkpoint 里的真值，parse-only 缺省按「已 remap」（`true`）记录。`source_size_bytes` 的语义统一为**源码树字节数**（`.java` 与 `data/` 下 `.json` 的总字节数）：注册时若 `<data_dir>/src/<version>/` 不存在则**保留原值**（首次注册写 0），不拿索引 sqlite 的大小充数。
+**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行，并把产出的 `db_path`、`obfuscated` 与 `source_size_bytes`（`parse` 阶段写入）一并登记，`has_summaries` 按任务是否跑过 `summarize`（#7）写；已注册版本一个字段都不动。`obfuscated` 的取值：`options.obfuscated` 显式声明优先；未声明时跑过 `download` 用 checkpoint 里的真值，parse-only 缺省按「已 remap」（`true`）记录。`source_size_bytes` 的语义统一为**源码树字节数**（`.java` 与 `data/` 下 `.json` 的总字节数）：注册时若 `<data_dir>/src/<version>/` 不存在则**保留原值**（首次注册写 0），不拿索引 sqlite 的大小充数。
 
 **用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定。
 
@@ -189,3 +190,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | 复审修复（#6 × #13）：token 口径改为 `cl100k_base` 真分词（`tiktoken` 进运行时依赖，常数估算降为 fallback 并写 warn）——`max_tokens` 预算与索引统计同一口径，与 #13 验收标准的实测值可比；`detail=locate` 的 `tokens` 按实际返回内容计（不再拿片段成本充数），预算也因此装得下更多条目；`Hit.id` 带上行区间（同名重载方法不再撞 id）；摘要通道整路包 `try/except sqlite3.Error`（表不是 FTS5、或 query 含 FTS 语法时返回空 + `warn`，不再 500）；`download` 也按 fetch 完成标记与 jar 存在性跳过联网（`--force` 除外）；CLI 被 Ctrl-C 中断时把任务标为 `failed`（不再留下永久 `running` 的行）；`psutil` 缺失的 warn 同时写进任务日志；ripgrep 记为 `apps/api` 的前置依赖，依赖它的测试在 `rg` 缺失时 skip。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | 复审修复（#6 × #13 关闭前）：FastAPI lifespan 启动时预热一次 token 计数并把当前口径写进 INFO 日志（`token 计数：cl100k（tiktoken）` 或 `token 计数：字符估算 fallback（原因：…）`）——`tiktoken` 首次使用联网拉词表，生产节点拉不到时会阻塞到 HTTP 超时再静默退回常数估算，预热让漂移可见（生产镜像应预置 `TIKTOKEN_CACHE_DIR` 词表缓存，记入 #15）；摘要通道的 FTS 语法降级不再打 `exc_info`（`-`/`"` 这类随手输入不再刷整条 traceback）；CLI 的 Ctrl-C 收尾覆盖「已建 job 但未认领」窗口（`queued` 行也标 `failed`，不再留下永久 `queued`）；依赖 `literal` 通道的断言拆成独立 `@requires_ripgrep` 用例（无 `rg` 的机器上不再静默变红）；`docs/00-overview.md` §6 基线表补「内存峰值（实测）4.5 GiB」并订正 §4 的「3–4 GiB」。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | issue #14：1.20.1 映射版本流水线的验收证据——`mc-librarian index --version 1.20.1` 复用 #13/#21 的既有实现直接跑通（实测 4,786 个 `.java`、557,300 行、5,560,214 cl100k token、内存峰值 4.5 GiB、53 秒，索引内 4,773 个文件 = 13 个 tree-sitter 解析失败被跳过）；`download` 阶段的复用判据补上「标记里记着用过官方 mappings 就必须还在」——缓存被删后重跑会重新取 mappings，取不到就报错点明版本与 mappings（不再把半份缓存当完成证据，也绝不退回反编译混淆 jar 产出 `a.java`）；补三类自动化测试：`files.path` 无 `a.java`/`ab.java` 形式且已知可读类名存在（离线跑，见 `tests/test_fetch.py`）、映射缺失报错（`tests/test_index_cli.py` 断言非 0 退出与错误文案）、1.20.1 与 26.3 两个索引共存时各自可查（`tests/test_symbols.py`）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-04 | 0.2.0 | issue #7：中文摘要层落地——新增 `mc_librarian.indexing.summarize`（LLM 只从 `MC_LIBRARIAN_LLM_BASE_URL`/`MC_LIBRARIAN_LLM_MODEL`/`MC_LIBRARIAN_LLM_API_KEY` 读，未配置时 `summarize` 阶段明确失败并给出可操作报错，不静默跳过）；按类内容哈希（FQN+父类+接口+字段签名+public 方法签名）幂等，只重跑变化的类；按 package 分批（`summary_batch_size`，默认 40）并发 `summary_concurrency`（默认 4）生成，单类失败保留其余、任务标 `failed`；索引库新增 `summaries`（普通表，带 `content_hash`）与 `summaries_fts`（FTS5 + jieba 预分词，两字词「刷怪」可命中），摘要通道真正接入融合（`why` 含 `summary`，不改 RRF）；任务产出登记版本时 `has_summaries` 按是否跑过 `summarize` 写；`/v1/versions` 的 `VersionInfo` 新增 `summary_count`/`class_count`（从索引库实时读，版本页显示摘要覆盖率），`has_summaries` 描述改为登记快照。属 v0.2 设计内的增量补齐，`info.version` 不变 |

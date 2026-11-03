@@ -5,11 +5,11 @@
 | `symbol` | 索引库的 `classes`/`methods`/`fields` | 复用 #5 的四级匹配，同级别按 `fqn` 字典序 |
 | `literal` | ripgrep 子进程扫 `<data_dir>/src/<version>/` | 文件路径 + 行号 |
 | `reference` | `refs` 表反查引用点 | `path, line` |
-| `summary` | `summaries` 表（FTS5，由 #7 建） | bm25 升序；表不存在时返回空 |
+| `summary` | `summaries_fts`（FTS5，由 #7 建） | bm25 升序；表不存在时返回空 |
 
 `literal` / `reference` 拿到的是「文件 + 行号」，统一经 `query.symbol_at` 归一化成所在的最内层
 符号：同一实体被多路召回时才能被 RRF 累加，`why` 也才会有多个值（规格 §1）。任何一路为空
-（含 ripgrep 不可用 / 超时、`summaries` 表不存在或不是 FTS5、query 含 FTS 语法）都不算错误
+（含 ripgrep 不可用 / 超时、`summaries_fts` 表不存在或不是 FTS5、query 含 FTS 语法）都不算错误
 （规格 §8）。
 """
 
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from mc_librarian.indexing import query
+from mc_librarian.indexing.summarize import segment
 from mc_librarian.schemas import HitType, SymbolKind
 
 logger = logging.getLogger("mc_librarian.retrieval")
@@ -135,40 +136,43 @@ def literal_candidates(
 def summary_candidates(
     connection: sqlite3.Connection, text: str, *, path_prefix: str | None
 ) -> list[Candidate]:
-    """摘要通道接口：`summaries` 表由 #7 建，不存在时返回空、不报错（规格 §2）。
+    """摘要通道：查 `summaries_fts`（#7 建），命中时 `why` 含 `summary`（规格 §7）。
 
-    表在时按文档 schema（`summaries(fqn, text_zh, keywords, tokens)`）做 FTS5 查询，
-    bm25 升序（越负越相关，排在前）。整路包 `try/except sqlite3.Error`：表不是 FTS5、
-    或 query 含 FTS 语法（`"`、`*`、`-`、`AND`……）时 SQL 会抛 `OperationalError`，
-    那是「这一路没结果」，不是请求失败（规格 §8）。
+    表不存在（老索引、#7 未跑）时返回空、不报错。query 与入库时一样先过 jieba 分词：
+    FTS5 的 `unicode61` 不切中文，不预分词的话两字词（「刷怪」）永远命中不了（规格 §6）。
+    整路包 `try/except sqlite3.Error`：表不是 FTS5、或 query 分词后仍含 FTS 语法
+    （`"`、`*`、`-`、`AND`……）时 SQL 会抛 `OperationalError`，那是「这一路没结果」，
+    不是请求失败（规格 §8）。
     """
     try:
-        if not query.has_table(connection, "summaries"):
+        if not query.has_table(connection, "summaries_fts"):
             return []
 
         sql = (
-            "SELECT summaries.fqn AS fqn, summaries.text_zh AS text_zh, c.kind AS kind,"
+            "SELECT s.fqn AS fqn, s.text_zh AS text_zh, c.kind AS kind,"
             " f.path AS path, c.start_line AS start_line, c.end_line AS end_line"
-            " FROM summaries JOIN classes c ON c.fqn = summaries.fqn"
+            " FROM summaries_fts"
+            " JOIN summaries s ON s.fqn = summaries_fts.fqn"
+            " JOIN classes c ON c.id = s.class_id"
             " JOIN files f ON f.id = c.file_id"
-            " WHERE summaries MATCH ?"
+            " WHERE summaries_fts MATCH ?"
         )
-        params: list[object] = [text]
+        params: list[object] = [segment(text)]
 
         if path_prefix:
             sql += " AND substr(f.path, 1, length(?)) = ?"
             params.extend([path_prefix, path_prefix])
 
-        sql += " ORDER BY bm25(summaries) LIMIT ?"
+        sql += " ORDER BY bm25(summaries_fts) LIMIT ?"
         params.append(CHANNEL_LIMIT)
 
         # `fetchall()` 放在 try 里：游标是惰性的，迭代期间才真正执行 SQL。
         rows = connection.execute(sql, params).fetchall()
     except sqlite3.Error:
-        # 规格明确的正常降级（summaries 不是 FTS5、query 含 FTS 语法）：用户随手输一个
+        # 规格明确的正常降级（summaries_fts 不是 FTS5、query 含 FTS 语法）：用户随手输一个
         # `-` 或 `"` 都会走到这里，打完整 traceback 的噪声大于信息量，只留 warn 与原因。
         logger.warning(
-            "摘要通道查询失败（summaries 不是 FTS5 表，或 query 含 FTS 语法），该路返回空"
+            "摘要通道查询失败（summaries_fts 不是 FTS5 表，或 query 含 FTS 语法），该路返回空"
         )
         return []
 
