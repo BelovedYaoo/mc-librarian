@@ -12,6 +12,7 @@ import { paths } from 'src/routes/paths';
 // ----------------------------------------------------------------------
 
 const HomePage = lazy(() => import('src/pages/home'));
+const SettingsPage = lazy(() => import('src/pages/settings'));
 const LoginPage = lazy(() => import('src/pages/login'));
 const SetupPage = lazy(() => import('src/pages/setup'));
 const Page404 = lazy(() => import('src/pages/error/404'));
@@ -49,6 +50,20 @@ export const routesSection: RouteObject[] = [
         <Suspense fallback={<SplashScreen />}>
           <MainLayout>
             <HomePage />
+          </MainLayout>
+        </Suspense>
+      </RequireAuth>
+    ),
+  },
+
+  // 账号设置（个人访问令牌）
+  {
+    path: paths.settings,
+    element: (
+      <RequireAuth>
+        <Suspense fallback={<SplashScreen />}>
+          <MainLayout>
+            <SettingsPage />
           </MainLayout>
         </Suspense>
       </RequireAuth>

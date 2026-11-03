@@ -184,6 +184,31 @@ def test_session_operations_require_auth() -> None:
         assert "security" not in _operation(_contract(), path, method)
 
 
+def test_token_paths_are_implemented() -> None:
+    """issue #10 把三条 tokens 端点从契约落到了实现。"""
+    runtime_paths = set(_runtime()["paths"])
+
+    assert {"/v1/auth/tokens", "/v1/auth/tokens/{tokenId}"} <= runtime_paths
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "operation_id"),
+    [
+        ("/v1/auth/tokens", "get", "listTokens"),
+        ("/v1/auth/tokens", "post", "createToken"),
+        ("/v1/auth/tokens/{tokenId}", "delete", "revokeToken"),
+    ],
+)
+def test_token_operation_ids_match(path: str, method: str, operation_id: str) -> None:
+    runtime = _operation(_runtime(), path, method)
+    contract = _operation(_contract(), path, method)
+
+    assert runtime["operationId"] == contract["operationId"] == operation_id
+    assert runtime["tags"] == contract["tags"] == ["auth"]
+    # 不覆盖 security：继承全局 cookieAuth / bearerAuth，PAT 与 cookie 都能用。
+    assert "security" not in runtime
+
+
 def test_setup_status_schema_matches() -> None:
     runtime = _response_schema(_runtime(), "/v1/setup")
     contract = _response_schema(_contract(), "/v1/setup")

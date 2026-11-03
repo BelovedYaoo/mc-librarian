@@ -22,6 +22,18 @@ export type LoginRequest =
 
 export type SetupRequest = paths['/v1/setup']['post']['requestBody']['content']['application/json'];
 
+/** 个人访问令牌（列表项 / 创建响应的 `info`）：**不含**明文。 */
+export type TokenInfo = components['schemas']['TokenInfo'];
+
+export type TokenListResponse =
+  paths['/v1/auth/tokens']['get']['responses'][200]['content']['application/json'];
+
+export type TokenCreateRequest =
+  paths['/v1/auth/tokens']['post']['requestBody']['content']['application/json'];
+
+export type TokenCreated =
+  paths['/v1/auth/tokens']['post']['responses'][201]['content']['application/json'];
+
 /** RFC 7807 错误体，直接取契约的 `Problem`，不从某一条响应里反推。 */
 export type Problem = components['schemas']['Problem'];
 
@@ -142,4 +154,19 @@ export function logout(): Promise<void> {
 
 export function getMe(signal?: AbortSignal): Promise<User> {
   return request<User>('/v1/auth/me', { signal });
+}
+
+/** 我的访问令牌列表；只返回前缀，不含明文。 */
+export function listTokens(signal?: AbortSignal): Promise<TokenListResponse> {
+  return request<TokenListResponse>('/v1/auth/tokens', { signal });
+}
+
+/** 签发访问令牌；响应里的明文 `token` 只返回这一次。 */
+export function createToken(body: TokenCreateRequest): Promise<TokenCreated> {
+  return postJson<TokenCreated>('/v1/auth/tokens', body);
+}
+
+/** 吊销访问令牌；吊销后下一次用该令牌请求立即 401。 */
+export function revokeToken(tokenId: string): Promise<void> {
+  return request<void>(`/v1/auth/tokens/${tokenId}`, { method: 'DELETE' });
 }
