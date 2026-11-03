@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+
+# 生产 web 镜像（D18）：容器里只跑 Caddy，提供静态站点与 `/api/*` 反代；TLS 在边缘节点的
+# gateway-nginx 上终止，容器内不持有证书。构建上下文是仓库根（见 compose.yaml 的 build.context）。
+
+# ---- 构建阶段：把 apps/web 编译成静态产物 ----
+FROM oven/bun:1.4.3-alpine AS build
+
+WORKDIR /src
+
+# 先只拷依赖清单，让 `bun install` 这层在源码变化时仍然命中缓存。
+# 根 package.json 是 bun workspaces 的入口，bun.lock 里锁着 apps/web 的全部依赖。
+COPY package.json bun.lock ./
+COPY apps/web/package.json apps/web/package.json
+RUN bun install --frozen-lockfile
+
+COPY apps/web apps/web
+# `bun run build` = `tsc --noEmit && vite build`；契约类型（src/types/api.d.ts）已入库，
+# 构建期不需要再跑 openapi-typescript。
+RUN bun run --cwd apps/web build
+
+# ---- 运行阶段：Caddy + 构建好的 dist ----
+FROM caddy:2.11-alpine
+
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /src/apps/web/dist /srv
+
+EXPOSE 80

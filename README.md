@@ -13,7 +13,7 @@ Minecraft 源码知识库与中文问答服务。
 apps/api          Python：FastAPI + JobRunner + 索引 CLI
 apps/web          React + Vite + MUI
 packages/         （计划中）生成的 API 客户端、精简版 UI 组件库
-deploy/           （计划中）Dockerfile / Caddyfile / compose
+deploy/           Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
 docs/              openapi.yaml（契约）、01-api.md、00-overview.md
 scripts/          setup / dev / check / smoke（本地开发与校验入口）
 ```
