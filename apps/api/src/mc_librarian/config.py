@@ -1,11 +1,13 @@
 """运行时配置。
 
-数据根由 `MC_LIBRARIAN_DATA_DIR` 指定；未指定时落在仓库**之外**的同级目录
-`<repo 的父目录>/mc-librarian-data`，与 `docs/00-overview.md` §4 的数据布局一致。
+数据根由 `MC_LIBRARIAN_DATA_DIR` 指定；未指定时**无条件**落在仓库之外的同级目录
+`<repo 的父目录>/mc-librarian-data`，找不到仓库哨兵时退回 `~/mc-librarian-data`，
+与 `docs/00-overview.md` §4 的数据布局一致（D9：数据根独立、不入库）。
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
@@ -16,25 +18,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DATA_DIR_ENV: Final = "MC_LIBRARIAN_DATA_DIR"
 DATA_DIR_NAME: Final = "mc-librarian-data"
 
-# 仓库根标志：契约文件 + git 目录同时存在。
-_REPO_MARKERS: Final = (Path("docs", "openapi.yaml"), Path(".git"))
+# 仓库哨兵：同时存在 `package.json` 与 `apps/api/` 才算仓库根。
+# 刻意不用 `.git`（worktree / 源码快照里可能没有）。
+_REPO_SENTINELS: Final = (Path("package.json"), Path("apps", "api"))
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
     """从 `start`（默认本文件）向上查找仓库根，找不到返回 None。"""
     current = (start or Path(__file__)).resolve()
     for candidate in (current, *current.parents):
-        if all((candidate / marker).exists() for marker in _REPO_MARKERS):
+        if all((candidate / sentinel).exists() for sentinel in _REPO_SENTINELS):
             return candidate
     return None
 
 
-def default_data_dir() -> Path:
-    """仓库以外的数据根：`<repo 的父目录>/mc-librarian-data`。"""
-    root = find_repo_root()
+def default_data_dir(start: Path | None = None) -> Path:
+    """数据根的默认值，永远在仓库之外。
+
+    仓库哨兵可见时用 `<repo 的父目录>/mc-librarian-data`；
+    否则（例如装在 site-packages 里运行）退回 `~/mc-librarian-data`。
+    """
+    root = find_repo_root(start)
     if root is not None:
         return root.parent / DATA_DIR_NAME
-    return Path.cwd() / DATA_DIR_NAME
+    return Path.home() / DATA_DIR_NAME
 
 
 class Settings(BaseSettings):
@@ -54,6 +61,11 @@ class Settings(BaseSettings):
     @property
     def repo_root(self) -> Path | None:
         return find_repo_root()
+
+    @property
+    def data_dir_from_env(self) -> bool:
+        """数据根是不是由 `MC_LIBRARIAN_DATA_DIR` 显式指定。"""
+        return DATA_DIR_ENV in os.environ
 
 
 @lru_cache(maxsize=1)

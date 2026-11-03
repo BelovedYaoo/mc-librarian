@@ -13,6 +13,8 @@
     "setup": "node scripts/setup.mjs",
     "dev": "node scripts/dev.mjs",
     "check": "node scripts/check.mjs",
+    "check:smoke": "node scripts/check.mjs --smoke",
+    "smoke": "node scripts/smoke.mjs",
     "typecheck": "bun run --cwd apps/web typecheck",
     "lint": "bun run --cwd apps/web lint",
     "build": "bun run --cwd apps/web build"

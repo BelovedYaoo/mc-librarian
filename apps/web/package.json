@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "start": "vite preview",
     "typecheck": "tsc --noEmit --pretty",
-    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "lint": "eslint --max-warnings 0 \"src/**/*.{ts,tsx}\"",
     "lint:fix": "eslint --fix \"src/**/*.{ts,tsx}\"",
     "fm:check": "prettier --check \"src/**/*.{ts,tsx}\"",
     "fm:fix": "prettier --write \"src/**/*.{ts,tsx}\"",

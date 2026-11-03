@@ -1,8 +1,10 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
+import { waitForHealth } from './lib/health.mjs';
+import { killTree } from './lib/process.mjs';
 import { venvPython } from './lib/python.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,9 +52,7 @@ function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  for (const child of children) {
-    if (child.exitCode === null) child.kill('SIGTERM');
-  }
+  for (const child of children) killTree(child);
 
   process.exit(code);
 }
@@ -61,27 +61,27 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => shutdown(0));
 }
 
-const python = venvPython(API_DIR);
+// 一条命令到底：依赖缺失就地跑 setup，而不是让用户手动补一步。
+if (!venvPython(API_DIR) || !existsSync(join(ROOT, 'node_modules'))) {
+  console.log('\u001b[33m依赖未就绪（apps/api/.venv 或 node_modules 缺失），自动执行 setup…\u001b[0m');
 
-if (!python) {
-  console.error('apps/api/.venv 不存在。先执行：bun run setup');
-  process.exit(1);
-}
+  const setup = spawnSync(BUN, [join(ROOT, 'scripts', 'setup.mjs')], {
+    cwd: ROOT,
+    stdio: 'inherit',
+  });
 
-if (!existsSync(join(ROOT, 'node_modules'))) {
-  console.error('前端依赖未安装。先执行：bun run setup');
-  process.exit(1);
+  if (setup.status !== 0) {
+    console.error('自动 setup 失败，请修好上面的错误后重试：bun run setup');
+    process.exit(setup.status ?? 1);
+  }
 }
 
 console.log(`\u001b[36mapi\u001b[0m http://${HOST}:${PORT}   \u001b[36mweb\u001b[0m http://127.0.0.1:5173\n`);
 
-spawnLogged(
-  'api',
-  '\u001b[32m',
-  python,
-  ['-m', 'uvicorn', 'mc_librarian.main:app', '--reload', '--host', HOST, '--port', PORT],
-  { cwd: API_DIR }
-);
+spawnLogged('api', '\u001b[32m', venvPython(API_DIR), ['-m', 'mc_librarian', '--reload'], {
+  cwd: API_DIR,
+  env: { ...process.env, MC_LIBRARIAN_HOST: HOST, MC_LIBRARIAN_PORT: PORT },
+});
 
 spawnLogged('web', '\u001b[35m', BUN, ['run', 'dev'], {
   cwd: WEB_DIR,
@@ -90,3 +90,16 @@ spawnLogged('web', '\u001b[35m', BUN, ['run', 'dev'], {
     MC_LIBRARIAN_API_URL: process.env.MC_LIBRARIAN_API_URL ?? `http://${HOST}:${PORT}`,
   },
 });
+
+const healthUrl = `http://${HOST}:${PORT}/v1/health`;
+
+try {
+  const health = await waitForHealth(healthUrl, { timeoutMs: 60_000 });
+  console.log(
+    `\u001b[32mready\u001b[0m ${healthUrl} → ${JSON.stringify(health)}` +
+      `\n        web http://127.0.0.1:5173/（页面会显示同一份健康状态）\n`
+  );
+} catch (error) {
+  console.error(`\u001b[31m启动失败\u001b[0m ${error instanceof Error ? error.message : error}`);
+  shutdown(1);
+}

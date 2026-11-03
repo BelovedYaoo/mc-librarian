@@ -1,6 +1,6 @@
 # MC Librarian API · v0.2
 
-> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（22 个端点 / 23 个 schema，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
+> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（23 个端点 / 23 个 schema，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
 
 ## 1. 定位
 

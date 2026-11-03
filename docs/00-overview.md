@@ -31,8 +31,8 @@ mc-librarian/
 ## 4. 运行时
 
 ```
-        ┌───────────── caddy（web 镜像，内嵌 dist）─────────────┐
-:443 ───┤  TLS · 静态站点 · /api/* 反代                          │
+        ┌───────── web（内嵌 dist，容器内只跑 HTTP）───────────┐
+:80  ───┤  静态站点 · /api/* 反代                                │
         └───────────────────────┬──────────────────────────────┘
                                 │
                     ┌───────────▼───────────┐
@@ -47,6 +47,9 @@ mc-librarian/
               │ db/<version>.sqlite (只读)  │
               └────────────────────────────┘
 ```
+
+TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书，反代到 `deploy-net` 内的容器端口；
+**web 镜像只提供静态文件与 `/api/*` 反代入口**（容器内只跑 HTTP，不持有证书）。
 
 两条硬约束：
 
@@ -134,10 +137,10 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 | D12 | 仓库形态 | 单仓：`apps/api` + `apps/web` + `packages/*` |
 | D13 | 任务系统 | 进程内 `JobRunner` + 阶段检查点，并发 1，无独立 worker |
 | D14 | 写入模型 | API 只写控制面 DB；`POST /admin/jobs` → 202 + job_id |
-| D15 | 部署 | docker compose，2 容器（api、web/caddy） |
+| D15 | 部署 | docker compose，2 容器（api、web）；TLS 由边缘节点 `gateway-nginx` 终止 |
 | D16 | 前端底座 | React + Vite + MUI 9 + 精简版 react-core |
 | D17 | 权限实现 | 自写 `RoleGuard`；删除 react-core/authorization 与私有依赖 |
-| D18 | 前端交付 | Caddy 镜像内嵌 `dist`，一条镜像负责 TLS/静态/反代 |
+| D18 | 前端交付 | web 镜像内嵌 `dist`，只提供静态文件与 `/api/*` 反代入口；TLS/证书在边缘节点 `gateway-nginx` |
 | D19 | 契约同步 | `openapi-typescript` 生成 `packages/api-client`，CI 校验一致性 |
 | D20 | 摘要粒度 | 类级 3 行，按 package 分批（30–50 个类/次） |
 | D21 | 符号表 | 扩展字段（父类/接口/注解/参数名）+ 引用表 |
