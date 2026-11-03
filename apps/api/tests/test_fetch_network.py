@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,15 @@ EXPECTED_JAVA_FILES = {
     "26.3": 7301,
     "1.20.1": 4786,
 }
+
+# remap 后的树上应该能按包路径找到这些类（#14 §2 的正面判据）。
+KNOWN_READABLE_CLASSES = (
+    "net.minecraft.world.entity.Mob",
+    "net.minecraft.world.level.Level",
+    "net.minecraft.world.item.Item",
+)
+# 混淆树的形态：`a.java`、`ab.java`（#14 §2 的反面判据）。
+OBFUSCATED_PATH = re.compile(r"^[a-z]{1,2}\.java$")
 
 
 def _tools(settings: Settings, version: str) -> PipelineTools:
@@ -68,3 +78,15 @@ def test_fetch_produces_java_tree(
         assert result.checkpoint["obfuscated"] is True
         assert result.checkpoint["mappings_path"]
         assert (source / "net" / "minecraft").is_dir()
+        # #14 §2：可读类名在（正面）、没有 `a.java` / `ab.java` 这种文件（反面）。
+        # `files.path` 就是这棵树的相对路径，所以两个判据在同一份事实上。
+        for fqn in KNOWN_READABLE_CLASSES:
+            assert (source / f"{fqn.replace('.', '/')}.java").is_file()
+
+        obfuscated_paths = [
+            path.relative_to(source).as_posix()
+            for path in source.rglob("*.java")
+            if OBFUSCATED_PATH.match(path.relative_to(source).as_posix())
+        ]
+
+        assert obfuscated_paths == []

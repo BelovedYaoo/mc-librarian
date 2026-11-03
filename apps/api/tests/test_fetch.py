@@ -2,12 +2,17 @@
 
 全部用本地构造的假 jar / 假反编译产物，不联网、不跑真反编译；真实链路由
 `tests/test_fetch_network.py`（标 `network`，默认跳过）覆盖。
+
+issue #14 的两条验收判据也在这里离线验证：映射缺失时明确报错（§3）、remap 后的索引里类名
+可读且不出现 `a.java` / `ab.java` 这种混淆形式（§2）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +30,8 @@ from mc_librarian.fetch.manifest import HttpManifestResolver, VersionDownloads
 from mc_librarian.fetch.pipeline import (
     CHECKPOINT_FILE_NAME,
     CLIENT_JAR_NAME,
+    MAPPINGS_NAME,
+    REMAPPED_JAR_NAME,
     FetchContext,
     cache_dir_for,
     count_java_files,
@@ -41,7 +48,7 @@ from mc_librarian.fetch.tools import (
     SpecialSourceRemapper,
     VineflowerDecompiler,
 )
-from mc_librarian.indexing.layout import source_root
+from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
 from mc_librarian.jobs.runner import JobContext, JobRunner, StageError, run_stage, stages_for
@@ -49,6 +56,9 @@ from mc_librarian.main import create_app
 
 TERMINAL = {"succeeded", "failed", "canceled"}
 WAIT_TIMEOUT_S = 10.0
+
+# 混淆版本的 `files.path` 形态：`a.java`、`ab.java`（#14 §2 的反面判据）。
+OBFUSCATED_PATH = re.compile(r"^[a-z]{1,2}\.java$")
 
 MODERN = VersionDownloads(
     version="26.3",
@@ -121,6 +131,59 @@ class FakeRemapper:
     def remap(self, jar: Path, mappings: Path, dest: Path) -> Path:
         self.calls.append((jar, mappings, dest))
         dest.write_bytes(jar.read_bytes() + b"\nremapped")
+
+        return dest
+
+
+class OfflineDownloader:
+    """断网：任何下载都失败（#14 §3 的「mappings 取不回来」）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def download(self, url: str, dest: Path) -> Path:
+        self.calls.append(url)
+        raise FetchError(f"下载失败：{url}（<urlopen error 网络不可达>）")
+
+
+# remap 后的源码树长这样：可读的包路径与类名（#14 §2 的正面判据）。
+REMAPPED_SOURCES: dict[str, str] = {
+    "net/minecraft/world/entity/Mob.java": (
+        "package net.minecraft.world.entity;\n\npublic class Mob {\n  public void tick() {}\n}\n"
+    ),
+    "net/minecraft/world/level/Level.java": (
+        "package net.minecraft.world.level;\n\npublic class Level {\n  public void tick() {}\n}\n"
+    ),
+    "net/minecraft/world/item/Item.java": (
+        "package net.minecraft.world.item;\n\npublic class Item {\n  public int maxStackSize;\n}\n"
+    ),
+}
+
+# 直接反编译混淆 jar 出来的树：`a.java`、`ab.java`（#14 §2 的反面判据）。
+OBFUSCATED_SOURCES: dict[str, str] = {
+    "a.java": "package net.minecraft;\n\npublic class a {\n  public void a() {}\n}\n",
+    "ab.java": "package net.minecraft;\n\npublic class ab {\n  public void b() {}\n}\n",
+}
+
+
+class RemapAwareDecompiler:
+    """按拿到的 jar 出不同的源码树，用来把「decompile 消费的是哪个 jar」变成可断言的事实。
+
+    `client-remapped.jar` → 可读类名；其余（即混淆 `client.jar`）→ `a.java` / `ab.java`。
+    拿错 jar 会直接反映在索引的 `files.path` 上（#14 §2 的反面判据）。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, Path]] = []
+
+    def decompile(self, jar: Path, dest: Path) -> Path:
+        self.calls.append((jar, dest))
+        sources = REMAPPED_SOURCES if jar.name == REMAPPED_JAR_NAME else OBFUSCATED_SOURCES
+
+        for relative, content in sources.items():
+            path = dest / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
 
         return dest
 
@@ -288,6 +351,46 @@ def test_download_stage_reuses_cached_jar_and_mappings(tmp_path: Path) -> None:
     # jar 与 mappings 各下载一次，remap 也只跑一次。
     assert len(downloader.calls) == 2
     assert len(remapper.calls) == 1
+
+
+def test_download_stage_fails_loudly_when_mappings_are_gone_and_offline(
+    tmp_path: Path,
+) -> None:
+    """#14 §3：混淆 jar 在缓存里、mappings 却取不回来 → 报错点明版本与 mappings。
+
+    不能往下走：继续跑就只剩「拿混淆 jar 反编译」这一条路，产出 `a.java` / `ab.java`。
+    所以同时断言 remap 与反编译一次都没跑。
+    """
+    downloader = OfflineDownloader()
+    remapper = FakeRemapper()
+    decompiler = FakeDecompiler()
+    tools = PipelineTools(
+        manifest=FakeManifest({"1.20.1": OBFUSCATED}),
+        downloader=downloader,
+        remapper=remapper,
+        decompiler=decompiler,
+    )
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True)
+    (cache / CLIENT_JAR_NAME).write_bytes(b"obfuscated jar")
+    context = FetchContext(
+        version="1.20.1",
+        cache_dir=cache,
+        source_dir=tmp_path / "src",
+        log=lambda level, message: None,
+        checkpoint={},
+    )
+
+    with pytest.raises(FetchError) as error:
+        download_stage(context, tools)
+
+    message = str(error.value)
+    assert "mappings" in message
+    assert "1.20.1" in message
+    # 只尝试了 mappings：client jar 已在缓存里。
+    assert downloader.calls == [OBFUSCATED.client_mappings_url]
+    assert remapper.calls == []
+    assert decompiler.calls == []
 
 
 def test_decompile_stage_requires_download_first(tmp_path: Path) -> None:
@@ -645,8 +748,13 @@ def job_checkpoint(settings: Settings, job_id: str) -> dict[str, Any]:
     return store.checkpoint_of(row)
 
 
-def write_fetch_marker(settings: Settings, version: str, *, java_files: int) -> Path:
-    """模拟上一个入口（`mc-librarian fetch` 或上一次 `index`）留下的完成标记。"""
+def write_fetch_marker(
+    settings: Settings, version: str, *, java_files: int, obfuscated: bool = False
+) -> Path:
+    """模拟上一个入口（`mc-librarian fetch` 或上一次 `index`）留下的完成标记。
+
+    `obfuscated=True` 模拟需要 remap 的版本：`jar_path` 指向 remap 产物，并记下 mappings 路径。
+    """
     cache = cache_dir_for(settings.data_dir, version)
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / CHECKPOINT_FILE_NAME
@@ -654,8 +762,9 @@ def write_fetch_marker(settings: Settings, version: str, *, java_files: int) -> 
         path,
         {
             "stages": ["download", "decompile"],
-            "jar_path": str(cache / "client.jar"),
-            "obfuscated": False,
+            "jar_path": str(cache / (REMAPPED_JAR_NAME if obfuscated else CLIENT_JAR_NAME)),
+            "obfuscated": obfuscated,
+            "mappings_path": str(cache / MAPPINGS_NAME) if obfuscated else None,
             "java_files": java_files,
             "java_bytes": 2048,
             "source_dir": str(source_root(settings.data_dir, version)),
@@ -782,6 +891,29 @@ def test_missing_jar_re_downloads_even_with_the_marker(
     assert len(downloader.calls) == 1
 
 
+def test_missing_mappings_re_downloads_even_with_the_marker(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """标记说用过官方 mappings、那份 mappings 却已不在：不把 `download` 当已完成（#14 §3）。
+
+    半份缓存不能当完成证据：重跑 `download` 重新取 mappings（取不到就在 `download_stage`
+    明确报错），而不是拿着可能对不上官方映射的缓存直接反编译。
+    """
+    tools, manifest, downloader, _, decompiler = fake_tools({"1.20.1": OBFUSCATED})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    marker = write_fetch_marker(settings, "1.20.1", java_files=2, obfuscated=True)
+    (marker.parent / CLIENT_JAR_NAME).write_bytes(b"jar")
+    (marker.parent / REMAPPED_JAR_NAME).write_bytes(b"jar")
+    plant_source_tree(settings, "1.20.1", files=1)
+
+    run_one_job(settings, "1.20.1", {"force": False})
+
+    assert manifest.calls == ["1.20.1"], "mappings 不在缓存里，download 必须重跑"
+    # client jar 与 remap 产物都还在，只有 mappings 需要重新取。
+    assert [url for url, _ in downloader.calls] == [OBFUSCATED.client_mappings_url]
+    assert decompiler.calls == []
+
+
 def test_force_re_downloads_even_with_cached_jar(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -899,3 +1031,47 @@ def test_create_job_without_options_runs_full_pipeline(
         assert job["stage"] == "finalize"
         versions = client.get("/v1/versions").json()["versions"]
         assert [item["version"] for item in versions] == ["26.3"]
+
+
+# ----------------------------------------------------------------------
+# 映射版本的类名判据（#14 规格补充 §2）
+# ----------------------------------------------------------------------
+
+
+KNOWN_READABLE_FQNS = {
+    "net.minecraft.world.entity.Mob",
+    "net.minecraft.world.level.Level",
+    "net.minecraft.world.item.Item",
+}
+
+
+def test_remapped_pipeline_indexes_readable_names_and_no_obfuscated_paths(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r"""#14 §2：映射版本的索引里类名可读，且不出现 `a.java` / `ab.java` 这种混淆形式。
+
+    两条判据都写在断言里（离线跑，不需要联网）：
+
+    - 正面：`classes.fqn` 里存在已知的可读类名（`...entity.Mob` / `...level.Level` /
+      `...item.Item`）；
+    - 反面：`files.path` 里形如 `^[a-z]{1,2}\.java$` 的文件数为 0。
+
+    假反编译器按「拿到哪个 jar」出不同源码，所以这里顺带守住「`decompile` 消费的是 remap 后的
+    jar」：拿错 jar（例如有人把 `jar_path` 改回 `client.jar`）会让反面判据立刻变红。
+    """
+    tools = PipelineTools(
+        manifest=FakeManifest({"1.20.1": OBFUSCATED}),
+        downloader=FakeDownloader(),
+        remapper=FakeRemapper(),
+        decompiler=RemapAwareDecompiler(),
+    )
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+
+    run_one_job(settings, "1.20.1", {})
+
+    with sqlite3.connect(index_path(settings.data_dir, "1.20.1")) as index:
+        fqns = {str(row[0]) for row in index.execute("SELECT fqn FROM classes")}
+        paths = [str(row[0]) for row in index.execute("SELECT path FROM files")]
+
+    assert KNOWN_READABLE_FQNS.issubset(fqns)
+    assert [path for path in paths if OBFUSCATED_PATH.match(path)] == []

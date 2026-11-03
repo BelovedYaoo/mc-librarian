@@ -16,11 +16,11 @@
 - `options.reuse_index` 为真且 `db/<version>.sqlite` 已是合法索引时，跳过 `parse`（不重建），
   直接复用已有索引的统计：`mc-librarian index` 未给 `--force` 时的幂等语义（见
   `reuse_index_stats`）。
-- `cache/<version>/fetch.json`（与 `mc-librarian fetch` 共用）记着 `download` 已完成且 jar 还在
-  缓存里、又没给 `--force` 时，跳过 `download`（不再解析清单、不发 HTTP，见
-  `reuse_download_stats`）；记着 `decompile` 已完成且源码树还在时，跳过 `decompile`（见
-  `reuse_source_tree`）；跑完 `download`/`decompile` 会把完成状态写回该文件（见
-  `persist_fetch_stage`）。
+- `cache/<version>/fetch.json`（与 `mc-librarian fetch` 共用）记着 `download` 已完成、jar 还在
+  缓存里（需要 remap 的版本还要 mappings 也还在）、又没给 `--force` 时，跳过 `download`（不再
+  解析清单、不发 HTTP，见 `reuse_download_stats`）；记着 `decompile` 已完成且源码树还在时，
+  跳过 `decompile`（见 `reuse_source_tree`）；跑完 `download`/`decompile` 会把完成状态写回该
+  文件（见 `persist_fetch_stage`）。
 - `run_job(job_id)` 是 CLI 的入口：只认领并跑完指定的那一个任务，不走常驻队列循环。
 
 `#4`/`#5` 实现 `parse`：就位源码树、tree-sitter 解析、原子写出 `db/<version>.sqlite`；
@@ -50,6 +50,7 @@ from mc_librarian.fetch.pipeline import (
     FetchContext,
     cache_dir_for,
     count_java_files,
+    mappings_path_of,
     read_checkpoint,
     run_fetch_stage,
     write_checkpoint,
@@ -235,8 +236,10 @@ def reuse_download_stats(
     以前未给 `--source-dir` 的重复执行会在 `download` 阶段发 HTTP，断网直接 exit 1。
     `options.force` 为真一律重跑（`--force` 的语义是「重下重编」）。
 
-    标记里缺 `jar_path`/`obfuscated`（`decompile` 与版本登记都要用）或 jar 已被删时也重跑：
-    半份标记不能当完成证据（与 `reuse_source_tree` 不用「目录里有 `.java`」同一取舍）。
+    标记里缺 `jar_path`/`obfuscated`（`decompile` 与版本登记都要用）、jar 已被删，或记着用过
+    官方 mappings 而那份 mappings 已不在时，也重跑：半份标记不能当完成证据（与
+    `reuse_source_tree` 不用「目录里有 `.java`」同一取舍）。重跑后 mappings 能重新取到就继续，
+    取不到由 `download_stage` 明确报错——绝不退回拿混淆 jar 反编译（#14 §3）。
     """
     if options.get("force") is True:
         return None
@@ -259,6 +262,11 @@ def reuse_download_stats(
     jar = Path(raw_jar)
 
     if not jar.is_file():
+        return None
+
+    mappings = mappings_path_of(persisted)
+
+    if mappings is not None and not mappings.is_file():
         return None
 
     return {
