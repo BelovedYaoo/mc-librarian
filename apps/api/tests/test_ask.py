@@ -2,23 +2,29 @@
 
 索引与源码都写在 `tmp_path`（复用 #5/#6 的 fixture 源码树），LLM 由 `conftest.FakeChat` 脚本化，
 不联网。覆盖规格 §1–§8：事件序列、`max_steps` 收尾、降级（含第一步失败先跑一次 search）、
-上下文预算、`usage` 落库、并发与开关、`Accept: application/json`、模型未配置。
+上下文预算、`usage` 落库、并发与开关（含客户端中途断开）、`Accept: application/json`、模型未配置。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
+from urllib.error import URLError
 
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FakeChat, final_answer, tool_call
-from mc_librarian.answer.client import ChatError
-from mc_librarian.config import Settings
+from conftest import FakeChat, final_answer, session_cookie, tool_call
+from mc_librarian.answer import client as answer_client
+from mc_librarian.answer.client import ChatError, post_chat_completion
+from mc_librarian.answer.tools import ToolBox
+from mc_librarian.api.v1 import answer as answer_api
+from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.indexing.build import build_index, place_source_tree
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
@@ -167,6 +173,27 @@ def test_ask_reports_tool_failure_to_the_model(
     assert "参数不合法" in tool_messages[0]["content"]
 
 
+def test_ask_streams_an_error_event_when_the_loop_breaks(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """流中途抛未预期异常：状态码已经发出去了，只能补一个 `error` 事件收尾（不静默断流）。"""
+    fake_chat.script = [tool_call("search", query="Mob", detail="locate")]
+
+    def explode(self: Any, name: str, args: dict[str, Any]) -> Any:
+        raise RuntimeError("工具炸了")
+
+    monkeypatch.setattr(ToolBox, "execute", explode)
+
+    limiter = cast("Any", user_client.app).state.ask_limiter
+    events = parse_sse(ask(user_client).text)
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["problem"]["detail"] == "工具炸了"
+    assert not any(event["type"] == "done" for event in events)
+    # 出错也必须归还槽位，否则一次失败就把并发上限永久压低一格。
+    assert limiter.active == 0
+
+
 # ----------------------------------------------------------------------
 # max_steps（规格 §2）
 # ----------------------------------------------------------------------
@@ -245,6 +272,69 @@ def test_ask_degrades_after_partial_recall(
     assert len(steps) == 2, "不该再补一次 search"
     assert events[-1]["reason"] == "degraded"
     assert any(event["type"] == "citation" for event in events)
+
+
+def test_ask_degrades_when_the_model_times_out(
+    user_client: TestClient, indexed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真超时：底层抛的是 `TimeoutError`（不是 `ChatError`），同样走降级，HTTP 仍 200。"""
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(answer_client, "post_chat_completion", explode)
+
+    response = ask(user_client)
+
+    assert response.status_code == 200, response.text
+
+    events = parse_sse(response.text)
+    assert events[-1]["reason"] == "degraded"
+    assert any(event["type"] == "citation" for event in events)
+
+
+def test_ask_degrades_when_the_total_timeout_expires(
+    user_client: TestClient,
+    indexed: Path,
+    fake_chat: FakeChat,
+    settings: Settings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """总超时（`ask_timeout_s`）到点：一次模型都不调，直接用降级路径作答。"""
+    # 直接改属性、绕过 ge=1 的下限：负数让 `_expired()` 一进循环就成立，不依赖时钟精度。
+    settings.ask_timeout_s = -1
+
+    with caplog.at_level(logging.WARNING, logger="mc_librarian.answer"):
+        events = parse_sse(ask(user_client).text)
+
+    assert fake_chat.calls == [], "超时到点后不该再调模型"
+    assert events[1]["ok"] is True, "降级路径要用用户问题先跑一次 search"
+    assert events[-1]["reason"] == "degraded"
+    assert any(event["type"] == "citation" for event in events)
+    assert "总超时" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("timed out"), URLError("name resolution failed"), OSError("connection reset")],
+)
+def test_post_chat_completion_turns_transport_failures_into_chat_error(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """`urlopen` 的传输层异常（超时 / 网络 / OS）统一翻成 `ChatError`，`AskRun` 据此降级。"""
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(answer_client, "urlopen", explode)
+
+    # 直接调真实函数（`fake_chat` 已经把模块属性换成了假实现）。
+    with pytest.raises(ChatError, match="模型请求失败") as raised:
+        post_chat_completion(
+            "http://fake-llm.invalid/v1/chat/completions", {"model": "fake-model"}, "fake-key", 1.0
+        )
+
+    assert raised.value.__cause__ is failure
 
 
 # ----------------------------------------------------------------------
@@ -368,6 +458,100 @@ def test_ask_requires_login(client: TestClient) -> None:
     response = client.post("/v1/ask", json={"question": QUESTION, "version": VERSION})
 
     assert response.status_code == 401
+
+
+def test_ask_releases_the_slot_when_the_client_disconnects(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """客户端中途断开：Starlette 取消流任务，槽位必须已经归还，后续请求照常拿到槽位。
+
+    httpx 的 ASGI transport 不会在流中途发 `http.disconnect`，所以这里直接驱动 ASGI 应用：
+    收到 2 个 SSE 事件后从 `receive` 回 `http.disconnect`。此时生成器停在 `yield`，它自己的
+    `finally` 还没跑（也不保证会跑），槽位归还只能来自响应的 `__call__`。
+    """
+    fake_chat.always_tools = tools_of(tool_call("search", query="Mob", detail="locate"))
+
+    app = cast("Any", user_client.app)
+    limiter = app.state.ask_limiter
+    cookie = session_cookie(user_client)
+    payload = json.dumps({"question": QUESTION, "version": VERSION}).encode()
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/ask",
+        "raw_path": b"/v1/ask",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(payload)).encode()),
+            (b"cookie", f"{SESSION_COOKIE_NAME}={cookie}".encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    async def drive() -> tuple[int, int]:
+        sent = 0
+        pending = payload
+
+        async def receive() -> dict[str, Any]:
+            nonlocal pending
+
+            if pending:
+                body, pending = pending, b""
+
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            while sent < 2:  # 等两个 SSE 事件发出去，再断开
+                await asyncio.sleep(0)
+
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, Any]) -> None:
+            nonlocal sent
+
+            if message["type"] == "http.response.body" and message.get("more_body"):
+                sent += 1
+
+            # 真实服务器的 `send` 会挂起（写 socket / 流控），断开时任务正是停在这里——
+            # 也就是停在生成器外面，此时生成器的 `finally` 还没跑。
+            await asyncio.sleep(0)
+
+        await app(scope, receive, send)
+
+        # 断开后立刻读槽位：生成器还挂在 `yield` 上（它的 `finally` 要等 async generator 被关闭
+        # 才跑，这里不给它这个机会），所以 `active` 只能是响应的 `__call__` 还的。
+        return sent, limiter.active
+
+    sent, active = asyncio.run(drive())
+    assert sent >= 2, "断开前至少要有两个事件发出去"
+    assert active == 0, "客户端断开时槽位必须已经归还（不能等生成器被 GC 关闭）"
+
+    # 槽位真的能再次被拿到（不只是计数为 0）。
+    assert ask(user_client).status_code == 200
+
+
+def test_ask_releases_the_slot_when_the_run_cannot_be_built(
+    user_client: TestClient, indexed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """构造 `AskRun` 就失败：槽位也必须在受保护区间里归还（否则闸门永久收紧）。"""
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("构造炸了")
+
+    monkeypatch.setattr(answer_api, "AskRun", explode)
+
+    limiter = cast("Any", user_client.app).state.ask_limiter
+
+    with pytest.raises(RuntimeError, match="构造炸了"):
+        ask(user_client)
+
+    assert limiter.active == 0
 
 
 # ----------------------------------------------------------------------

@@ -29,6 +29,11 @@ class AskLimiter:
         return True
 
     def release(self) -> None:
-        """归还槽位（含流中途断开的情况，由 `finally` 保证）。"""
+        """归还槽位。
+
+        唯一调用点是 `/v1/ask` 的收尾（`api/v1/answer.py` 的 `_close_ask`）：它挂在 ASGI 响应的
+        `__call__` 上，正常结束 / 异常 / 客户端断开取消流任务三条路径都会执行——**不能**依赖流
+        生成器的 `finally`（客户端断开时生成器停在 `yield`，那段代码要等 GC / `aclose` 才跑）。
+        """
         if self._active > 0:
             self._active -= 1

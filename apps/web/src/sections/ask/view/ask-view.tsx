@@ -26,7 +26,7 @@ import { ApiError, readFile, streamAsk } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
 
-/** 工具轨迹里的一步：调用前只有 `args`，返回后补上 `ok` / `hits`。 */
+/** 工具轨迹里的一步：调用前只有 `args`，返回后补上 `ok` / `hits`；`context_budget` 只有 `args`。 */
 type StepTrace = {
   tool: string;
   args?: Record<string, unknown>;
@@ -303,12 +303,14 @@ function TurnBlock({ turn }: { turn: Turn }) {
 
 function StepTraceBlock({ steps }: { steps: StepTrace[] }) {
   const [expanded, setExpanded] = useState(false);
-  const done = steps.filter((step) => step.ok !== undefined).length;
+  // `context_budget` 是伪工具（只有 `args`，永远没有 `ok`）：它不进「完成/总数」的分母。
+  const toolSteps = steps.filter((step) => step.tool !== CONTEXT_BUDGET_TOOL);
+  const done = toolSteps.filter((step) => step.ok !== undefined).length;
 
   return (
     <Stack spacing={1}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-        <Chip size="small" variant="outlined" label={`工具轨迹 ${done}/${steps.length}`} />
+        <Chip size="small" variant="outlined" label={`工具轨迹 ${done}/${toolSteps.length}`} />
 
         <Button size="small" onClick={() => setExpanded((value) => !value)}>
           {expanded ? '收起轨迹' : '展开轨迹'}
@@ -323,21 +325,36 @@ function StepTraceBlock({ steps }: { steps: StepTrace[] }) {
               variant="body2"
               sx={{ fontFamily: 'monospace' }}
             >
-              {step.tool}
-              {step.args !== undefined ? ` ${JSON.stringify(step.args)}` : ''}
-              {step.ok === undefined
-                ? ' …'
-                : step.tool === CONTEXT_BUDGET_TOOL
-                  ? ' （已丢弃超预算的最旧结果）'
-                  : step.ok
-                    ? ` → ${step.hits ?? 0} 条`
-                    : ' → 失败'}
+              {stepLine(step)}
             </Typography>
           ))}
         </Stack>
       </Collapse>
     </Stack>
   );
+}
+
+/** 一步轨迹的展示文本；`context_budget` 没有 `ok`，单独渲染（不再落进「…」那一支）。 */
+function stepLine(step: StepTrace): string {
+  if (step.tool === CONTEXT_BUDGET_TOOL) {
+    const dropped = droppedLabels(step.args);
+    const detail = dropped.length > 0 ? `：${dropped.join('、')}` : '';
+
+    return `${step.tool}（已丢弃 ${dropped.length} 条最旧结果${detail}）`;
+  }
+
+  const args = step.args === undefined ? '' : ` ${JSON.stringify(step.args)}`;
+
+  if (step.ok === undefined) return `${step.tool}${args} …`;
+
+  return `${step.tool}${args}${step.ok ? ` → ${step.hits ?? 0} 条` : ' → 失败'}`;
+}
+
+/** `context_budget` 的 `args.dropped`：被丢弃的工具结果标签（后端给字符串数组）。 */
+function droppedLabels(args: Record<string, unknown> | undefined): string[] {
+  const dropped = args?.dropped;
+
+  return Array.isArray(dropped) ? dropped.map(String) : [];
 }
 
 /** 一条引用：点击后用 `/v1/read` 内联展开代码（不跳走，不丢上下文）。 */
