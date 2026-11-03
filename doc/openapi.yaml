@@ -1,0 +1,471 @@
+openapi: 3.1.0
+info:
+  title: MC Atlas API
+  version: 0.1.0
+  summary: Minecraft 源码知识库检索服务
+  description: |
+    面向 agent 与人类的代码知识库。对每个 Minecraft 版本提供三路混合检索：
+
+    - **summary** — 中文类摘要（将中文问题直接映射到类）
+    - **symbol** — 类/方法/字段符号索引（AST 派生，精确）
+    - **literal** — 源码字面量/正则检索（ripgrep 派生）
+
+    设计约束：无状态；`version` 显式传参；每个响应带 `why`（命中原因）与
+    `suggestions`（下一步可搜的符号）；调用方通过 `max_tokens` 控制上下文预算。
+
+servers:
+  - url: http://127.0.0.1:8787
+    description: 本地开发
+  - url: http://mc-atlas.internal:8787
+    description: 内网共享
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: meta
+    description: 服务与版本元信息
+  - name: retrieve
+    description: 检索类接口
+  - name: read
+    description: 读取类接口
+  - name: answer
+    description: 服务端问答（可选）
+
+paths:
+  /v1/health:
+    get:
+      tags: [meta]
+      summary: 存活探针
+      security: []
+      operationId: getHealth
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status: { type: string, const: ok }
+                  version: { type: string, example: "0.1.0" }
+
+  /v1/versions:
+    get:
+      tags: [meta]
+      summary: 已索引版本列表
+      operationId: listVersions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/VersionInfo" }
+
+  /v1/search:
+    post:
+      tags: [retrieve]
+      summary: 混合检索（摘要 / 符号 / 字面量）
+      description: |
+        单次调用内部完成三路召回与融合，返回统一排序的命中列表。
+        每个命中通过 `why` 标明召回来源，便于调用方判断下一步动作。
+      operationId: search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/VersionNotFound" }
+
+  /v1/symbol:
+    get:
+      tags: [retrieve]
+      summary: 符号查找
+      description: 按类名/方法名/字段名查找，支持精确与模糊两种模式。
+      operationId: getSymbol
+      parameters:
+        - $ref: "#/components/parameters/Version"
+        - name: name
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+          description: 简单名（`MobCategory`）或全限定名（`net.minecraft.world.entity.MobCategory`）
+        - name: fuzzy
+          in: query
+          schema: { type: boolean, default: true }
+        - name: kind
+          in: query
+          schema: { $ref: "#/components/schemas/SymbolKind" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matches]
+                properties:
+                  matches:
+                    type: array
+                    items: { $ref: "#/components/schemas/SymbolDetail" }
+
+  /v1/references:
+    get:
+      tags: [retrieve]
+      summary: 反查引用
+      description: |
+        返回引用了指定符号的位置。数据来自 AST 启发式提取，覆盖调用、字段访问、
+        类型声明三类，召回优先于精确。
+      operationId: getReferences
+      parameters:
+        - $ref: "#/components/parameters/Version"
+        - name: symbol
+          in: query
+          required: true
+          schema: { type: string }
+          description: 方法名（`spawnCategoryForChunk`）或 `Class#method`
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReferenceResponse" }
+
+  /v1/outline:
+    get:
+      tags: [read]
+      summary: 文件骨架
+      description: 返回该文件的包名、导入、类与成员的签名及行号区间，不返回方法体。
+      operationId: getOutline
+      parameters:
+        - $ref: "#/components/parameters/Version"
+        - $ref: "#/components/parameters/Path"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Outline" }
+        "404": { $ref: "#/components/responses/PathNotFound" }
+
+  /v1/read:
+    get:
+      tags: [read]
+      summary: 源码切片
+      description: |
+        按行号读取源码。必须显式传 `start`/`end`（可由 `/v1/outline` 得到），
+        避免整文件读入撑爆调用方上下文。
+      operationId: readFile
+      parameters:
+        - $ref: "#/components/parameters/Version"
+        - $ref: "#/components/parameters/Path"
+        - name: start
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: end
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: max_tokens
+          in: query
+          schema: { type: integer, minimum: 100, maximum: 32000, default: 4000 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileSlice" }
+        "404": { $ref: "#/components/responses/PathNotFound" }
+
+  /v1/ask:
+    post:
+      tags: [answer]
+      summary: 中文问答（服务端检索循环）
+      description: |
+        可选能力。服务端执行「检索 → 读取 → 作答」循环，直接返回带引用的中文答案。
+        未配置生成模型时返回 501。
+
+        该端点与 agent 无关，供人类或非 agent 客户端直接调用。
+      operationId: ask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AskRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AskResponse" }
+        "501":
+          description: 未配置生成模型
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 静态 token，配置于服务端环境变量 `MC_ATLAS_TOKEN`
+
+  parameters:
+    Version:
+      name: version
+      in: query
+      required: true
+      schema: { type: string, examples: ["1.20.1"] }
+      description: 目标版本，必须已在服务端完成索引
+    Path:
+      name: path
+      in: query
+      required: true
+      schema: { type: string }
+      description: 相对仓库根的路径，如 `net/minecraft/world/entity/MobCategory.java`
+
+  responses:
+    BadRequest:
+      description: 请求非法
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    VersionNotFound:
+      description: 版本未索引
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    PathNotFound:
+      description: 路径不存在
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    SymbolKind:
+      type: string
+      enum: [any, class, method, field]
+      default: any
+
+    VersionInfo:
+      type: object
+      required: [version, files, tokens, indexed_at]
+      properties:
+        version: { type: string, examples: ["1.20.1"] }
+        files: { type: integer, example: 4786 }
+        tokens: { type: integer, example: 5100000, description: 源码 token 总量（cl100k 估算） }
+        indexed_at: { type: string, format: date-time }
+        obfuscated: { type: boolean, description: 该版本是否用官方映射重映射过 }
+        has_summaries: { type: boolean, description: 中文摘要层是否已构建 }
+
+    SearchRequest:
+      type: object
+      required: [query, version]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: 中文自然语言、英文标识符或正则均可
+        version: { type: string, examples: ["1.20.1"] }
+        path_prefix:
+          type: string
+          description: 限定路径前缀，如 `net/minecraft/world/entity`
+        kind:
+          $ref: "#/components/schemas/SymbolKind"
+        detail:
+          type: string
+          enum: [locate, snippet]
+          default: snippet
+          description: |
+            `locate` 只返回定位信息（path + lines），最省 token；
+            `snippet` 附带截断后的源码片段
+        limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        max_tokens:
+          type: integer
+          minimum: 200
+          maximum: 32000
+          default: 4000
+          description: 本次响应内容预算（估算值），超出时按 score 降序截断
+
+    SearchResponse:
+      type: object
+      required: [query, version, hits, total, took_ms]
+      properties:
+        query: { type: string }
+        version: { type: string }
+        hits:
+          type: array
+          items: { $ref: "#/components/schemas/Hit" }
+        suggestions:
+          type: array
+          items: { type: string }
+          description: 建议下一步搜索的符号名（用于调用方改写查询）
+        total: { type: integer, description: 融合前的候选总数 }
+        took_ms: { type: integer }
+
+    Hit:
+      type: object
+      required: [id, type, version, path, lines, score, why]
+      properties:
+        id:
+          type: string
+          example: "1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory"
+        type: { type: string, enum: [class, method, field, file] }
+        version: { type: string }
+        path: { type: string }
+        symbol: { type: string, description: 类全名或 `Class#method` }
+        lines:
+          type: array
+          items: { type: integer }
+          minItems: 2
+          maxItems: 2
+          description: "[start, end]，1-based，闭区间"
+        score: { type: number, format: float, minimum: 0, maximum: 1 }
+        why:
+          type: array
+          items: { type: string, enum: [summary, symbol, literal, reference] }
+          description: 召回来源，可多选
+        summary: { type: string, description: 该类的中文摘要（若有） }
+        snippet: { type: string, description: 截断后的源码，`detail=snippet` 时返回 }
+        tokens: { type: integer, description: 该命中占用的估算 token }
+
+    SymbolDetail:
+      type: object
+      required: [fqn, kind, path, lines]
+      properties:
+        fqn: { type: string, example: "net.minecraft.world.entity.MobCategory" }
+        kind: { type: string, enum: [class, method, field] }
+        signature: { type: string }
+        path: { type: string }
+        lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+        superclass: { type: string }
+        interfaces:
+          type: array
+          items: { type: string }
+        summary: { type: string }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [method, field] }
+              name: { type: string }
+              signature: { type: string }
+              lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+
+    ReferenceResponse:
+      type: object
+      required: [symbol, version, references]
+      properties:
+        symbol: { type: string }
+        version: { type: string }
+        references:
+          type: array
+          items:
+            type: object
+            required: [path, lines]
+            properties:
+              path: { type: string }
+              lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+              enclosing: { type: string, description: 所在方法，如 `Class#method` }
+              kind: { type: string, enum: [call, field, type, other] }
+              snippet: { type: string }
+
+    Outline:
+      type: object
+      required: [path, package, classes]
+      properties:
+        path: { type: string }
+        package: { type: string }
+        imports: { type: array, items: { type: string } }
+        classes:
+          type: array
+          items:
+            type: object
+            properties:
+              fqn: { type: string }
+              kind: { type: string, enum: [class, interface, enum, record, annotation] }
+              signature: { type: string }
+              lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+              methods:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    signature: { type: string }
+                    lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+
+    FileSlice:
+      type: object
+      required: [path, version, start, end, content, truncated]
+      properties:
+        path: { type: string }
+        version: { type: string }
+        start: { type: integer }
+        end: { type: integer }
+        total_lines: { type: integer }
+        content: { type: string }
+        truncated: { type: boolean, description: 因 max_tokens 被截断时为 true }
+
+    AskRequest:
+      type: object
+      required: [question, version]
+      properties:
+        question: { type: string, minLength: 1, maxLength: 2000 }
+        version: { type: string }
+        max_steps: { type: integer, minimum: 1, maximum: 12, default: 6 }
+        max_tokens: { type: integer, minimum: 500, maximum: 64000, default: 16000 }
+
+    AskResponse:
+      type: object
+      required: [answer, citations]
+      properties:
+        answer: { type: string, description: 中文答案 }
+        citations:
+          type: array
+          items:
+            type: object
+            properties:
+              path: { type: string }
+              lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+              symbol: { type: string }
+        steps:
+          type: array
+          items:
+            type: object
+            properties:
+              tool: { type: string }
+              args: { type: object, additionalProperties: true }
+        usage:
+          type: object
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, example: "about:blank" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }

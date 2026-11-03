@@ -1,0 +1,27 @@
+# data / build artifacts (never commit)
+src/
+db/
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+index/
+out/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# secrets
+.env
+.env.*
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
