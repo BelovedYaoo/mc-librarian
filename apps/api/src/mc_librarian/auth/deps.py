@@ -47,6 +47,7 @@ def client_ip(request: Request) -> str | None:
 
 DbConn = Annotated[sqlite3.Connection, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+DatabaseDep = Annotated[Database, Depends(get_database)]
 
 
 def get_current_user(

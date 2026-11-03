@@ -52,7 +52,8 @@ class Migration:
 
 
 # v1：账号与会话；v2：个人访问令牌（pats）；v3：邀请与审计（invites/audit）；
-# v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile。
+# v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile；
+# v6：用量（usage，issue #8 建表、`#12` 只读聚合）。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -248,6 +249,27 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             "ALTER TABLE jobs_v5 RENAME TO jobs",
             "CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs (status, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_jobs_version ON jobs (version, status)",
+        ),
+    ),
+    # v6：用量（issue #8）。每次 `/v1/ask` 写一行（含降级的情况），`#12` 只做聚合与告警。
+    # `cost_usd` 由单价算，未配单价时写 0（不编假单价，只记 token 不计成本）。
+    Migration(
+        version=6,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS usage (
+              id                INTEGER PRIMARY KEY,
+              user_id           TEXT REFERENCES users (id),
+              kind              TEXT NOT NULL,
+              model             TEXT,
+              prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+              completion_tokens INTEGER NOT NULL DEFAULT 0,
+              cost_usd          REAL NOT NULL DEFAULT 0,
+              latency_ms        INTEGER NOT NULL DEFAULT 0,
+              version           TEXT,
+              created_at        TEXT NOT NULL
+            )
+            """,
         ),
     ),
 )

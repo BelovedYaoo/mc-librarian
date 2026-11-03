@@ -1,7 +1,9 @@
 """`POST /v1/search` 的服务层：跑四路通道 → RRF 融合 → 预算截断 → 建议（issue #6）。
 
 检索逻辑只有这一份（`docs/00-overview.md` §4 的硬约束 2）：HTTP 端点、后续的 MCP 适配器与
-`/v1/ask` 的工具调用都走这里。
+`/v1/ask` 的工具调用都走这里。除了 `search`，符号 / 引用 / 骨架 / 切片四个读操作也收敛在
+这里（`symbol_matches` / `reference_list` / `file_outline` / `read_source` + `slice_lines`），
+`api/v1/retrieval.py` 与 `answer/tools.py` 共用同一批函数。
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import time
 from typing import Final
 
 from mc_librarian.config import Settings
-from mc_librarian.indexing import query
+from mc_librarian.indexing import java, query
 from mc_librarian.indexing.layout import source_root
 from mc_librarian.indexing.text import count_tokens, split_lines
 from mc_librarian.retrieval.channels import (
@@ -24,13 +26,33 @@ from mc_librarian.retrieval.channels import (
     symbol_candidates,
 )
 from mc_librarian.retrieval.fuse import FusedHit, apply_token_budget, fuse
-from mc_librarian.schemas import Hit, SearchRequest, SearchResponse
+from mc_librarian.schemas import (
+    FileSlice,
+    Hit,
+    Outline,
+    OutlineClass,
+    OutlineMethod,
+    Reference,
+    ReferenceResponse,
+    SearchRequest,
+    SearchResponse,
+    SymbolDetail,
+    SymbolMatches,
+    SymbolMember,
+)
 
 # `snippet` 的截断上限：符号体可能很大，截断保证响应体量可控（规格 §5）。
 SNIPPET_MAX_LINES: Final = 40
 SNIPPET_MAX_CHARS: Final = 2000
 # `suggestions` 取前 5 个（规格 §9）。
 SUGGESTION_LIMIT: Final = 5
+
+
+class RetrievalNotFound(LookupError):
+    """检索目标不存在（索引里没有该文件，或源码树里没有该路径）。
+
+    HTTP 层翻成 404，`/v1/ask` 的工具层翻成一条给模型的失败说明——不把「没找到」升级成 500。
+    """
 
 
 def search(
@@ -74,6 +96,156 @@ def search(
         suggestions=_suggestions(connection, request.query, hits),
         total=total,
         took_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+def symbol_matches(
+    connection: sqlite3.Connection, name: str, *, fuzzy: bool = True, kind: str = "any"
+) -> SymbolMatches:
+    """`GET /v1/symbol` 与 ask 的 `symbol` 工具共用的符号查找。"""
+    hits = query.find_symbols(connection, name, fuzzy=fuzzy, kind=kind)
+
+    return SymbolMatches(matches=[_to_symbol_detail(connection, hit) for hit in hits])
+
+
+def reference_list(
+    connection: sqlite3.Connection, version: str, symbol: str, *, limit: int = 50
+) -> ReferenceResponse:
+    """`GET /v1/references` 与 ask 的 `references` 工具共用的引用反查。"""
+    hits = query.find_references(connection, symbol, limit=limit)
+
+    return ReferenceResponse(
+        symbol=symbol,
+        version=version,
+        references=[
+            Reference(
+                path=hit.path,
+                lines=[hit.line, hit.line],
+                enclosing=hit.enclosing,
+                kind=hit.kind,
+            )
+            for hit in hits
+        ],
+    )
+
+
+def read_source(settings: Settings, version: str, path: str) -> str | None:
+    """读 `<data_dir>/src/<version>/<path>` 的文本；缺失或越出源码根返回 None。
+
+    `GET /v1/outline`、`GET /v1/read` 与 ask 的 `outline`/`read` 工具共用这一个入口：
+    路径穿越（`../`）在这里就被挡掉，不在每个调用方各写一遍。
+    """
+    root = source_root(settings.data_dir, version).resolve()
+    candidate = (root / path).resolve()
+
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        return None
+
+    return candidate.read_text(encoding="utf-8", errors="replace")
+
+
+def slice_lines(
+    lines: list[str], path: str, version: str, start: int, end: int, max_tokens: int
+) -> FileSlice:
+    """取 `lines[start-1:end]` 并按 `max_tokens` 从尾部截断（`/v1/read` 与 ask 的 `read` 共用）。
+
+    行号合法性由调用方先校验（HTTP 层要回 422 并带上文件总行数，工具层要把它变成一条失败说明）。
+    """
+    selected = lines[start - 1 : end]
+    kept: list[str] = []
+    used = 0
+
+    for line in selected:
+        cost = count_tokens(line + "\n")
+
+        if kept and used + cost > max_tokens:
+            break
+
+        kept.append(line)
+        used += cost
+
+    return FileSlice(
+        path=path,
+        version=version,
+        start=start,
+        end=start + len(kept) - 1,
+        total_lines=len(lines),
+        content="\n".join(kept),
+        truncated=len(kept) < len(selected),
+    )
+
+
+def file_outline(
+    connection: sqlite3.Connection, settings: Settings, version: str, path: str
+) -> Outline:
+    """文件骨架（`GET /v1/outline` 与 ask 的 `outline` 工具共用）。
+
+    文件不在索引里、或源码树里没有该路径时抛 `RetrievalNotFound`（HTTP 层翻 404，工具层翻失败）。
+    """
+    record = query.find_file(connection, path)
+
+    if record is None:
+        raise RetrievalNotFound(f"索引里没有文件：{path}")
+
+    text = read_source(settings, version, path)
+
+    if text is None:
+        raise RetrievalNotFound(
+            f"该版本的源码树缺失（期望路径 {source_root(settings.data_dir, version)}）"
+        )
+
+    imports = java.parse_imports(text)
+    classes = query.file_outline(connection, record.id)
+
+    return Outline(
+        path=path,
+        package=record.package,
+        imports=imports,
+        classes=[
+            OutlineClass(
+                fqn=item.fqn,
+                kind=item.kind,
+                signature=item.signature,
+                lines=[item.start_line, item.end_line],
+                methods=[
+                    OutlineMethod(
+                        name=method.name,
+                        signature=method.signature,
+                        lines=[method.start_line, method.end_line],
+                    )
+                    for method in item.methods
+                ],
+            )
+            for item in classes
+        ],
+    )
+
+
+def _to_symbol_detail(connection: sqlite3.Connection, hit: query.SymbolHit) -> SymbolDetail:
+    """符号命中 → `SymbolDetail`；类的命中附带成员列表（方法 + 字段）。"""
+    members: list[SymbolMember] = []
+
+    if hit.kind == "class":
+        members = [
+            SymbolMember(
+                kind=member.kind,
+                name=member.name,
+                signature=member.signature,
+                lines=[member.start_line, member.end_line],
+            )
+            for member in query.class_members(connection, hit.class_id)
+        ]
+
+    return SymbolDetail(
+        fqn=hit.fqn,
+        kind=hit.kind,
+        signature=hit.signature,
+        path=hit.path,
+        lines=[hit.start_line, hit.end_line],
+        superclass=hit.superclass,
+        interfaces=hit.interfaces,
+        annotations=hit.annotations,
+        members=members,
     )
 
 

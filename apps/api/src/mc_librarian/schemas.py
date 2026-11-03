@@ -8,9 +8,11 @@ FastAPI 会声明成 `type: string, format: date-time`。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
+
+from mc_librarian.problems import Problem
 
 Role = Literal["admin", "user"]
 JobKind = Literal["index"]
@@ -33,8 +35,20 @@ MemberKind = Literal["method", "field"]
 __all__ = [
     "VERSION_PATTERN",
     "AcceptInviteRequest",
+    "AskCitationEvent",
+    "AskDeltaEvent",
+    "AskDoneEvent",
+    "AskErrorEvent",
+    "AskEvent",
+    "AskReason",
+    "AskRequest",
+    "AskResponse",
+    "AskSettings",
+    "AskStep",
+    "AskStepEvent",
     "AuditEntry",
     "AuditList",
+    "Citation",
     "ClassKind",
     "CreateUserRequest",
     "CreatedUser",
@@ -67,6 +81,7 @@ __all__ = [
     "SearchDetail",
     "SearchRequest",
     "SearchResponse",
+    "SecuritySettings",
     "Settings",
     "SetupRequest",
     "SetupStatus",
@@ -79,11 +94,13 @@ __all__ = [
     "TokenCreated",
     "TokenInfo",
     "TokenList",
+    "Usage",
     "User",
     "UserList",
     "VersionInfo",
     "VersionList",
     "WhyChannel",
+    "answer_schemas",
 ]
 
 
@@ -292,14 +309,39 @@ class IndexSettings(BaseModel):
     java_xmx: str
 
 
+class AskSettings(BaseModel):
+    """契约 `Settings.ask` 里当前**真正返回**的两个字段（`GET /v1/admin/settings`）。
+
+    `max_steps`/`max_answer_tokens` 是**每次请求**的参数（契约 `AskRequest`），不是服务端设置，
+    所以不在这里返回；`enabled` 与 `timeout_s` 是运行时配置
+    （`MC_LIBRARIAN_ASK_ENABLED` / `MC_LIBRARIAN_ASK_TIMEOUT_S`），按值返回。
+    """
+
+    enabled: bool
+    timeout_s: int
+
+
+class SecuritySettings(BaseModel):
+    """契约 `Settings.security` 里当前**真正返回**的字段。
+
+    只返回问答并发上限（`MC_LIBRARIAN_MAX_CONCURRENT_ASKS`）；会话/邀请有效期是账号体系的
+    部署级配置，随 #11 的 `PUT` 一起暴露。
+    """
+
+    max_concurrent_asks: int
+
+
 class Settings(BaseModel):
     """契约 `components.schemas.Settings`。
 
-    当前只有 `index` 块有实现（值从运行时配置派生）；`llm`/`ask`/`security`/`alerts` 尚未实现，
-    整块省略而不是拿契约里的示例默认值填充——那会让前端以为「模型已配置、密钥已设置」。
+    只返回**有实现**的块（值从运行时配置派生）：`index` / `ask` / `security`。
+    `llm`/`alerts` 尚未实现，整块省略而不是拿契约里的示例默认值填充——那会让前端以为
+    「模型已配置、密钥已设置」。
     """
 
     index: IndexSettings
+    ask: AskSettings
+    security: SecuritySettings
 
 
 class SymbolMember(BaseModel):
@@ -439,3 +481,125 @@ class SearchResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
     total: int
     took_ms: int
+
+
+# ----------------------------------------------------------------------
+# 问答（`POST /v1/ask`，issue #8）
+# ----------------------------------------------------------------------
+
+# `done` 事件/一次性响应的收尾原因（规格 §2/§4/§5）：
+# `stop` = 模型不再调用工具、正常作答；`max_steps` = 达到检索步数上限后强制收尾；
+# `degraded` = 模型超时/不可用/返回非法响应，用已召回的检索结果降级作答。
+AskReason = Literal["stop", "max_steps", "degraded"]
+
+
+class Usage(BaseModel):
+    """契约 `components.schemas.Usage`：一次问答的用量（含降级时已知的部分）。"""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0
+    latency_ms: int = 0
+
+
+class Citation(BaseModel):
+    """契约 `components.schemas.Citation`：一条代码位置引用。"""
+
+    path: str
+    lines: list[int] = Field(min_length=2, max_length=2)
+    symbol: str | None = None
+
+
+class AskStep(BaseModel):
+    """契约 `components.schemas.AskStep`：一次性响应里的工具轨迹（调了什么、参数）。"""
+
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class AskRequest(BaseModel):
+    """契约 `components.schemas.AskRequest`；`version` 必传，模型不可改。"""
+
+    question: str = Field(min_length=1, max_length=2000)
+    version: str
+    max_steps: int = Field(default=6, ge=1, le=12)
+    max_answer_tokens: int = Field(default=8000, ge=500, le=32000)
+
+
+class AskResponse(BaseModel):
+    """契约 `components.schemas.AskResponse`：`Accept: application/json` 时的一次性返回。"""
+
+    answer: str
+    citations: list[Citation]
+    steps: list[AskStep]
+    usage: Usage
+    reason: AskReason
+
+
+class AskStepEvent(BaseModel):
+    """`step` 事件：工具调用前带 `args`，返回后带 `ok` / `hits`（规格 §4）。"""
+
+    type: Literal["step"]
+    tool: str
+    args: dict[str, Any] | None = None
+    ok: bool | None = None
+    hits: int | None = None
+
+
+class AskDeltaEvent(BaseModel):
+    """`delta` 事件：答案增量。"""
+
+    type: Literal["delta"]
+    text: str
+
+
+class AskCitationEvent(BaseModel):
+    """`citation` 事件：一条代码位置引用，前端做成可点击。"""
+
+    type: Literal["citation"]
+    path: str
+    lines: list[int] = Field(min_length=2, max_length=2)
+    symbol: str | None = None
+
+
+class AskDoneEvent(BaseModel):
+    """`done` 事件：正常、`max_steps` 或降级收尾，都带上已知的 usage。"""
+
+    type: Literal["done"]
+    usage: Usage
+    reason: AskReason
+
+
+class AskErrorEvent(BaseModel):
+    """`error` 事件：流开始后不可恢复的错误（HTTP 层已经无法再改状态码）。"""
+
+    type: Literal["error"]
+    problem: Problem
+
+
+# SSE 的 5 种事件（契约 `AskEvent` 的 oneOf，按 `type` 区分）。
+AskEvent = Annotated[
+    AskStepEvent | AskDeltaEvent | AskCitationEvent | AskDoneEvent | AskErrorEvent,
+    Field(discriminator="type"),
+]
+
+
+def answer_schemas() -> dict[str, dict[str, Any]]:
+    """`/v1/ask` 的 200 响应 schema（含嵌套模型），供 `main._build_openapi` 合并。
+
+    这条响应有两个 content type（`text/event-stream` 与 `application/json`），而 FastAPI 的
+    `response_model` 只能挂一个，所以 200 只能写成裸 `$ref`；裸 `$ref` 不会自动进
+    `components.schemas`（同 `Problem` 的处境），这里显式生成。`$defs` 里的嵌套模型一并展开，
+    否则 `$ref` 指向不存在的组件，运行时 spec 过不了 `openapi-spec-validator`。
+    """
+    schemas: dict[str, dict[str, Any]] = {}
+
+    for name, adapter in (
+        ("AskEvent", TypeAdapter(AskEvent)),
+        ("AskResponse", TypeAdapter(AskResponse)),
+    ):
+        schema = adapter.json_schema(ref_template="#/components/schemas/{model}")
+        schemas.update(schema.pop("$defs", {}))
+        schemas[name] = schema
+
+    return schemas

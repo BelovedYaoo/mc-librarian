@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from mc_librarian.answer import client as answer_client
 from mc_librarian.auth import passwords
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import CONTROL_DB_NAME, utc_now
@@ -88,6 +89,76 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> FakeLlm:
     monkeypatch.setattr(summarize, "post_chat_completion", fake.post)
 
     return fake
+
+
+class FakeChat:
+    """假 LLM（问答用）：脚本化 chat completion 响应，不联网。
+
+    与 `FakeLlm` 同一做法：只替换最外层的 `post_chat_completion`，客户端解析、工具循环、
+    上下文预算与收尾都走真实代码路径。`script` 是待返回的 message 队列（按顺序弹出）；
+    用完后：给了工具就回 `always_tools`（默认空 → 直接给答案），强制收尾（不给工具）那一次
+    回 `default_answer`。`fail_with` 让下一次调用抛异常（验证降级）。
+    """
+
+    def __init__(self) -> None:
+        self.script: list[dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
+        self.always_tools: list[dict[str, Any]] = []
+        self.default_answer = "这是基于检索结果的答案。"
+        self.fail_with: Exception | None = None
+        # 第几次调用开始失败（1-based）：验证「已经召回一部分后才失败」的降级路径。
+        self.fail_from = 1
+        self.usage: dict[str, int] = {"prompt_tokens": 11, "completion_tokens": 7}
+
+    def post(
+        self, url: str, payload: dict[str, object], api_key: str, timeout: float
+    ) -> dict[str, Any]:
+        del url, api_key, timeout
+        self.calls.append(payload)
+
+        if self.fail_with is not None and len(self.calls) >= self.fail_from:
+            raise self.fail_with
+
+        if self.script:
+            message = self.script.pop(0)
+        elif payload.get("tools"):
+            message = {"role": "assistant", "content": None, "tool_calls": self.always_tools}
+        else:
+            message = {"role": "assistant", "content": self.default_answer}
+
+        return {"choices": [{"message": message}], "usage": dict(self.usage)}
+
+
+@pytest.fixture(autouse=True)
+def fake_chat(monkeypatch: pytest.MonkeyPatch) -> FakeChat:
+    """全局替换问答的 LLM 发送函数：`/v1/ask` 的测试不联网。"""
+    fake = FakeChat()
+    monkeypatch.setattr(answer_client, "post_chat_completion", fake.post)
+
+    return fake
+
+
+def tool_call(name: str, **arguments: Any) -> dict[str, Any]:
+    """构造一条「模型要求调用工具」的 assistant message。"""
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"call-{name}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            }
+        ],
+    }
+
+
+def final_answer(text: str) -> dict[str, Any]:
+    """构造一条「模型给出最终答案」的 assistant message。"""
+    return {"role": "assistant", "content": text}
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

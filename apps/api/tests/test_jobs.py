@@ -181,7 +181,7 @@ def insert_job_row(
 def test_migration_creates_job_tables(tmp_path: Path) -> None:
     database = Database.for_data_dir(tmp_path / "data")
 
-    assert database.initialize() == LATEST_VERSION == 5
+    assert database.initialize() == LATEST_VERSION == 6
 
     with database.connect() as conn:
         tables = {
@@ -214,7 +214,7 @@ def test_v5_migration_preserves_existing_jobs_and_logs(tmp_path: Path) -> None:
             ("legacy", "2026-11-03T00:00:00Z", "旧日志"),
         )
 
-    assert database.initialize() == LATEST_VERSION == 5
+    assert database.initialize() == LATEST_VERSION == 6
 
     with database.connect() as conn:
         assert conn.execute("SELECT count(*) AS c FROM job_logs").fetchone()["c"] == 1
@@ -303,18 +303,21 @@ def test_create_job_rejects_explicit_null_obfuscated(admin_client: TestClient) -
 def test_get_settings_returns_only_implemented_blocks(
     admin_client: TestClient, settings: Settings
 ) -> None:
-    """`GET /v1/admin/settings` 只读、配置派生：只返回真实存在的 `index` 块。
+    """`GET /v1/admin/settings` 只读、配置派生：只返回真实存在的 `index`/`ask`/`security` 块。
 
-    未实现的 `llm`/`ask`/`security`/`alerts` 整块省略——不拿契约里的示例默认值填充。
+    未实现的 `llm`/`alerts` 整块省略——不拿契约里的示例默认值填充。`ask`/`security` 是
+    #8 的问答开关与并发闸门（只返回有对应运行时配置的字段）。
     """
     response = admin_client.get("/v1/admin/settings")
 
     assert response.status_code == 200, response.text
     body = response.json()
 
-    assert set(body) == {"index"}
+    assert set(body) == {"index", "ask", "security"}
     assert body["index"]["enabled"] is True
     assert body["index"]["java_xmx"] == settings.decompile_memory
+    assert body["ask"] == {"enabled": True, "timeout_s": settings.ask_timeout_s}
+    assert body["security"] == {"max_concurrent_asks": settings.max_concurrent_asks}
 
 
 def test_index_disabled_gate(tmp_path: Path) -> None:
