@@ -19,9 +19,11 @@ from fastapi.testclient import TestClient
 
 from mc_librarian.config import Settings
 from mc_librarian.db import LATEST_VERSION, MIGRATIONS, Database, schema_version, transaction
+from mc_librarian.indexing.layout import index_path
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
 from mc_librarian.jobs.runner import JobRunner
+from mc_librarian.main import create_app
 
 FIXTURE_SOURCE = Path(__file__).parent / "fixtures" / "source"
 
@@ -271,6 +273,49 @@ def test_create_job_rejects_empty_source_dir(admin_client: TestClient) -> None:
         assert response.status_code == 422
         assert response.headers["content-type"].startswith("application/problem+json")
         assert "source_dir" in response.json()["detail"]
+
+
+def test_get_settings_returns_only_implemented_blocks(
+    admin_client: TestClient, settings: Settings
+) -> None:
+    """`GET /v1/admin/settings` 只读、配置派生：只返回真实存在的 `index` 块。
+
+    未实现的 `llm`/`ask`/`security`/`alerts` 整块省略——不拿契约里的示例默认值填充。
+    """
+    response = admin_client.get("/v1/admin/settings")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert set(body) == {"index"}
+    assert body["index"]["enabled"] is True
+    assert body["index"]["java_xmx"] == settings.decompile_memory
+
+
+def test_index_disabled_gate(tmp_path: Path) -> None:
+    """`MC_LIBRARIAN_INDEX_ENABLED=false`：任务一律 403，`GET` 能读到开关为 false。"""
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/setup", json={"username": "admin", "password": "admin-password-1"}
+        )
+        assert created.status_code == 201, created.text
+
+        assert client.get("/v1/admin/settings").json()["index"]["enabled"] is False
+
+        # 带 source_dir 与省略 options 两条路径都被闸门挡住。
+        for payload in (
+            {"kind": "index", "version": "26.3"},
+            {"kind": "index", "version": "26.3", "options": {"source_dir": "/tmp/x"}},
+        ):
+            response = client.post("/v1/admin/jobs", json=payload)
+
+            assert response.status_code == 403, response.text
+            assert response.headers["content-type"].startswith("application/problem+json")
+            assert "关闭索引构建" in response.json()["detail"]
+
+        assert client.get("/v1/admin/jobs").json()["jobs"] == []
 
 
 def test_source_dir_job_starts_at_parse(
@@ -709,6 +754,10 @@ def test_runner_requeues_interrupted_running_jobs(settings: Settings, source_dir
         )
         # 模拟「上一次进程在 parse 完成后被杀」：status 停在 running，checkpoint 已落盘。
         # 给了 source_dir，阶段序列从 parse 开始，所以 checkpoint 里只有 parse。
+        # parse 已完成意味着索引库已写出（`_finish` 会断言它存在），一并造出来。
+        index = index_path(settings.data_dir, "26.3")
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_bytes(b"sqlite")
         conn.execute(
             "UPDATE jobs SET status = 'running', checkpoint = ? WHERE id = ?",
             (json.dumps({"stages": ["parse"]}), job.id),
@@ -1044,6 +1093,7 @@ def test_register_version_rejects_non_sqlite(admin_client: TestClient, settings:
 
 def test_admin_endpoints_require_session(client: TestClient) -> None:
     assert client.get("/v1/admin/jobs").status_code == 401
+    assert client.get("/v1/admin/settings").status_code == 401
     assert client.get("/v1/versions").status_code == 401
 
     created = client.post("/v1/admin/jobs", json={"kind": "index", "version": "26.3"})
@@ -1053,6 +1103,7 @@ def test_admin_endpoints_require_session(client: TestClient) -> None:
 
 def test_admin_endpoints_reject_non_admin(user_client: TestClient, source_dir: Path) -> None:
     assert user_client.get("/v1/admin/jobs").status_code == 403
+    assert user_client.get("/v1/admin/settings").status_code == 403
     assert submit(user_client, "26.3", source_dir).status_code == 403
     assert user_client.post("/v1/admin/versions", json={"version": "26.3"}).status_code == 403
 

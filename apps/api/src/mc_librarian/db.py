@@ -145,7 +145,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     # `kind` 与 `stage` 的 CHECK 就是接口层的取值域：本票只支持 `index` 与
     # `parse`/`summarize`/`finalize` 三段阶段（`stage` 允许 NULL：任务尚未进入任何阶段）。
     # 这里直接改 v4 而不是补一条 v5：`jobs` 由本票引入、还没有部署，没有历史行要容纳。
-    # `#13` 引入 `download`/`decompile` 时库已经部署过，那时要**新增**一条迁移，不能再回头改 v4。
+    # `#21` 引入 `download`/`decompile` 时库已经部署过，那时要**新增**一条迁移，不能再回头改 v4。
     # 存储层与接口层同域：`row_to_job` 的严格投影就不会读到域外的值而 500。
     Migration(
         version=4,

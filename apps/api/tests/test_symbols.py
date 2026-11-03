@@ -252,12 +252,13 @@ def _synthetic_java(index: int, method_count: int, statements: int) -> str:
 
 
 def test_parse_java_walks_many_synthetic_files_without_corruption() -> None:
-    """回归网：解析大量合成源码时不得出现内存损坏（进程必须活着且结果正确）。
+    """回归网：大输入下的解析结果必须正确，进程必须活着。
 
-    防的是「遍历 `Node` 时不持有 `Tree` 引用」这类不安全写法：小 fixture 触发不了，
-    真实大源码树（或这里的合成大树）才会暴露为随机段错误 / 脏数据。**不**覆盖
-    tree-sitter 0.26.0 绑定自身的堆损坏——那由 `pyproject.toml` 的 `<0.26` 钉版挡住
-    （见 issue #22），所以本测试全绿不代表 0.26 没问题。
+    400 组随机（方法数、语句数）的合成源码逐个断言包名、FQN 与方法数，兜住两件事：
+    解析结果正确性、大输入下的稳定性。与 tree-sitter 0.26.0 绑定层的堆损坏无关——
+    后续实验已证伪「`Tree` 生命周期」那条归因（持有 `Tree` 崩、丢弃 `Tree` 不崩），
+    根因在绑定层且无法在代码层规避，由 `pyproject.toml` 的 `<0.26` 钉版挡住（见 issue #22），
+    本测试全绿不代表 0.26 没问题。
     """
     rng = random.Random(20261103)
     cases = [(index, rng.randint(1, 12), rng.randint(1, 300)) for index in range(400)]
@@ -479,11 +480,20 @@ def test_retrieval_404_when_version_unregistered(admin_client: TestClient) -> No
 def test_retrieval_404_when_db_path_is_empty(
     admin_client: TestClient, settings: Settings
 ) -> None:
-    """版本已注册但还没有索引文件（任务产出但未注册）→ 404（规格 §9）。"""
+    """版本已注册但 `db_path` 为空（历史遗留行）→ 404（规格 §9）。
+
+    任务产出与管理员注册现在都会写 `db_path`，只有旧库升级上来的行可能为空；
+    这里直接插一行模拟它，确认 `_require_index` 仍能区分两种 404。
+    """
     database = Database.for_data_dir(settings.data_dir)
 
     with database.connect() as connection, transaction(connection):
-        store.insert_version_if_absent(connection, version=VERSION, files=1, tokens=1)
+        connection.execute(
+            "INSERT INTO versions (version, files, tokens, indexed_at, obfuscated,"
+            " has_summaries, source_size_bytes, db_path)"
+            " VALUES (?, 1, 1, '2026-11-03T00:00:00Z', 0, 0, 0, NULL)",
+            (VERSION,),
+        )
 
     response = admin_client.get("/v1/symbol", params={"version": VERSION, "name": "Mob"})
 

@@ -423,6 +423,22 @@ def test_job_paths_are_implemented() -> None:
     } <= runtime_paths
 
 
+def test_settings_path_is_implemented() -> None:
+    """`GET /v1/admin/settings` 已实现（只读、配置派生）；`PUT` 仍待 #11。"""
+    runtime = _operation(_runtime(), "/v1/admin/settings", "get")
+    contract = _operation(_contract(), "/v1/admin/settings", "get")
+
+    assert runtime["operationId"] == contract["operationId"] == "getSettings"
+    assert "403" in runtime["responses"]
+    assert "403" in contract["responses"]
+
+    # 索引构建闸门 `settings.index.enabled` 两侧都要有（运行时从配置派生）。
+    for spec in (_runtime(), _contract()):
+        index = _deref(spec, spec["components"]["schemas"]["Settings"]["properties"]["index"])
+
+        assert "enabled" in index["properties"]
+
+
 @pytest.mark.parametrize(
     ("path", "method", "operation_id"),
     [

@@ -33,6 +33,7 @@ __all__ = [
     "CreateUserRequest",
     "CreatedUser",
     "FileSlice",
+    "IndexSettings",
     "InviteStatus",
     "Job",
     "JobCreate",
@@ -55,6 +56,7 @@ __all__ = [
     "ReferenceResponse",
     "RegisterVersionRequest",
     "Role",
+    "Settings",
     "SetupRequest",
     "SetupStatus",
     "SymbolDetail",
@@ -254,6 +256,26 @@ class VersionList(BaseModel):
 class RegisterVersionRequest(BaseModel):
     version: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
     obfuscated: bool = True
+
+
+class IndexSettings(BaseModel):
+    """契约 `Settings.index` 里当前**真正有实现**的两个字段（`GET /v1/admin/settings`）。
+
+    `summary_batch_size`/`summary_concurrency` 是 #7 的摘要参数，尚无实现，刻意不返回。
+    """
+
+    enabled: bool
+    java_xmx: str
+
+
+class Settings(BaseModel):
+    """契约 `components.schemas.Settings`。
+
+    当前只有 `index` 块有实现（值从运行时配置派生）；`llm`/`ask`/`security`/`alerts` 尚未实现，
+    整块省略而不是拿契约里的示例默认值填充——那会让前端以为「模型已配置、密钥已设置」。
+    """
+
+    index: IndexSettings
 
 
 class SymbolMember(BaseModel):

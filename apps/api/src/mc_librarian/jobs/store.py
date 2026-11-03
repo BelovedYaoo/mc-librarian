@@ -457,22 +457,33 @@ def insert_version_if_absent(
     version: str,
     files: int,
     tokens: int,
+    obfuscated: bool,
+    source_size_bytes: int,
+    db_path: str,
 ) -> VersionInfo | None:
     """任务产出登记版本：仅在版本**尚未注册**时插入一行，已存在则什么都不写。
 
-    版本不存在时插入一行，其余字段用「未 remap、无摘要」的保守默认值
-    （`obfuscated=0`、`has_summaries=0`、`source_size_bytes=0`、`db_path=NULL`）。
-    版本已存在（管理员注册过）时**一个字段都不动**，返回 `None` 让调用方知道没写；
-    任务产出不是权威索引，想替换已注册版本请重新注册（docs/01-api.md §7）。
+    `db_path` 指向任务刚产出的索引库（`<data_dir>/db/<version>.sqlite`），`obfuscated` 与
+    `source_size_bytes` 来自 checkpoint（`download` / `parse` 阶段写入），`has_summaries=0`
+    （摘要由 #7 产出）。版本已存在（管理员注册过）时**一个字段都不动**，返回 `None` 让调用方
+    知道没写；任务产出不是权威索引，想替换已注册版本请重新注册（docs/01-api.md §7）。
     """
     cursor = conn.execute(
         """
         INSERT INTO versions (
           version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
-        ) VALUES (?, ?, ?, ?, 0, 0, 0, NULL)
+        ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
         ON CONFLICT (version) DO NOTHING
         """,
-        (version, files, tokens, utc_now()),
+        (
+            version,
+            files,
+            tokens,
+            utc_now(),
+            1 if obfuscated else 0,
+            source_size_bytes,
+            db_path,
+        ),
     )
 
     if cursor.rowcount == 0:
@@ -496,7 +507,7 @@ def find_version(conn: sqlite3.Connection, version: str) -> VersionInfo | None:
 def index_db_path(conn: sqlite3.Connection, version: str) -> tuple[bool, str | None]:
     """返回 (版本是否已注册, 注册的 `db_path`)。
 
-    `db_path` 对任务产出的版本行是 NULL（"尚无索引文件"）；检索端点据此区分
+    管理员注册与任务产出都会写入 `db_path`；只有历史遗留行可能为空。检索端点据此区分
     「版本未注册」与「已注册但还没有索引」两种 404（规格 §9）。
     """
     row = conn.execute("SELECT db_path FROM versions WHERE version = ?", (version,)).fetchone()

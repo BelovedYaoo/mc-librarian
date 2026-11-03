@@ -120,6 +120,15 @@ def test_env_defaults_to_dev(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Settings().env == "dev"
 
 
+def test_index_enabled_defaults_true_and_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """索引构建闸门默认 true（本地开箱可用）；节点用环境变量关掉。"""
+    monkeypatch.delenv("MC_LIBRARIAN_INDEX_ENABLED", raising=False)
+    assert Settings().index_enabled is True
+
+    monkeypatch.setenv("MC_LIBRARIAN_INDEX_ENABLED", "false")
+    assert Settings().index_enabled is False
+
+
 def test_production_with_insecure_cookie_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
     """生产护栏：忘了开 Secure，启动就该直接挂掉，而不是静默跑 http。"""
     monkeypatch.setenv("MC_LIBRARIAN_ENV", "production")

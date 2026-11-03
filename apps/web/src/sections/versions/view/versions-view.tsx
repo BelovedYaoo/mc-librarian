@@ -16,7 +16,7 @@ import { useNavigate } from 'react-router';
 
 import { useAuth } from 'src/auth';
 
-import { useVersions } from 'src/hooks';
+import { useAdminSettings, useVersions } from 'src/hooks';
 
 import { ApiError, createJob } from 'src/lib/api-client';
 
@@ -30,6 +30,10 @@ export function VersionsView() {
   const { state, refresh } = useVersions();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const isAdmin = user?.role === 'admin';
+  const { state: settingsState } = useAdminSettings(isAdmin);
+  // 只在明确读到 `index.enabled === false` 时才隐藏入口；读不到（加载中/失败）不假设关闭。
+  const indexDisabled =
+    settingsState.status === 'ready' && settingsState.settings?.index?.enabled === false;
 
   return (
     <Stack spacing={3}>
@@ -41,12 +45,18 @@ export function VersionsView() {
           刷新
         </Button>
 
-        {isAdmin && (
+        {isAdmin && !indexDisabled && (
           <Button size="small" variant="contained" onClick={() => setDrawerOpen(true)}>
             新建索引
           </Button>
         )}
       </Stack>
+
+      {isAdmin && indexDisabled && (
+        <Alert severity="info">
+          本实例已关闭索引构建，请在本地工作站生成索引后用「注册索引」上传
+        </Alert>
+      )}
 
       <Card variant="outlined">
         <CardContent>
@@ -60,7 +70,7 @@ export function VersionsView() {
         </CardContent>
       </Card>
 
-      {isAdmin && (
+      {isAdmin && !indexDisabled && (
         <IndexDrawer
           open={drawerOpen}
           onClose={() => setDrawerOpen(false)}
@@ -157,11 +167,12 @@ function IndexDrawer({ open, onClose, onCreated }: IndexDrawerProps) {
     setError(null);
 
     try {
-      await createJob({
-        kind: 'index',
-        version,
-        options: { source_dir: sourceDir, force: false },
-      });
+      // 留空即省略 `options`：后端从官方 jar 跑完整五段；给 `options` 但 `source_dir` 为空会 422。
+      await createJob(
+        sourceDir
+          ? { kind: 'index', version, options: { source_dir: sourceDir, force: false } }
+          : { kind: 'index', version }
+      );
 
       onCreated();
       onClose();
@@ -191,12 +202,11 @@ function IndexDrawer({ open, onClose, onCreated }: IndexDrawerProps) {
           />
 
           <TextField
-            label="源码目录"
+            label="源码目录（可选）"
             value={sourceDir}
             onChange={(event) => setSourceDir(event.target.value)}
             placeholder="/data/mc-librarian/src/26.3"
-            helperText="服务端会统计该目录下 .java 与 data/ 的文件数与 token"
-            required
+            helperText="留空 = 从官方 jar 跑完整五段（下载 → 反编译 → 解析 → 索引）；填写 = 跳过下载反编译，直接从该目录解析"
             fullWidth
           />
 

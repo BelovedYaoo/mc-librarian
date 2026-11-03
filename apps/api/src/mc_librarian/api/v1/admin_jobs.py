@@ -11,7 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Request
 
 from mc_librarian import audit
-from mc_librarian.auth.deps import CurrentAdmin, DbConn, client_ip
+from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
 from mc_librarian.db import transaction
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
@@ -22,11 +22,18 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 NOT_FOUND_TITLE = "资源不存在"
 CONFLICT_TITLE = "冲突"
 BAD_REQUEST_TITLE = "请求不合法"
+FORBIDDEN_TITLE = "无权访问"
 
 # `options` 可省略：省略即从官方 jar 跑完整五段；给了 `options` 但 `source_dir` 为空属于笔误。
 MISSING_SOURCE_DIR_DETAIL = (
     "options.source_dir 不能为空：要么省略 options（从官方 jar 跑 download→decompile→parse→"
     "summarize→finalize 五段），要么给一个非空的源码目录"
+)
+
+# `MC_LIBRARIAN_INDEX_ENABLED=false` 时本实例不构建索引（节点内存不够跑反编译）。
+INDEX_DISABLED_DETAIL = (
+    "本实例已关闭索引构建（MC_LIBRARIAN_INDEX_ENABLED=false），"
+    "请在本地工作站生成索引后用 POST /v1/admin/versions 注册"
 )
 
 
@@ -52,12 +59,22 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     ),
     operation_id="createJob",
     responses={
-        403: problem_response("需要管理员权限"),
+        403: problem_response("需要管理员权限，或本实例已关闭索引构建"),
         409: problem_response("已有同类任务在运行"),
         422: problem_response("请求不合法"),
     },
 )
-def create_job(payload: JobCreate, request: Request, conn: DbConn, admin: CurrentAdmin) -> Job:
+def create_job(
+    payload: JobCreate,
+    request: Request,
+    conn: DbConn,
+    admin: CurrentAdmin,
+    settings: SettingsDep,
+) -> Job:
+    # 实例能力闸门：先于入参校验，关闭时任何索引任务都建不出来（与 payload 无关）。
+    if not settings.index_enabled:
+        raise ProblemException(403, FORBIDDEN_TITLE, INDEX_DISABLED_DETAIL)
+
     options = payload.options
 
     with transaction(conn):

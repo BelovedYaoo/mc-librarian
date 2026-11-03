@@ -358,7 +358,9 @@ class JobRunner:
         `succeeded` 时登记版本行：**仅当版本未注册时插入一行**，已注册版本不动；
         真的插入了才写 `version.recorded` 审计。`canceled` 时不碰版本表。这样 finalize
         执行期间到达的取消不会被吞掉。只有跑过 `parse`（索引阶段）的任务才登记：
-        没跑 `parse` 的任务产出的是源码树，不是可检索索引。
+        没跑 `parse` 的任务产出的是源码树，不是可检索索引。登记时把索引库路径、是否 remap、
+        源码字节数一并写入——否则 `/v1/versions` 会列出该版本、`_require_index` 却因
+        `db_path` 为空回 404「尚无索引文件」，状态自相矛盾。
 
         终态描述按 checkpoint 里实际完成的阶段生成：跑了 `parse` 才说「索引完成」，
         否则只说源码树就绪。取消描述用最后一个已完成阶段，而不是写死的 `finalize`。
@@ -377,11 +379,20 @@ class JobRunner:
 
             if status == "succeeded":
                 if indexed:
+                    # `parse` 成功即写出索引库；这里的路径是确定性的，存在性可以断言。
+                    index_file = index_path(self._settings.data_dir, version)
+                    assert index_file.is_file(), f"parse 完成后索引库必须存在：{index_file}"
+
                     inserted = store.insert_version_if_absent(
                         conn,
                         version=version,
                         files=int(checkpoint.get("files", 0)),
                         tokens=int(checkpoint.get("tokens", 0)),
+                        # `download` 阶段写入，等于 `downloads.needs_remap`；parse-only 任务没跑
+                        # download，按未 remap 记录（与旧行为一致）。
+                        obfuscated=bool(checkpoint.get("obfuscated", False)),
+                        source_size_bytes=int(checkpoint.get("source_size_bytes", 0)),
+                        db_path=str(index_file),
                     )
 
                     if inserted is not None:

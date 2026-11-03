@@ -58,6 +58,27 @@ OBFUSCATED = VersionDownloads(
     client_mappings_url="https://cdn.example/1.20.1/client_mappings.txt",
 )
 
+# 假反编译器的产物：能解析出类的合法 `.java`（`test_full_pipeline_index_is_queryable...`
+# 靠它验证「五段任务跑完直接用 `/v1/symbol` 查到符号」）。
+DECOMPILED_MOB_CATEGORY = """\
+package net.minecraft;
+
+public class MobCategory {
+  public int maxInstancesPerChunk;
+
+  public int getMaxInstancesPerChunk() {
+    return maxInstancesPerChunk;
+  }
+}
+"""
+DECOMPILED_LEVEL = """\
+package net.minecraft;
+
+public class Level {
+  public void tick() {}
+}
+"""
+
 
 # ----------------------------------------------------------------------
 # 假实现：下载 / remap / 反编译都只在本地落文件
@@ -102,7 +123,10 @@ class FakeRemapper:
 
 
 class FakeDecompiler:
-    """写一棵假源码树：两个 `.java` 加一个非 `.java`（不该被计数）。"""
+    """写一棵假源码树：两个含真实类的 `.java` 加一个非 `.java`（不该被计数）。
+
+    `.java` 内容必须是能被 tree-sitter 解析出类的合法源码，否则五段任务跑完 `parse` 也查不到符号。
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[Path, Path]] = []
@@ -111,8 +135,8 @@ class FakeDecompiler:
         self.calls.append((jar, dest))
         package = dest / "net" / "minecraft"
         package.mkdir(parents=True, exist_ok=True)
-        (package / "MobCategory.java").write_text("package net.minecraft;\n", encoding="utf-8")
-        (package / "Level.java").write_text("package net.minecraft;\n", encoding="utf-8")
+        (package / "MobCategory.java").write_text(DECOMPILED_MOB_CATEGORY, encoding="utf-8")
+        (package / "Level.java").write_text(DECOMPILED_LEVEL, encoding="utf-8")
         # 非 `.java` 文件与空目录都不该留在产物里。
         meta = dest / "META-INF"
         meta.mkdir(parents=True, exist_ok=True)
@@ -561,6 +585,9 @@ def test_runner_runs_full_pipeline_without_source_dir(settings: Settings) -> Non
         finished = store.find(conn, job.id)
         row = store.find_row(conn, job.id)
         version = store.find_version(conn, "26.3")
+        version_row = conn.execute(
+            "SELECT db_path, obfuscated, source_size_bytes FROM versions WHERE version = '26.3'"
+        ).fetchone()
 
     assert finished is not None
     assert finished.status == "succeeded"
@@ -578,6 +605,80 @@ def test_runner_runs_full_pipeline_without_source_dir(settings: Settings) -> Non
     assert (settings.data_dir / "db" / "26.3.sqlite").is_file()
     assert version is not None
     assert version.files == 2
+
+    # 版本行把产出索引、是否 remap、源码字节数都写上：`db_path` 指向真实文件，
+    # 后两项与 checkpoint 一致（否则 `/v1/versions` 会列出该版本、检索端点却回 404）。
+    assert version_row is not None
+    assert version_row["db_path"] == str(settings.data_dir / "db" / "26.3.sqlite")
+    assert Path(version_row["db_path"]).is_file()
+    assert version_row["obfuscated"] == int(checkpoint["obfuscated"])
+    assert version_row["source_size_bytes"] == checkpoint["source_size_bytes"]
+
+
+def test_full_pipeline_index_is_queryable_without_manual_registration(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#21 验收：一次不带 `options` 的任务跑完五段后，直接能用 `/v1/symbol` 查到符号。
+
+    这里用需要 remap 的 1.20.1（≤ 1.21.11 路径），顺带断言版本行记的是 `obfuscated=True`
+    （前端「已 remap」标记靠它）。以前任务只登记 `files`/`tokens`，`db_path` 恒为 NULL，
+    任务「成功」后四个检索端点全部 404。
+    """
+    tools, *_ = fake_tools({"1.20.1": OBFUSCATED})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+
+    with TestClient(create_app(settings)) as client:
+        setup = client.post(
+            "/v1/setup", json={"username": "admin", "password": "admin-password-1"}
+        )
+        assert setup.status_code == 201, setup.text
+
+        created = client.post("/v1/admin/jobs", json={"kind": "index", "version": "1.20.1"})
+        assert created.status_code == 202, created.text
+        job_id = created.json()["id"]
+
+        deadline = time.monotonic() + WAIT_TIMEOUT_S
+        job: dict[str, Any] = {}
+
+        while time.monotonic() < deadline:
+            job = client.get(f"/v1/admin/jobs/{job_id}").json()
+
+            if job["status"] in TERMINAL:
+                break
+
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"五段任务未在超时内结束：{job}")
+
+        assert job["status"] == "succeeded"
+
+        # 不再需要手工注册：任务一成功，索引端点就能查到刚反编译出来的类。
+        response = client.get(
+            "/v1/symbol", params={"version": "1.20.1", "name": "MobCategory"}
+        )
+
+        assert response.status_code == 200, response.text
+        matches = response.json()["matches"]
+        assert any(item["fqn"] == "net.minecraft.MobCategory" for item in matches)
+
+        versions = client.get("/v1/versions").json()["versions"]
+        registered = next(item for item in versions if item["version"] == "1.20.1")
+        assert registered["obfuscated"] is True
+
+    with Database.for_data_dir(settings.data_dir).connect() as conn:
+        row = conn.execute(
+            "SELECT db_path, obfuscated, source_size_bytes FROM versions WHERE version = '1.20.1'"
+        ).fetchone()
+        job_row = store.find_row(conn, job_id)
+
+    assert row is not None
+    assert job_row is not None
+
+    checkpoint = store.checkpoint_of(job_row)
+    assert row["db_path"] == str(settings.data_dir / "db" / "1.20.1.sqlite")
+    assert Path(row["db_path"]).is_file()
+    assert row["obfuscated"] == int(checkpoint["obfuscated"]) == 1
+    assert row["source_size_bytes"] == checkpoint["source_size_bytes"]
 
 
 def test_create_job_without_options_runs_full_pipeline(

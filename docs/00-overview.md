@@ -71,7 +71,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | 证书 | OHTTPS 自动续期的 `*.belovedyaoo.top` 泛域名 |
 | 发版 | **不接 CI/CD**。发版频率低，手工 `docker compose up -d` + 网关 conf 变更 |
 
-**索引不在节点上构建。** 节点只有 3.5 GiB 内存，反编译一个 5–7M token 的版本需要 3–4 GiB，硬跑会拖垮同机的其它服务。索引在本地工作站用 `mc-librarian index --version <v>` 生成，产物 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧的 `index.enabled` 默认关闭，版本页只显示状态与上传入口。
+**索引不在节点上构建。** 节点只有 3.5 GiB 内存，反编译一个 5–7M token 的版本需要 3–4 GiB，硬跑会拖垮同机的其它服务。索引在本地工作站用 `mc-librarian index --version <v>` 生成，产物 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与上传入口。
 
 ## 5. 数据模型
 
@@ -96,7 +96,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
 | `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；省略 `options` 的任务从官方 jar 跑完整五段，给了 `source_dir` 则从 `parse` 起） |
 | `job_logs` | id, job_id, ts, level, message |
-| `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，不改已注册行） |
+| `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行） |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
 | `audit` | id, actor_id, action, target, detail_json, ip, created_at |
 | `settings` | key, value_json, encrypted |

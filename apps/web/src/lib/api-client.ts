@@ -57,6 +57,9 @@ export type AcceptInviteRequest =
 /** 版本注册表里的一行（`GET /v1/versions`）。 */
 export type VersionInfo = components['schemas']['VersionInfo'];
 
+/** 实例设置（`GET /v1/admin/settings`）。当前只读，未实现的块整块省略。 */
+export type AdminSettings = components['schemas']['Settings'];
+
 /** 审计流水里的一行：谁在什么时候对什么做了什么（`GET /v1/admin/audit`）。 */
 export type AuditEntry = components['schemas']['AuditEntry'];
 
@@ -289,6 +292,11 @@ export async function listVersions(signal?: AbortSignal): Promise<VersionInfo[]>
   const body = await request<{ versions?: VersionInfo[] }>('/v1/versions', { signal });
 
   return body.versions ?? [];
+}
+
+/** 实例设置（仅 admin）。只读、值从运行时配置派生；未实现的块整块省略。 */
+export function getSettings(signal?: AbortSignal): Promise<AdminSettings> {
+  return request<AdminSettings>('/v1/admin/settings', { signal });
 }
 
 /** 注册已上传的 `db/<version>.sqlite`（管理员）。 */

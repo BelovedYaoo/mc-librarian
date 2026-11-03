@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     specialsource_jar: Path | None = None
     decompile_memory: str = "4G"
 
+    # 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）：关掉后 `POST /v1/admin/jobs` 返回 403。
+    # 完整五段（下载 + 反编译 + 全树解析）跑在服务进程内，反编译一个版本要 3–4 GiB；
+    # 生产节点内存不够，所以在节点上设 false，索引在本地工作站产出后用
+    # `POST /v1/admin/versions` 注册。默认 true，保证本地开箱可用。
+    index_enabled: bool = True
+
     @field_validator("decompile_memory")
     @classmethod
     def _check_decompile_memory(cls, value: str) -> str:

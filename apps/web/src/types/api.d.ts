@@ -405,6 +405,7 @@ export interface paths {
          *     阶段序列由 `options.source_dir` 决定：给了源目录走 `parse → summarize → finalize`；
          *     省略 `options` 则从官方 jar 起跑完整五段 `download → decompile → parse → summarize → finalize`；
          *     给了 `options` 但 `source_dir` 为空返回 422。见 `JobCreate`。
+         *     本实例关闭索引构建（`settings.index.enabled=false`）时返回 403。
          */
         post: operations["createJob"];
         delete?: never;
@@ -500,10 +501,15 @@ export interface paths {
         };
         /**
          * 读取设置
-         * @description 密钥字段只返回是否已设置，不返回明文。
+         * @description **只读**：值从运行时配置（`MC_LIBRARIAN_*`）派生，没有持久化。只返回真实存在的块，
+         *     未实现的块（`llm`/`ask`/`security`/`alerts`）整块省略，不拿示例默认值填充。
+         *     `settings` 表、持久化与 `PUT` 随 #11 落地。
          */
         get: operations["getSettings"];
-        /** 更新设置 */
+        /**
+         * 更新设置
+         * @description 尚未实现（`settings` 表与持久化随 #11 落地）。
+         */
         put: operations["putSettings"];
         post?: never;
         delete?: never;
@@ -857,6 +863,13 @@ export interface components {
                 enabled: boolean;
             };
             index?: {
+                /**
+                 * @description 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
+                 *     `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
+                 *     `POST /v1/admin/versions` 注册。只读：值是部署级配置，当前不可通过 `PUT` 修改。
+                 * @default true
+                 */
+                enabled: boolean;
                 /** @default 3g */
                 java_xmx: string;
                 /** @default 40 */
@@ -1784,6 +1797,7 @@ export interface operations {
                     "application/json": components["schemas"]["Settings"];
                 };
             };
+            403: components["responses"]["Forbidden"];
         };
     };
     putSettings: {
@@ -1808,6 +1822,7 @@ export interface operations {
                     "application/json": components["schemas"]["Settings"];
                 };
             };
+            403: components["responses"]["Forbidden"];
         };
     };
     getUsage: {

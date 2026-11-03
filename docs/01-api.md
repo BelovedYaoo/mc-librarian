@@ -112,7 +112,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
-| `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly |
+| `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly。**`GET` 已实现（只读，值从 `MC_LIBRARIAN_*` 运行时配置派生，未实现的块整块省略）；`PUT` 与 `settings` 表随 #11 落地** |
 | `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
 | `GET /v1/admin/audit` | 审计日志 |
 
@@ -128,9 +128,11 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 `download` / `decompile` 两段由 `#21` 实现（`mc-librarian fetch --version <v> --out <dir>` 是它的独立入口），产物（jar 路径、`.java` 文件数与字节数）写进 `jobs.checkpoint`（键为 `java_files`/`java_bytes`，与 `parse` 的 `files`/`source_size_bytes` 区分），续跑时跳过已完成阶段。省略 `options` 的任务从官方 jar 一路产出 `db/<version>.sqlite` 并登记版本，不需要人工衔接三步；`decompile` 产出的源码树就在 `parse` 消费的 `<data_dir>/src/<version>/`，`place_source_tree` 在源根相同时是 no-op。
 
+**索引构建闸门：** `MC_LIBRARIAN_INDEX_ENABLED=false`（默认 `true`）时本实例不构建索引，`POST /v1/admin/jobs` 一律回 `403`（`detail` 指向「本地生成 + `POST /v1/admin/versions` 注册」）；`GET /v1/admin/settings` 的 `index.enabled` 就是这个开关。生产节点内存不够跑反编译，靠它把索引留在本地工作站。
+
 **版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
-**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行保守默认值（未 remap、无摘要），已注册版本一个字段都不动。
+**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行，并把产出的 `db_path`、checkpoint 里的 `obfuscated`（`download` 阶段写入，等于是否需要官方 mappings）与 `source_size_bytes`（`parse` 阶段写入）一并登记（`has_summaries` 仍为 `false`，摘要由 #7 产出），已注册版本一个字段都不动。
 
 **用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定。
 
@@ -161,3 +163,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | 复审修复（#4 收尾）：迁移 v4 的 `jobs.kind`/`stage` CHECK 收窄到接口层取值域（`kind` 仅 `index`；`stage` 为 NULL 或 `parse`/`summarize`/`finalize`），读取路径不再可能读到投影外的值而 500；取消时 `stage` 列补写当前阶段（重排会清空它），与 `message` 对齐；契约文档去掉内部函数名与「存储层保留历史值」的过期说法。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | issue #5：`parse` 阶段真正落地——tree-sitter 解析 `.java`，把源码树就位到 `<data_dir>/src/<version>/`，并原子写出 `db/<version>.sqlite`（`files`/`classes`/`methods`/`fields`/`refs` 五表 + 索引；单文件失败跳过、失败率 > 20% 整体失败）；实现 `GET /v1/symbol`（fqn → simple → 后缀 → 编辑距离四级降级）、`GET /v1/references`（启发式引用反查，标出所在方法）、`GET /v1/outline`（包名 / imports / 类与方法签名与行号）、`GET /v1/read`（1-based 闭区间，超出 `max_tokens` 按行从尾部截断）；契约补四个端点的 401/404/422 并把 `Outline.package` 标为可空；前端加 `/browse` 检索调试台与侧边导航入口。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 集成修复（#21 × #5）：省略 `options` 的任务从官方 jar 跑完整五段 `download → decompile → parse → summarize → finalize`（不再只跑前两段），一次任务即产出可检索索引；`JobCreate.options.source_dir` 改为可选（给了 `options` 但值为空仍 422）；`decompile` 的 checkpoint 键改为 `java_files`/`java_bytes`，与 `parse` 的 `files`/`source_size_bytes` 区分；`run_stage` 对未知阶段报错而非静默产出空结果；源码根常量收敛到 `indexing.layout.source_root`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | 复审修复（#21 收尾）：任务产出的版本行补写 `db_path`（产出的 `db/<version>.sqlite`，确定性路径）、`obfuscated`（checkpoint 里 `download` 阶段的值）与 `source_size_bytes`（`parse` 阶段的值）——五段任务成功后 `/v1/symbol` 等直接可用，不再需要手工注册，`/v1/versions` 与检索端点不再自相矛盾；新增 `MC_LIBRARIAN_INDEX_ENABLED`（默认 `true`）闸门，关闭时 `POST /v1/admin/jobs` 回 403，`GET /v1/admin/settings` 落地为**只读**端点（`settings.index.enabled` 从运行时配置派生，未实现的块整块省略，`PUT` 与 `settings` 表随 #11）；契约补 `Settings.index.enabled` 与 `/v1/admin/settings` 的 403/描述；前端版本页「源码目录」改为可选（留空 = 从官方 jar 跑五段）并在关闭索引时隐藏「新建索引」入口。属 v0.2 设计内的增量补齐，`info.version` 不变 |
