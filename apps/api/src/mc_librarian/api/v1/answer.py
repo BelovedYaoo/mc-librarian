@@ -31,7 +31,7 @@ from mc_librarian import usage as usage_store
 from mc_librarian.answer import AskLimiter, AskRun, OpenAiCompatChatClient
 from mc_librarian.answer.tools import ToolBox
 from mc_librarian.api.v1.retrieval import require_index
-from mc_librarian.auth.deps import CurrentUser, DatabaseDep, DbConn, SettingsDep
+from mc_librarian.auth.deps import CurrentUser, DatabaseDep, DbConn, EffectiveSettingsDep
 from mc_librarian.config import (
     LlmConfigError,
     Settings,
@@ -126,7 +126,7 @@ async def ask(
     database: DatabaseDep,
     conn: DbConn,
     user: CurrentUser,
-    settings: SettingsDep,
+    settings: EffectiveSettingsDep,
     body: AskRequest,
 ) -> Response:
     if not settings.ask_enabled:
@@ -134,7 +134,7 @@ async def ask(
 
     limiter: AskLimiter = request.app.state.ask_limiter
 
-    if not limiter.try_acquire():
+    if not limiter.try_acquire(settings.max_concurrent_asks):
         raise ProblemException(
             429,
             TOO_MANY_TITLE,
@@ -153,8 +153,9 @@ async def ask(
             toolbox=ToolBox(index, settings, body.version),
             question=body.question,
             version=body.version,
-            max_steps=body.max_steps,
-            max_answer_tokens=body.max_answer_tokens,
+            # 省略时用服务端设置（设置页可改，见 `settings.ask.max_steps`）。
+            max_steps=body.max_steps or settings.ask_max_steps,
+            max_answer_tokens=body.max_answer_tokens or settings.ask_max_answer_tokens,
             max_context_tokens=settings.ask_max_context_tokens,
             timeout_s=float(settings.ask_timeout_s),
             llm_timeout_s=settings.llm_timeout_s,

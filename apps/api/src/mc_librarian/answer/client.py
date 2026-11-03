@@ -174,7 +174,7 @@ class OpenAiCompatChatClient:
     ) -> ChatCompletion:
         payload: dict[str, object] = {
             "model": self._config.model,
-            "temperature": 0,
+            "temperature": self._config.temperature,
             "messages": messages,
             "max_tokens": max_tokens,
         }

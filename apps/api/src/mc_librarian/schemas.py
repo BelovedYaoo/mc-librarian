@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from mc_librarian.problems import Problem
 
@@ -25,6 +25,10 @@ LogLevel = Literal["debug", "info", "warn", "error"]
 # 所以 `mc-librarian index` 的 CLI 也用同一条正则先校验一次。
 VERSION_PATTERN: Final = r"^[A-Za-z0-9._-]+$"
 
+# `-Xmx` 的值：数字 + 单位，避免把任意字符串拼进 java 命令行（设置页与 `config.Settings`
+# 的校验共用同一条；`config` 从这里 import，避免 schemas → config 的模块级循环）。
+JAVA_XMX_PATTERN: Final = r"^\d+[kKmMgG]$"
+
 # 检索/阅读端点的枚举（契约 `SymbolKind` 与 `SymbolDetail`/`Outline` 的 `kind`）。
 SymbolKind = Literal["any", "class", "method", "field"]
 SymbolDetailKind = Literal["class", "method", "field"]
@@ -35,6 +39,8 @@ MemberKind = Literal["method", "field"]
 __all__ = [
     "VERSION_PATTERN",
     "AcceptInviteRequest",
+    "AlertsSettings",
+    "AlertsSettingsUpdate",
     "AskCitationEvent",
     "AskDeltaEvent",
     "AskDoneEvent",
@@ -44,6 +50,7 @@ __all__ = [
     "AskRequest",
     "AskResponse",
     "AskSettings",
+    "AskSettingsUpdate",
     "AskStep",
     "AskStepEvent",
     "AuditEntry",
@@ -56,6 +63,7 @@ __all__ = [
     "Hit",
     "HitType",
     "IndexSettings",
+    "IndexSettingsUpdate",
     "InviteStatus",
     "Job",
     "JobCreate",
@@ -66,6 +74,8 @@ __all__ = [
     "JobOptions",
     "JobStage",
     "JobStatus",
+    "LlmSettings",
+    "LlmSettingsUpdate",
     "LogLevel",
     "LoginRequest",
     "MemberKind",
@@ -82,7 +92,9 @@ __all__ = [
     "SearchRequest",
     "SearchResponse",
     "SecuritySettings",
+    "SecuritySettingsUpdate",
     "Settings",
+    "SettingsUpdate",
     "SetupRequest",
     "SetupStatus",
     "SymbolDetail",
@@ -297,51 +309,140 @@ class RegisterVersionRequest(BaseModel):
     obfuscated: bool = True
 
 
-class IndexSettings(BaseModel):
-    """契约 `Settings.index` 里当前**真正返回**的两个字段（`GET /v1/admin/settings`）。
+class LlmSettings(BaseModel):
+    """契约 `Settings.llm`：密钥只写不读，响应里只回 `api_key_set` 布尔值。"""
 
-    `summary_batch_size`/`summary_concurrency`（#7 已实现为运行时配置
-    `MC_LIBRARIAN_SUMMARY_BATCH_SIZE` / `MC_LIBRARIAN_SUMMARY_CONCURRENCY`）与 `llm` 块一样，
-    随 #11 的 `PUT` 一起暴露；这里只读返回 `enabled` 与 `java_xmx`。
-    """
-
-    enabled: bool
-    java_xmx: str
+    base_url: str | None = None
+    model: str | None = None
+    temperature: float
+    api_key_set: bool
 
 
 class AskSettings(BaseModel):
-    """契约 `Settings.ask` 里当前**真正返回**的两个字段（`GET /v1/admin/settings`）。
+    """契约 `Settings.ask`。`max_steps` / `max_answer_tokens` 是 `AskRequest` 省略时的默认值。"""
 
-    `max_steps`/`max_answer_tokens` 是**每次请求**的参数（契约 `AskRequest`），不是服务端设置，
-    所以不在这里返回；`enabled` 与 `timeout_s` 是运行时配置
-    （`MC_LIBRARIAN_ASK_ENABLED` / `MC_LIBRARIAN_ASK_TIMEOUT_S`），按值返回。
-    """
+    max_steps: int
+    max_answer_tokens: int
+    timeout_s: int
+    enabled: bool
+
+
+class IndexSettings(BaseModel):
+    """契约 `Settings.index`。`enabled` 是部署级闸门（只读），`java_xmx` 是反编译的 `-Xmx`。"""
 
     enabled: bool
-    timeout_s: int
+    java_xmx: str
+    summary_batch_size: int
+    summary_concurrency: int
 
 
 class SecuritySettings(BaseModel):
-    """契约 `Settings.security` 里当前**真正返回**的字段。
+    """契约 `Settings.security`：会话 / 邀请有效期与问答并发上限。"""
 
-    只返回问答并发上限（`MC_LIBRARIAN_MAX_CONCURRENT_ASKS`）；会话/邀请有效期是账号体系的
-    部署级配置，随 #11 的 `PUT` 一起暴露。
-    """
-
+    session_ttl_hours: int
+    invite_ttl_hours: int
     max_concurrent_asks: int
 
 
-class Settings(BaseModel):
-    """契约 `components.schemas.Settings`。
+class AlertsSettings(BaseModel):
+    """契约 `Settings.alerts`：Webhook 只写不读，阈值未配置时整字段省略（不回 0）。"""
 
-    只返回**有实现**的块（值从运行时配置派生）：`index` / `ask` / `security`。
-    `llm`/`alerts` 尚未实现，整块省略而不是拿契约里的示例默认值填充——那会让前端以为
-    「模型已配置、密钥已设置」。
+    webhook_url_set: bool
+    daily_token_threshold: int | None = None
+    daily_cost_threshold_usd: float | None = None
+
+
+class Settings(BaseModel):
+    """契约 `components.schemas.Settings`：`GET/PUT /v1/admin/settings` 的响应。
+
+    值 = 数据库覆盖 + 环境配置兜底（见 `settings_store`）。**只返回真实存在的值**：
+    `llm.base_url` / `llm.model` / 两个告警阈值未配置时整个字段省略，不拿契约里的示例默认值
+    填充——那会让前端以为「模型已配置」。密钥永远不回明文或密文，只回 `*_set`。
     """
 
-    index: IndexSettings
+    llm: LlmSettings
     ask: AskSettings
+    index: IndexSettings
     security: SecuritySettings
+    alerts: AlertsSettings
+
+
+# ----------------------------------------------------------------------
+# `PUT /v1/admin/settings` 的请求体：部分更新，只改请求里给出的字段。
+#
+# 字段类型一律 `X | None`：值给 `null`（或密钥给空字符串）= 清除该覆盖，回退环境配置。
+# `extra="forbid"` 让拼错的字段名直接 422，而不是静默什么都不做。
+# `index.enabled` 刻意不在表里：契约把它标成只读（部署级闸门，只能改环境变量）。
+# ----------------------------------------------------------------------
+
+
+class LlmSettingsUpdate(BaseModel):
+    """契约 `LlmSettingsUpdate`。`api_key` 给空字符串 = 清除密钥。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
+    api_key: str | None = Field(default=None, max_length=500)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+
+
+class AskSettingsUpdate(BaseModel):
+    """契约 `AskSettingsUpdate`。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_steps: int | None = Field(default=None, ge=1, le=12)
+    max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
+    timeout_s: int | None = Field(default=None, ge=1, le=3600)
+    enabled: bool | None = None
+
+
+class IndexSettingsUpdate(BaseModel):
+    """契约 `IndexSettingsUpdate`。`enabled` 只读，不在可改项里。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    java_xmx: str | None = Field(default=None, pattern=JAVA_XMX_PATTERN)
+    summary_batch_size: int | None = Field(default=None, ge=1, le=500)
+    summary_concurrency: int | None = Field(default=None, ge=1, le=64)
+
+
+class SecuritySettingsUpdate(BaseModel):
+    """契约 `SecuritySettingsUpdate`。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_ttl_hours: int | None = Field(default=None, ge=1, le=24 * 365)
+    invite_ttl_hours: int | None = Field(default=None, ge=1, le=24 * 365)
+    max_concurrent_asks: int | None = Field(default=None, ge=1, le=64)
+
+
+class AlertsSettingsUpdate(BaseModel):
+    """契约 `AlertsSettingsUpdate`。`webhook_url` 给空字符串 = 清除。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    webhook_url: str | None = Field(default=None, max_length=500)
+    daily_token_threshold: int | None = Field(default=None, ge=1)
+    daily_cost_threshold_usd: float | None = Field(default=None, gt=0)
+
+
+class SettingsUpdate(BaseModel):
+    """契约 `components.schemas.SettingsUpdate`：`PUT /v1/admin/settings` 的请求体。
+
+    部分更新：只有出现在请求体里的字段会被写，未给的保持原值。
+    块字段用 `default_factory` 而不是 `| None`：部分更新用「不出现」表达，整块传 `null` 没有语义，
+    直接 422 比静默忽略清楚（`model_fields_set` 两种写法都能分辨「给没给」）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    llm: LlmSettingsUpdate = Field(default_factory=LlmSettingsUpdate)
+    ask: AskSettingsUpdate = Field(default_factory=AskSettingsUpdate)
+    index: IndexSettingsUpdate = Field(default_factory=IndexSettingsUpdate)
+    security: SecuritySettingsUpdate = Field(default_factory=SecuritySettingsUpdate)
+    alerts: AlertsSettingsUpdate = Field(default_factory=AlertsSettingsUpdate)
 
 
 class SymbolMember(BaseModel):
@@ -547,12 +648,16 @@ class AskStep(BaseModel):
 
 
 class AskRequest(BaseModel):
-    """契约 `components.schemas.AskRequest`；`version` 必传，模型不可改。"""
+    """契约 `components.schemas.AskRequest`；`version` 必传，模型不可改。
+
+    `max_steps` / `max_answer_tokens` 省略时用服务端设置（`settings.ask.*`）——设置页改的就是
+    这两个默认值，见 `api/v1/answer.py`。
+    """
 
     question: str = Field(min_length=1, max_length=2000)
     version: str
-    max_steps: int = Field(default=6, ge=1, le=12)
-    max_answer_tokens: int = Field(default=8000, ge=500, le=32000)
+    max_steps: int | None = Field(default=None, ge=1, le=12)
+    max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
 
 
 class AskResponse(BaseModel):

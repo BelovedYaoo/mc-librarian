@@ -706,9 +706,9 @@ paths:
       tags: [admin]
       summary: 读取设置
       description: |
-        **只读**：值从运行时配置（`MC_LIBRARIAN_*`）派生，没有持久化。只返回真实存在的块，
-        未实现的块（`llm`/`ask`/`security`/`alerts`）整块省略，不拿示例默认值填充。
-        `settings` 表、持久化与 `PUT` 随 #11 落地。
+        值 = `settings` 表里的覆盖 + `MC_LIBRARIAN_*` 运行时配置兜底；每次请求实时查库，
+        所以保存后立即生效。只返回**真实存在**的值：`llm.base_url` / `llm.model` / 告警阈值
+        未配置时整字段省略，不拿示例默认值填充。密钥只回 `api_key_set` / `webhook_url_set`。
       operationId: getSettings
       responses:
         "200":
@@ -720,20 +720,25 @@ paths:
     put:
       tags: [admin]
       summary: 更新设置
-      description: "尚未实现（`settings` 表与持久化随 #11 落地）。"
+      description: |
+        **部分更新**：只改请求里给出的字段，未给的保持原值（前端可以只提交一个开关）。
+        值给 `null`（密钥给空字符串）= 清除该覆盖，回退环境配置。
+        `index.enabled` 是部署级闸门（只读），不在可改项里，传了返回 `422`。
+        保存后立即生效，不需要重启；每次更新写一条 `settings.updated` 审计，只记改了哪些键。
       operationId: putSettings
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/Settings" }
+            schema: { $ref: "#/components/schemas/SettingsUpdate" }
       responses:
         "200":
-          description: OK
+          description: OK（返回更新后的完整设置）
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Settings" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/BadRequest" }
 
   /v1/admin/usage:
     get:
@@ -1042,8 +1047,16 @@ components:
       properties:
         question: { type: string, minLength: 1, maxLength: 2000 }
         version: { type: string }
-        max_steps: { type: integer, minimum: 1, maximum: 12, default: 6 }
-        max_answer_tokens: { type: integer, minimum: 500, maximum: 32000, default: 8000 }
+        max_steps:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 12
+          description: 省略时用服务端设置 `settings.ask.max_steps`（默认 6）
+        max_answer_tokens:
+          type: [integer, "null"]
+          minimum: 500
+          maximum: 32000
+          description: 省略时用服务端设置 `settings.ask.max_answer_tokens`（默认 8000）
 
     AskEvent:
       oneOf:
@@ -1253,47 +1266,169 @@ components:
 
     Settings:
       type: object
+      description: |
+        `GET/PUT /v1/admin/settings` 的响应。值 = 数据库覆盖 + 环境配置兜底；
+        未配置的可选字段（`llm.base_url` / `llm.model` / 告警阈值）整字段省略。
+      required: [llm, ask, index, security, alerts]
       properties:
-        llm:
-          type: object
-          properties:
-            base_url: { type: string }
-            model: { type: string, example: "deepseek-4.1-flash" }
-            api_key_set: { type: boolean, readOnly: true }
-            api_key: { type: string, writeOnly: true }
-            temperature: { type: number, default: 0.2 }
-        ask:
-          type: object
-          properties:
-            max_steps: { type: integer, default: 6 }
-            max_answer_tokens: { type: integer, default: 8000 }
-            timeout_s: { type: integer, default: 120 }
-            enabled: { type: boolean, default: true, description: 全局熔断开关 }
-        index:
-          type: object
-          properties:
-            enabled:
-              type: boolean
-              default: true
-              description: |
-                索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
-                `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
-                `POST /v1/admin/versions` 注册。只读：值是部署级配置，当前不可通过 `PUT` 修改。
-            java_xmx: { type: string, default: "4G" }
-            summary_batch_size: { type: integer, default: 40 }
-            summary_concurrency: { type: integer, default: 4 }
-        security:
-          type: object
-          properties:
-            session_ttl_hours: { type: integer, default: 168 }
-            invite_ttl_hours: { type: integer, default: 48 }
-            max_concurrent_asks: { type: integer, default: 4 }
-        alerts:
-          type: object
-          properties:
-            webhook_url: { type: string, writeOnly: true }
-            daily_token_threshold: { type: integer }
-            daily_cost_threshold_usd: { type: number }
+        llm: { $ref: "#/components/schemas/LlmSettings" }
+        ask: { $ref: "#/components/schemas/AskSettings" }
+        index: { $ref: "#/components/schemas/IndexSettings" }
+        security: { $ref: "#/components/schemas/SecuritySettings" }
+        alerts: { $ref: "#/components/schemas/AlertsSettings" }
+
+    LlmSettings:
+      type: object
+      description: 生成模型配置。密钥只写不读：响应里只有 `api_key_set`，不回明文也不回密文。
+      required: [temperature, api_key_set]
+      properties:
+        base_url:
+          type: [string, "null"]
+          description: OpenAI 兼容端点；未配置（环境变量与数据库都没有）时整字段省略
+        model:
+          type: [string, "null"]
+          example: "deepseek-4.1-flash"
+        temperature:
+          type: number
+          description: 采样温度；默认 0（确定性输出，摘要与问答都要求可复现），上限 2
+        api_key_set:
+          type: boolean
+          readOnly: true
+          description: 是否已设置 `llm.api_key`（数据库覆盖或环境变量任一有值）
+
+    AskSettings:
+      type: object
+      required: [max_steps, max_answer_tokens, timeout_s, enabled]
+      properties:
+        max_steps:
+          type: integer
+          default: 6
+          description: "`AskRequest.max_steps` 省略时的服务端默认值"
+        max_answer_tokens:
+          type: integer
+          default: 8000
+          description: "`AskRequest.max_answer_tokens` 省略时的服务端默认值"
+        timeout_s: { type: integer, default: 120 }
+        enabled:
+          type: boolean
+          default: true
+          description: 全局熔断开关；`false` 时 `/v1/ask` 返回 429，检索不受影响
+
+    IndexSettings:
+      type: object
+      required: [enabled, java_xmx, summary_batch_size, summary_concurrency]
+      properties:
+        enabled:
+          type: boolean
+          default: true
+          description: |
+            索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
+            `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
+            `POST /v1/admin/versions` 注册。只读：值是部署级配置，不可通过 `PUT` 修改。
+        java_xmx:
+          type: string
+          default: "4G"
+          pattern: '^\d+[kKmMgG]$'
+          description: 反编译时传给 java 的 `-Xmx`
+        summary_batch_size: { type: integer, default: 40 }
+        summary_concurrency: { type: integer, default: 4 }
+
+    SecuritySettings:
+      type: object
+      required: [session_ttl_hours, invite_ttl_hours, max_concurrent_asks]
+      properties:
+        session_ttl_hours:
+          type: integer
+          default: 168
+          description: 会话有效期（小时）；改后只影响新下发的 cookie
+        invite_ttl_hours:
+          type: integer
+          default: 48
+          description: 一次性邀请链接的有效期（小时）
+        max_concurrent_asks:
+          type: integer
+          default: 4
+          description: 同时在跑的问答数上限；超出返回 429
+
+    AlertsSettings:
+      type: object
+      description: 用量告警（`GET /v1/admin/usage` 的阈值与 Webhook）。未配置的阈值不回 0。
+      required: [webhook_url_set]
+      properties:
+        webhook_url_set:
+          type: boolean
+          readOnly: true
+          description: 是否已设置 `alerts.webhook_url`
+        daily_token_threshold:
+          type: [integer, "null"]
+          description: 每日 token 告警阈值；未配置时整字段省略
+        daily_cost_threshold_usd:
+          type: [number, "null"]
+          description: 每日成本告警阈值（美元）；未配置时整字段省略
+
+    SettingsUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        `PUT /v1/admin/settings` 的请求体。**部分更新**：只有出现在请求里的字段会被写，
+        未给的保持原值；值给 `null`（密钥给空字符串）= 清除该覆盖，回退环境配置。
+        未列出的字段（如 `index.enabled`）一律不可改，传了返回 422。
+      properties:
+        llm: { $ref: "#/components/schemas/LlmSettingsUpdate" }
+        ask: { $ref: "#/components/schemas/AskSettingsUpdate" }
+        index: { $ref: "#/components/schemas/IndexSettingsUpdate" }
+        security: { $ref: "#/components/schemas/SecuritySettingsUpdate" }
+        alerts: { $ref: "#/components/schemas/AlertsSettingsUpdate" }
+
+    LlmSettingsUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        base_url: { type: [string, "null"], maxLength: 500 }
+        model: { type: [string, "null"], maxLength: 200 }
+        api_key:
+          type: [string, "null"]
+          maxLength: 500
+          writeOnly: true
+          description: 空字符串（或 `null`）= 清除密钥；明文只进不出
+        temperature: { type: [number, "null"], minimum: 0, maximum: 2 }
+
+    AskSettingsUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        max_steps: { type: [integer, "null"], minimum: 1, maximum: 12 }
+        max_answer_tokens: { type: [integer, "null"], minimum: 500, maximum: 32000 }
+        timeout_s: { type: [integer, "null"], minimum: 1, maximum: 3600 }
+        enabled: { type: [boolean, "null"] }
+
+    IndexSettingsUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        java_xmx: { type: [string, "null"], pattern: '^\d+[kKmMgG]$' }
+        summary_batch_size: { type: [integer, "null"], minimum: 1, maximum: 500 }
+        summary_concurrency: { type: [integer, "null"], minimum: 1, maximum: 64 }
+
+    SecuritySettingsUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        session_ttl_hours: { type: [integer, "null"], minimum: 1, maximum: 8760 }
+        invite_ttl_hours: { type: [integer, "null"], minimum: 1, maximum: 8760 }
+        max_concurrent_asks: { type: [integer, "null"], minimum: 1, maximum: 64 }
+
+    AlertsSettingsUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        webhook_url:
+          type: [string, "null"]
+          maxLength: 500
+          writeOnly: true
+          description: 空字符串（或 `null`）= 清除；明文只进不出
+        daily_token_threshold: { type: [integer, "null"], minimum: 1 }
+        daily_cost_threshold_usd: { type: [number, "null"], exclusiveMinimum: 0 }
 
     UsageReport:
       type: object

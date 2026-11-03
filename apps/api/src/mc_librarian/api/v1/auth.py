@@ -5,7 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response
 
 from mc_librarian.auth import cookies, passwords, sessions, users
-from mc_librarian.auth.deps import CurrentUser, DbConn, SettingsDep, client_ip
+from mc_librarian.auth.deps import (
+    CurrentUser,
+    DbConn,
+    EffectiveSettingsDep,
+    SettingsDep,
+    client_ip,
+)
 from mc_librarian.config import SESSION_COOKIE_NAME
 from mc_librarian.db import transaction
 from mc_librarian.problems import ProblemException, problem_response
@@ -35,7 +41,7 @@ def login(
     request: Request,
     response: Response,
     conn: DbConn,
-    settings: SettingsDep,
+    settings: EffectiveSettingsDep,
 ) -> User:
     """同步 def：argon2 校验（故意很慢）与 sqlite 读写都不能占着事件循环。"""
     row = users.find_by_username(conn, payload.username)

@@ -21,6 +21,7 @@ import jieba
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import TEST_SECRET
 from mc_librarian.config import (
     LLM_API_KEY_ENV,
     LLM_BASE_URL_ENV,
@@ -608,7 +609,7 @@ def test_unconfigured_llm_fails_the_stage_explicitly(
     for name in (LLM_BASE_URL_ENV, LLM_MODEL_ENV, LLM_API_KEY_ENV):
         monkeypatch.delenv(name, raising=False)
 
-    settings = Settings(data_dir=tmp_path / "data")
+    settings = Settings(data_dir=tmp_path / "data", secret=TEST_SECRET)
 
     with TestClient(create_app(settings)) as client:
         setup_admin(client)

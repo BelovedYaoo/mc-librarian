@@ -18,8 +18,9 @@
 **为什么预分词**：`trigram` 对两字词（「刷怪」）不友好，而 `unicode61` 又不切中文，两者单独用
 都会漏掉两字词；所以入库前 jieba 切好、查询时对 query 做同样切分。
 
-LLM 配置只从环境变量读（`#11` 未落地），未配置时明确报错（见 `config.resolve_llm_config`），
-不静默跳过——静默跳过会让索引看起来「有摘要」但实际为空。
+LLM 配置默认从环境变量读（`MC_LIBRARIAN_LLM_*`），`#11` 落地后 `settings` 表的覆盖优先
+（调用方先用 `settings_store.effective_settings()` 叠好再传进来），未配置时明确报错
+（见 `config.resolve_llm_config`），不静默跳过——静默跳过会让索引看起来「有摘要」但实际为空。
 """
 
 from __future__ import annotations
@@ -548,7 +549,7 @@ class OpenAiCompatClient:
     async def summarize_batch(self, digests: Sequence[ClassDigest]) -> str:
         payload = {
             "model": self._config.model,
-            "temperature": 0,
+            "temperature": self._config.temperature,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": build_prompt(digests)},

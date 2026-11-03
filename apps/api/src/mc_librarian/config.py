@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -16,6 +17,8 @@ from typing import Final, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from mc_librarian.schemas import JAVA_XMX_PATTERN
 
 DATA_DIR_ENV: Final = "MC_LIBRARIAN_DATA_DIR"
 DATA_DIR_NAME: Final = "mc-librarian-data"
@@ -27,14 +30,16 @@ ENV_PRODUCTION: Final = "production"
 # 会话 cookie 名，与 docs/openapi.yaml 的 `components.securitySchemes.cookieAuth` 一致。
 SESSION_COOKIE_NAME: Final = "mc_librarian_session"
 
+# 主密钥（AES-GCM 加密 `settings` 表里的密钥值）。缺失/过短时服务启动失败，见
+# `secretbox.require_secret`——自动生成并落盘会让重启后旧密文解不开。
+SECRET_ENV: Final = "MC_LIBRARIAN_SECRET"
+
 # 仓库哨兵：同时存在 `package.json` 与 `apps/api/` 才算仓库根。
 # 刻意不用 `.git`（worktree / 源码快照里可能没有）。
 _REPO_SENTINELS: Final = (Path("package.json"), Path("apps", "api"))
 
-# `-Xmx` 的值：数字 + 单位，避免把任意字符串拼进 java 命令行。
-DECOMPILE_MEMORY_PATTERN: Final = re.compile(r"^\d+[kKmMgG]$")
-
-# 摘要层（#7）的 LLM 配置环境变量（`#11` 未落地，只从环境变量读）。
+# 摘要层（#7）的 LLM 配置环境变量；`#11` 之后 `settings` 表里的覆盖优先（由调用方
+# 先用 `settings_store.effective_settings()` 叠好再传进来）。
 LLM_BASE_URL_ENV: Final = "MC_LIBRARIAN_LLM_BASE_URL"
 LLM_MODEL_ENV: Final = "MC_LIBRARIAN_LLM_MODEL"
 LLM_API_KEY_ENV: Final = "MC_LIBRARIAN_LLM_API_KEY"
@@ -109,6 +114,10 @@ class Settings(BaseSettings):
     # 会话 cookie 的 `Secure` 属性：本地 http 下给 true 会让浏览器直接丢弃 cookie，
     # 所以默认 false（dev）；生产在 HTTPS 边界后面部署时设 `MC_LIBRARIAN_COOKIE_SECURE=true`。
     cookie_secure: bool = False
+    # 主密钥（`MC_LIBRARIAN_SECRET`）：`settings` 表里 `llm.api_key` / `alerts.webhook_url`
+    # 的 AES-GCM 主密钥。**必填**——缺失或短于 `secretbox.MIN_SECRET_LENGTH` 时
+    # `main.lifespan` 直接抛错，服务起不来（见 `secretbox.require_secret`）。
+    secret: str | None = None
     # 会话有效期（小时），与 `settings.security.session_ttl_hours` 的默认值保持一致。
     session_ttl_hours: int = Field(default=168, ge=1, le=24 * 365)
     # 一次性邀请链接的有效期（小时），与 `settings.security.invite_ttl_hours` 一致。
@@ -121,11 +130,14 @@ class Settings(BaseSettings):
     specialsource_jar: Path | None = None
     decompile_memory: str = "4G"
 
-    # 中文摘要（#7）：LLM 配置只从环境变量读（`#11` 落地后改为「数据库覆盖 + 环境变量兜底」，
-    # 读取收敛在 `resolve_llm_config` 一个函数里）。未配置时 `summarize` 阶段明确失败，不静默跳过。
+    # 中文摘要（#7）：LLM 配置默认只从环境变量读，`#11` 落地后 `settings` 表里的覆盖优先
+    # （读取收敛在 `resolve_llm_config` 一个函数里，覆盖由调用方先叠好）。未配置时
+    # `summarize` 阶段明确失败，不静默跳过。
     llm_base_url: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None
+    # 采样温度（契约 `llm.temperature`）：0 表示确定性输出，摘要与问答都要求可复现。
+    llm_temperature: float = Field(default=0.0, ge=0, le=2)
     # 单次 LLM 请求的超时（秒）。
     llm_timeout_s: float = Field(default=120.0, gt=0)
     # 摘要按 package 分批，每批类数（规格 §3 建议 30–50，默认 40）。
@@ -138,6 +150,9 @@ class Settings(BaseSettings):
     ask_enabled: bool = True
     # 单次问答的总超时（秒）：超时走降级，不冒泡成 500。
     ask_timeout_s: int = Field(default=120, ge=1, le=3600)
+    # `AskRequest.max_steps` / `max_answer_tokens` 省略时的服务端默认值（契约 `settings.ask.*`）。
+    ask_max_steps: int = Field(default=6, ge=1, le=12)
+    ask_max_answer_tokens: int = Field(default=8000, ge=500, le=32000)
     # 工具结果累积的上下文预算（token）：超出时从最旧的工具结果开始丢弃（规格 §3）。
     ask_max_context_tokens: int = Field(default=60000, ge=1000)
     # 同时在跑的问答数上限（`settings.security.max_concurrent_asks`）：超出返回 429。
@@ -157,12 +172,19 @@ class Settings(BaseSettings):
     # 完整五段（下载 + 反编译 + 全树解析）跑在服务进程内，反编译一个版本要 3–4 GiB；
     # 生产节点内存不够，所以在节点上设 false，索引在本地工作站产出后用
     # `POST /v1/admin/versions` 注册。默认 true，保证本地开箱可用。
+    # 契约里 `settings.index.enabled` 标成只读：它是部署级配置，只能改环境变量。
     index_enabled: bool = True
+
+    # 用量告警（`#12` 读它）：超阈值只推 Webhook，不自动暂停服务。未配置的阈值保持 None
+    # （「没配」和「配成 0」是两回事），由 `resolve_alerts_config` 整理后交给 #12。
+    alerts_webhook_url: str | None = None
+    alerts_daily_token_threshold: int | None = Field(default=None, ge=1)
+    alerts_daily_cost_threshold_usd: float | None = Field(default=None, gt=0)
 
     @field_validator("decompile_memory")
     @classmethod
     def _check_decompile_memory(cls, value: str) -> str:
-        if not DECOMPILE_MEMORY_PATTERN.match(value):
+        if not re.match(JAVA_XMX_PATTERN, value):
             raise ValueError(f"decompile_memory 必须是形如 4G / 512M 的值，收到：{value}")
 
         return value
@@ -210,6 +232,16 @@ class LlmConfig:
     base_url: str
     model: str
     api_key: str
+    temperature: float
+
+
+@dataclass(frozen=True)
+class AlertsConfig:
+    """用量告警配置（`#12` 读它）：未配置的阈值是 `None`，不是 0。"""
+
+    webhook_url: str | None
+    daily_token_threshold: int | None
+    daily_cost_threshold_usd: float | None
 
 
 @dataclass(frozen=True)
@@ -225,11 +257,11 @@ class LlmConfigError(RuntimeError):
 
 
 def resolve_llm_config(settings: Settings) -> LlmConfig:
-    """摘要层的 LLM 配置入口（`#11` 落地后改「数据库覆盖 + 环境变量兜底」时只改这里）。
+    """摘要层与问答的 LLM 配置入口。
 
-    只从环境变量读（`MC_LIBRARIAN_LLM_BASE_URL` / `MC_LIBRARIAN_LLM_MODEL` /
-    `MC_LIBRARIAN_LLM_API_KEY`，经 `Settings` 的 `MC_LIBRARIAN_` 前缀映射）。缺任何一项都
-    抛 `LlmConfigError` 并列出缺哪个——静默跳过会让索引看起来「有摘要」但实际为空。
+    只从传进来的 `Settings` 读（`MC_LIBRARIAN_LLM_*` 环境变量，或 `#11` 的
+    `settings` 表覆盖——覆盖由调用方先用 `settings_store.effective_settings()` 叠好）。
+    缺任何一项都抛 `LlmConfigError` 并列出缺哪个——静默跳过会让索引看起来「有摘要」但实际为空。
     """
     values = {
         LLM_BASE_URL_ENV: settings.llm_base_url,
@@ -242,14 +274,43 @@ def resolve_llm_config(settings: Settings) -> LlmConfig:
         raise LlmConfigError(
             "未配置 LLM，请设置 "
             + " / ".join(missing)
-            + "（OpenAI 兼容端点；`#11` 未落地前只读环境变量）"
+            + "（OpenAI 兼容端点；也可在设置页写入，优先于环境变量）"
         )
 
     return LlmConfig(
         base_url=str(settings.llm_base_url).rstrip("/"),
         model=str(settings.llm_model),
         api_key=str(settings.llm_api_key),
+        temperature=settings.llm_temperature,
     )
+
+
+def resolve_alerts_config(
+    settings: Settings, conn: sqlite3.Connection | None = None
+) -> AlertsConfig:
+    """用量告警配置（`#12` 的入口）：数据库覆盖 + 环境配置兜底。
+
+    给了 `conn`（控制面连接）就连同 `settings` 表里的覆盖一起解析，否则只用传进来的
+    `Settings`（环境配置，或已叠好覆盖的 `effective_settings` 结果）——两种调法等价。
+    未配置的字段保持 `None`：`#12` 据此判断「这个阈值要不要告警」，不编 0 之类的假值。
+    """
+    if conn is not None:
+        # 局部导入：只有真的要从库里读覆盖时才需要 `settings_store`（它连带 `db`/`audit`），
+        # 而 `config` 被 CLI 与大量测试导入，不必为此把控制面存储拉进每次 import。
+        from mc_librarian.settings_store import effective_settings, read_overrides
+
+        settings = effective_settings(settings, read_overrides(conn, settings))
+
+    return AlertsConfig(
+        webhook_url=_blank_to_none(settings.alerts_webhook_url),
+        daily_token_threshold=settings.alerts_daily_token_threshold,
+        daily_cost_threshold_usd=settings.alerts_daily_cost_threshold_usd,
+    )
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """空串与「未配置」等价：环境变量设成空串是常见笔误，别让它变成一个假 URL。"""
+    return value if value and value.strip() else None
 
 
 def resolve_llm_pricing(settings: Settings) -> LlmPricing:

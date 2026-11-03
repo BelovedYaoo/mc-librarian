@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import ADMIN_PASSWORD, ADMIN_USERNAME, session_cookie
+from conftest import ADMIN_PASSWORD, ADMIN_USERNAME, TEST_SECRET, session_cookie
 from mc_librarian.auth import passwords, sessions
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import LATEST_VERSION, Database, migrate, schema_version, transaction
@@ -169,7 +169,7 @@ def test_transaction_rolls_back_on_error(tmp_path: Path) -> None:
 
 
 def test_cookie_secure_flag_follows_config(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", cookie_secure=True)
+    settings = Settings(data_dir=tmp_path / "data", cookie_secure=True, secret=TEST_SECRET)
 
     with TestClient(create_app(settings)) as secure_client:
         response = secure_client.post(

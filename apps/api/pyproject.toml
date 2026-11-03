@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "argon2-cffi>=25.1",
+  # 设置表里密钥值的加密（`#11`）：AES-GCM + 主密钥 `MC_LIBRARIAN_SECRET`。
+  # 不自己实现 AES（纯 Python 实现又慢又不该写），也不拿 argon2 哈希充数：密文必须可逆。
+  "cryptography>=46",
   "fastapi>=0.118",
   # 摘要层的 FTS5 预分词（#7 规格 §6）：`trigram` 对两字词（「刷怪」）不友好，`unicode61`
   # 又不切中文，所以入库前用 jieba 切好、查询时对 query 做同样切分。

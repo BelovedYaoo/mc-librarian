@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import TEST_SECRET
 from mc_librarian import audit
 from mc_librarian.config import Settings
 from mc_librarian.db import (
@@ -181,7 +182,7 @@ def insert_job_row(
 def test_migration_creates_job_tables(tmp_path: Path) -> None:
     database = Database.for_data_dir(tmp_path / "data")
 
-    assert database.initialize() == LATEST_VERSION == 7
+    assert database.initialize() == LATEST_VERSION == 8
 
     with database.connect() as conn:
         tables = {
@@ -214,7 +215,7 @@ def test_v5_migration_preserves_existing_jobs_and_logs(tmp_path: Path) -> None:
             ("legacy", "2026-11-03T00:00:00Z", "旧日志"),
         )
 
-    assert database.initialize() == LATEST_VERSION == 7
+    assert database.initialize() == LATEST_VERSION == 8
 
     with database.connect() as conn:
         assert conn.execute("SELECT count(*) AS c FROM job_logs").fetchone()["c"] == 1
@@ -300,29 +301,32 @@ def test_create_job_rejects_explicit_null_obfuscated(admin_client: TestClient) -
     assert "obfuscated" in response.json()["detail"]
 
 
-def test_get_settings_returns_only_implemented_blocks(
+def test_get_settings_derives_values_from_runtime_config(
     admin_client: TestClient, settings: Settings
 ) -> None:
-    """`GET /v1/admin/settings` 只读、配置派生：只返回真实存在的 `index`/`ask`/`security` 块。
+    """`GET /v1/admin/settings`：`settings` 表为空时值全部从运行时配置派生。
 
-    未实现的 `llm`/`alerts` 整块省略——不拿契约里的示例默认值填充。`ask`/`security` 是
-    #8 的问答开关与并发闸门（只返回有对应运行时配置的字段）。
+    五个块都返回（#11 后都实现了）；密钥只回 `*_set`；未配置的可选字段整字段省略
+    （本用例的 `settings` 配了假 LLM，所以 `llm` 的两个字段都在）。
     """
     response = admin_client.get("/v1/admin/settings")
 
     assert response.status_code == 200, response.text
     body = response.json()
 
-    assert set(body) == {"index", "ask", "security"}
+    assert set(body) == {"llm", "ask", "index", "security", "alerts"}
     assert body["index"]["enabled"] is True
     assert body["index"]["java_xmx"] == settings.decompile_memory
-    assert body["ask"] == {"enabled": True, "timeout_s": settings.ask_timeout_s}
-    assert body["security"] == {"max_concurrent_asks": settings.max_concurrent_asks}
+    assert body["ask"]["enabled"] is True
+    assert body["ask"]["timeout_s"] == settings.ask_timeout_s
+    assert body["security"]["max_concurrent_asks"] == settings.max_concurrent_asks
+    assert body["llm"]["api_key_set"] is True
+    assert "api_key" not in body["llm"], "密钥只写不读，任何情况下都不回值"
 
 
 def test_index_disabled_gate(tmp_path: Path) -> None:
     """`MC_LIBRARIAN_INDEX_ENABLED=false`：任务一律 403，`GET` 能读到开关为 false。"""
-    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False, secret=TEST_SECRET)
 
     with TestClient(create_app(settings)) as client:
         created = client.post(
@@ -1220,7 +1224,7 @@ def test_admin_endpoints_reject_non_admin(user_client: TestClient, source_dir: P
 
 def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
     """闸门关闭时 retry 也回 403：重排会让 runner 跑反编译，与「本实例不构建索引」不符。"""
-    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False, secret=TEST_SECRET)
 
     with TestClient(create_app(settings)) as client:
         created = client.post(
@@ -1246,7 +1250,7 @@ def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
 
 def test_retry_unknown_job_is_404_even_when_index_disabled(tmp_path: Path) -> None:
     """闸门关闭时也要先分辨任务是否存在：不存在的 id 回 404，而不是一律 403。"""
-    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False, secret=TEST_SECRET)
 
     with TestClient(create_app(settings)) as client:
         created = client.post(
@@ -1304,7 +1308,7 @@ def test_runner_fails_queued_jobs_when_index_disabled(tmp_path: Path) -> None:
 
 def test_startup_backfills_legacy_version_db_path(tmp_path: Path) -> None:
     """启动时一次性回填：`db_path IS NULL` 且索引文件存在的版本行补上路径，其余保持 NULL。"""
-    settings = Settings(data_dir=tmp_path / "data")
+    settings = Settings(data_dir=tmp_path / "data", secret=TEST_SECRET)
     database = Database.for_data_dir(settings.data_dir)
     database.initialize()
 
@@ -1338,7 +1342,7 @@ def test_startup_backfill_skips_invalid_index_file(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """空文件不是有效索引：回填跳过并记 warn，不把检索的 404 变成 500。"""
-    settings = Settings(data_dir=tmp_path / "data")
+    settings = Settings(data_dir=tmp_path / "data", secret=TEST_SECRET)
     database = Database.for_data_dir(settings.data_dir)
     database.initialize()
 
@@ -1374,7 +1378,7 @@ def test_startup_survives_backfill_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """回填抛异常（如 control 库 busy）不能拖垮启动：只记 error 日志，服务照常起来。"""
-    settings = Settings(data_dir=tmp_path / "data")
+    settings = Settings(data_dir=tmp_path / "data", secret=TEST_SECRET)
 
     def boom(*args: object, **kwargs: object) -> list[str]:
         raise RuntimeError("database is locked")
@@ -1607,7 +1611,7 @@ def test_startup_survives_recover_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """启动恢复抛异常（control 库 busy 等）不能拖垮启动：只记 error 日志，服务照常起来。"""
-    settings = Settings(data_dir=tmp_path / "data")
+    settings = Settings(data_dir=tmp_path / "data", secret=TEST_SECRET)
 
     def boom(self: JobRunner) -> None:
         raise RuntimeError("database is locked")

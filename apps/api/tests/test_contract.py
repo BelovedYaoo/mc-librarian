@@ -423,8 +423,8 @@ def test_job_paths_are_implemented() -> None:
     } <= runtime_paths
 
 
-def test_settings_path_is_implemented() -> None:
-    """`GET /v1/admin/settings` 已实现（只读、配置派生）；`PUT` 仍待 #11。"""
+def test_settings_paths_are_implemented() -> None:
+    """issue #11 把 `GET`/`PUT /v1/admin/settings` 都落到了实现（`settings` 表 + 数据库覆盖）。"""
     runtime = _operation(_runtime(), "/v1/admin/settings", "get")
     contract = _operation(_contract(), "/v1/admin/settings", "get")
 
@@ -432,11 +432,56 @@ def test_settings_path_is_implemented() -> None:
     assert "403" in runtime["responses"]
     assert "403" in contract["responses"]
 
-    # 索引构建闸门 `settings.index.enabled` 两侧都要有（运行时从配置派生）。
     for spec in (_runtime(), _contract()):
-        index = _deref(spec, spec["components"]["schemas"]["Settings"]["properties"]["index"])
+        put = _operation(spec, "/v1/admin/settings", "put")
 
-        assert "enabled" in index["properties"]
+        assert put["operationId"] == "putSettings"
+        assert {"200", "403", "422"} <= set(put["responses"])
+        assert _request_schema(spec, "/v1/admin/settings", "put")["properties"].keys() == {
+            "llm",
+            "ask",
+            "index",
+            "security",
+            "alerts",
+        }
+
+    # 五个块都有实现（`llm` / `alerts` 随 #11 落地），两侧的 `Settings` 指向同一组块 schema。
+    for spec in (_runtime(), _contract()):
+        blocks = spec["components"]["schemas"]["Settings"]["properties"]
+
+        assert set(blocks) == {"llm", "ask", "index", "security", "alerts"}
+        assert "enabled" in _deref(spec, blocks["index"])["properties"]
+
+
+def test_settings_secrets_are_write_only() -> None:
+    """密钥只写不读：更新请求里有 `api_key` / `webhook_url`，响应里只有 `*_set`。"""
+    for spec in (_runtime(), _contract()):
+        update = _request_schema(spec, "/v1/admin/settings", "put")
+        llm = _deref(spec, update["properties"]["llm"])["properties"]
+        alerts = _deref(spec, update["properties"]["alerts"])["properties"]
+        response_llm = _deref(
+            spec, spec["components"]["schemas"]["Settings"]["properties"]["llm"]
+        )["properties"]
+        response_alerts = _deref(
+            spec, spec["components"]["schemas"]["Settings"]["properties"]["alerts"]
+        )["properties"]
+
+        assert "api_key" in llm
+        assert "webhook_url" in alerts
+        assert "api_key" not in response_llm
+        assert "webhook_url" not in response_alerts
+        assert "api_key_set" in response_llm
+        assert "webhook_url_set" in response_alerts
+
+
+def test_index_enabled_is_read_only() -> None:
+    """`index.enabled` 是部署级闸门：响应里有，更新请求里没有（传了 422）。"""
+    for spec in (_runtime(), _contract()):
+        update = _request_schema(spec, "/v1/admin/settings", "put")
+        index_update = _deref(spec, update["properties"]["index"])["properties"]
+
+        assert "enabled" not in index_update
+        assert "java_xmx" in index_update
 
 
 @pytest.mark.parametrize(
@@ -855,6 +900,12 @@ def test_ask_request_schema_matches() -> None:
 
     assert runtime["required"] == contract["required"] == ["question", "version"]
     assert set(runtime["properties"]) == set(contract["properties"])
+
+    # `max_steps` / `max_answer_tokens` 省略时用服务端设置（`settings.ask.*`，issue #11），
+    # 所以不能写 `default`：openapi-typescript 会把带默认值的字段当成必填，前端就没法省略。
+    for field in ("max_steps", "max_answer_tokens"):
+        assert "default" not in _non_null(runtime["properties"][field])
+        assert "default" not in _non_null(contract["properties"][field])
 
 
 # ----------------------------------------------------------------------

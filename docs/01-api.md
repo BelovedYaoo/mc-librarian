@@ -102,6 +102,8 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 - **降级不返回 500**：模型不可用时用已召回的检索结果组装回答（第一步就失败则先跑一次
   `search` 拿位置），HTTP 仍是 `200`，`done.reason` 是 `degraded`。
 - 请求头 `Accept: application/json` 时退化为一次性返回完整 `AskResponse`，方便脚本调用。
+- `max_steps` / `max_answer_tokens` 省略时用服务端设置（`settings.ask.max_steps` / `max_answer_tokens`，
+  设置页可改，见 §7）；前端问答页不再显式传这两个值，因此设置页的改动直接作用于页面。
 - 全局开关 `settings.ask.enabled=false` 时返回 `429`（异常时快速止血）；并发问答达到
   `settings.security.max_concurrent_asks` 时同样返回 `429`；未配置生成模型返回 `503`。
 - **并发上限是进程内的**：`AskLimiter` 只是在单个进程里数数，多 worker 部署（`uvicorn --workers N`）时
@@ -143,9 +145,19 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
-| `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly。**`GET` 已实现（只读，值从 `MC_LIBRARIAN_*` 运行时配置派生，未实现的块整块省略）；`PUT` 与 `settings` 表随 #11 落地** |
-| `GET /v1/admin/usage` | **已实现**（#12）：按 `day`/`user`/`version`/`model` 聚合，`totals` 与 `buckets` 同源；区间内无数据返回零值 |
+| `GET/PUT /v1/admin/settings` | 模型、问答步数与输出上限、索引参数、会话时长、告警阈值；密钥 writeOnly。值 = `settings` 表里的覆盖 + `MC_LIBRARIAN_*` 环境配置兜底；`PUT` 是部分更新，保存后立即生效；`index.enabled` 只读 |
+| `GET /v1/admin/usage` | 按 `day`/`user`/`version`/`model` 聚合，`totals` 与 `buckets` 同源；区间内无数据返回零值 |
 | `GET /v1/admin/audit` | 审计日志 |
+
+**设置是「配置派生 + 数据库覆盖」**：`settings` 表（`key` / `value_json` / `encrypted` / `updated_at` / `updated_by`）
+只存**被显式改过**的键，没覆盖的键退回 `MC_LIBRARIAN_*` 环境配置，删一行就等于回退——因此不需要空值占位。
+读取**每次实时查库**，所以保存后立即生效（不需要重启）；`PUT` 只处理请求里给出的字段，未给的保持原值，
+值给 `null`（密钥给空字符串）= 清除该覆盖；`index.enabled` 是部署级闸门（只读，传了 422）。
+`llm.api_key` 与 `alerts.webhook_url` 只写不读：请求里可以传，响应里只有 `api_key_set` / `webhook_url_set`，
+库里存的是 **AES-GCM 密文**，主密钥来自 `MC_LIBRARIAN_SECRET`——缺失或短于 16 字符时**服务启动即失败**
+（自动生成并落盘会让重启后旧密文解不开）。每次 `PUT` 写一条 `settings.updated` 审计，
+`detail.keys` 只记改了哪些键，不记值。告警阈值与 Webhook 的读取收敛在 `resolve_alerts_config()`（`#12` 调用它），
+未配置的阈值保持 `None`，不编 0。
 
 **任务只保留 `kind: index`**：`reindex` / `summarize` 是后续 ticket 的事，当前不提供，避免出现「跑成功但什么都没做」的任务。
 
@@ -209,3 +221,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-04 | 0.2.0 | issue #7：中文摘要层落地——新增 `mc_librarian.indexing.summarize`（LLM 只从 `MC_LIBRARIAN_LLM_BASE_URL`/`MC_LIBRARIAN_LLM_MODEL`/`MC_LIBRARIAN_LLM_API_KEY` 读，未配置时 `summarize` 阶段明确失败并给出可操作报错，不静默跳过）；按类内容哈希（FQN+父类+接口+字段签名+public 方法签名）幂等，只重跑变化的类；按 package 分批（`summary_batch_size`，默认 40）并发 `summary_concurrency`（默认 4）生成，单类失败保留其余、任务标 `failed`；索引库新增 `summaries`（普通表，带 `content_hash`）与 `summaries_fts`（FTS5 + jieba 预分词，两字词「刷怪」可命中），摘要通道真正接入融合（`why` 含 `summary`，不改 RRF）；任务产出登记版本时 `has_summaries` 按是否跑过 `summarize` 写；`/v1/versions` 的 `VersionInfo` 新增 `summary_count`/`class_count`（从索引库实时读，版本页显示摘要覆盖率），`has_summaries` 描述改为登记快照。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | 复审修复（#8 关闭前）：`/v1/ask` 的收尾（还并发槽位 / 关索引 / 记一行 `usage`）从流生成器的 `finally` 挪到 ASGI 响应的 `__call__`——客户端中途断开时 Starlette 取消流任务，生成器停在 `yield`，那段 `finally` 要等 async generator 被 GC / `aclose` 才跑，不是显式保证（槽位会漏，服务最终对新问答全部 429）；`AskRun` 构造与索引连接一起移进受保护区间；前端 `/ask` 页把 `context_budget` 伪工具单独渲染（「已丢弃 N 条最旧结果」）且不再计入「完成/总数」；补 `error` 事件、真超时 / 总超时降级、`urlopen` 传输异常转 `ChatError`、客户端断开时归还槽位四类测试；本节注明并发上限是进程内的（多 worker 部署按 worker 数放大）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | issue #12：`GET /v1/admin/usage` 落地——`totals` 与 `buckets` 由同一个区间条件在服务端聚合（页面直接用接口数字，不在前端再算一遍），分天口径是本地日期（UTC+8），无数据区间返回零值而不是报错，`cost_configured` 让页面能标注「未配置单价，仅统计 token」；迁移 v7 落地 `alert_events`（`UNIQUE(day, metric)` + `ON CONFLICT DO NOTHING` 去重），当日 token / 成本超阈值推 Webhook（阈值只从 `MC_LIBRARIAN_ALERT_*` 读，读取收敛在 `resolve_alerts_config()`，`#11` 的数据库覆盖加进同一个函数），检查在 `/v1/ask` 写完 usage 后与用量页两处触发、都在后台线程里跑（不阻断请求），Webhook 超时 5 秒、失败只 warn 不重试；前端加 `/usage` 页（时间区间 + 四种聚合维度 + 总量卡片 + 分组表格）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-04 | 0.2.0 | issue #11：迁移 v7 落地 `settings` 表（`key`/`value_json`/`encrypted`/`updated_at`/`updated_by`，只存被显式改过的键）；`GET/PUT /v1/admin/settings` 改为「配置派生 + 数据库覆盖」——`PUT` 是**部分更新**（只改请求里给出的字段，`null`/空串 = 清除覆盖），读取每次实时查库，保存后立即生效（`AskLimiter` 改为每次取当前有效并发上限，`AskRequest.max_steps`/`max_answer_tokens` 省略时用服务端设置，`JobRunner` 每个任务开始时读一次有效配置）；`llm.api_key` 与 `alerts.webhook_url` 只写不读（响应只回 `api_key_set`/`webhook_url_set`），库里存 AES-GCM 密文，主密钥 `MC_LIBRARIAN_SECRET` 缺失或短于 16 字符时**服务启动失败**（不自动生成）；每次 `PUT` 写一条 `settings.updated` 审计，只记改动的键不记值；新增 `resolve_alerts_config()`（`#12` 调用，数据库覆盖 + 环境配置兜底，未配置的阈值保持 `None`）；契约新增 `SettingsUpdate` 等六个更新 schema 并把 `Settings` 拆成五个块 schema，前端 `/settings` 扩展为五组表单（密钥显示「已设置/未设置」+ 重新设置/清除）；契约订正 `llm.temperature` 的默认值为实现的真实值 0（原先写 0.2，而两个客户端一直硬编码 0）。属 v0.2 设计内的增量补齐，`info.version` 不变 |

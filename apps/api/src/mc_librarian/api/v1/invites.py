@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request, Response
 
 from mc_librarian import audit
 from mc_librarian.auth import cookies, invites, sessions, users
-from mc_librarian.auth.deps import DbConn, SettingsDep, client_ip
+from mc_librarian.auth.deps import DbConn, EffectiveSettingsDep, client_ip
 from mc_librarian.db import transaction
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import AcceptInviteRequest, InviteStatus, User
@@ -64,7 +64,7 @@ def accept_invite(
     request: Request,
     response: Response,
     conn: DbConn,
-    settings: SettingsDep,
+    settings: EffectiveSettingsDep,
 ) -> User:
     """同步 def：argon2 哈希与 sqlite 写入都是阻塞调用，交给 FastAPI 的线程池跑。"""
     with transaction(conn):

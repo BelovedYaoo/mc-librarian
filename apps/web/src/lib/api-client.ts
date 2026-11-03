@@ -57,8 +57,11 @@ export type AcceptInviteRequest =
 /** 版本注册表里的一行（`GET /v1/versions`）。 */
 export type VersionInfo = components['schemas']['VersionInfo'];
 
-/** 实例设置（`GET /v1/admin/settings`）。当前只读，未实现的块整块省略。 */
+/** 实例设置（`GET/PUT /v1/admin/settings`）：数据库覆盖 + 运行时配置兜底。 */
 export type AdminSettings = components['schemas']['Settings'];
+
+/** 设置的部分更新请求体（`PUT /v1/admin/settings`）：只提交改动的字段，值给 `null` = 清除覆盖。 */
+export type SettingsUpdate = components['schemas']['SettingsUpdate'];
 
 /** 审计流水里的一行：谁在什么时候对什么做了什么（`GET /v1/admin/audit`）。 */
 export type AuditEntry = components['schemas']['AuditEntry'];
@@ -242,6 +245,15 @@ function patchJson<T>(path: string, body: unknown, options: RequestOptions = {})
   });
 }
 
+function putJson<T>(path: string, body: unknown, options: RequestOptions = {}): Promise<T> {
+  return request<T>(path, {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * 存活探针。开发期 `CONFIG.serverUrl` 是 `/api`，由 vite 代理到后端；
  * 生产期由反向代理转发，前端代码不需要区分环境。
@@ -338,9 +350,17 @@ export async function listVersions(signal?: AbortSignal): Promise<VersionInfo[]>
   return body.versions ?? [];
 }
 
-/** 实例设置（仅 admin）。只读、值从运行时配置派生；未实现的块整块省略。 */
+/** 实例设置（仅 admin）：值 = 数据库覆盖 + 运行时配置兜底。 */
 export function getSettings(signal?: AbortSignal): Promise<AdminSettings> {
   return request<AdminSettings>('/v1/admin/settings', { signal });
+}
+
+/**
+ * 更新设置（仅 admin）：**部分更新**，只提交改动的字段，未给的保持原值；
+ * 密钥给空字符串 = 清除；返回更新后的完整设置（密钥仍然只有 `*_set`）。
+ */
+export function putSettings(body: SettingsUpdate): Promise<AdminSettings> {
+  return putJson<AdminSettings>('/v1/admin/settings', body);
 }
 
 /** 注册已上传的 `db/<version>.sqlite`（管理员）。 */

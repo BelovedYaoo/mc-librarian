@@ -12,7 +12,7 @@ from fastapi import APIRouter, Query, Request
 
 from mc_librarian import audit
 from mc_librarian.auth import invites, sessions, users
-from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
+from mc_librarian.auth.deps import CurrentAdmin, DbConn, EffectiveSettingsDep, client_ip
 from mc_librarian.db import transaction
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import (
@@ -70,7 +70,7 @@ def create_user(
     request: Request,
     admin: CurrentAdmin,
     conn: DbConn,
-    settings: SettingsDep,
+    settings: EffectiveSettingsDep,
 ) -> CreatedUser:
     with transaction(conn):
         if users.find_by_username(conn, payload.username) is not None:

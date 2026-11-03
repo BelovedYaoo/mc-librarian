@@ -48,10 +48,6 @@ type Turn = {
 
 const CONTEXT_BUDGET_TOOL = 'context_budget';
 
-// 契约 `AskRequest` 的默认值：openapi-typescript 把带 `default` 的字段当成必填，所以显式传。
-const DEFAULT_MAX_STEPS = 6;
-const DEFAULT_MAX_ANSWER_TOKENS = 8000;
-
 function errorText(cause: unknown): string {
   return cause instanceof ApiError ? cause.message : String(cause);
 }
@@ -156,8 +152,7 @@ export function AskView() {
         {
           question: asked,
           version,
-          max_steps: DEFAULT_MAX_STEPS,
-          max_answer_tokens: DEFAULT_MAX_ANSWER_TOKENS,
+          // `max_steps` / `max_answer_tokens` 不传：用服务端设置（设置页可改）。
         },
         (incoming) => {
           setTurns((current) =>

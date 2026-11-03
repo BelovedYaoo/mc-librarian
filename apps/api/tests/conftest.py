@@ -25,6 +25,10 @@ ADMIN_PASSWORD = "admin-password-1"
 USER_USERNAME = "worker"
 USER_PASSWORD = "worker-password-1"
 
+# 测试用主密钥（`MC_LIBRARIAN_SECRET`）：`settings` 表里的密钥用 AES-GCM 加密，
+# 缺它 `lifespan` 直接启动失败（issue #11 验收第 3 条），所以建 app 的测试都得给。
+TEST_SECRET = "test-secret-0123456789abcdef"
+
 NETWORK_ENV = "MC_LIBRARIAN_NETWORK"
 
 # 假 LLM 生成的三行摘要模板：含游戏机制词（规格 §1 要求），且每个 fqn 输出确定。
@@ -187,6 +191,7 @@ def settings(tmp_path: Path) -> Settings:
     """临时数据根 + 假 LLM 配置：真实 LLM 调用由 `fake_llm` fixture 换掉（不联网）。"""
     return Settings(
         data_dir=tmp_path / "data",
+        secret=TEST_SECRET,
         llm_base_url="http://fake-llm.invalid/v1",
         llm_model="fake-model",
         llm_api_key="fake-key",
