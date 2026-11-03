@@ -1,4 +1,4 @@
-# MC Atlas · 设计总览
+# MC Librarian · 设计总览
 
 ## 1. 一句话
 
@@ -88,7 +88,7 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 | D7 | 鉴权形态 | **待定** | 建议 Bearer token |
 | D8 | 实现栈 | **待定** | 建议 Python 3.13 + FastAPI + SQLite |
 | D9 | 索引产物是否进 git | **待定** | 建议不进 |
-| D10 | 项目名 | **待定** | 建议 mc-atlas |
+| D10 | 项目名 | **待定** | 建议 mc-librarian |
 
 ## 7. 里程碑
 

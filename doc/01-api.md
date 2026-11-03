@@ -1,10 +1,10 @@
-# MC Atlas API · v0.1
+# MC Librarian API · v0.1
 
 > 机器可读契约见 [`openapi.yaml`](./openapi.yaml)。本文是人读版，解释「为什么这么设计」。
 
 ## 1. 定位
 
-MC Atlas 是一个**只读**的代码知识库服务。它把一个 Minecraft 版本的反编译源码变成三路可检索的索引：
+MC Librarian 是一个**只读**的代码知识库服务。它把一个 Minecraft 版本的反编译源码变成三路可检索的索引：
 
 | 通道 | 数据来源 | 回答的问题 | 召回标记 |
 |---|---|---|---|

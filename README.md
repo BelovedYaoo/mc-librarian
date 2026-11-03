@@ -1,4 +1,4 @@
-# mc-atlas
+# mc-librarian
 
 Minecraft 源码知识库检索服务。把反编译后的 MC 源码变成可被 agent 和人类检索的只读 HTTP API。
 

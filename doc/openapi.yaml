@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: MC Atlas API
+  title: MC Librarian API
   version: 0.1.0
   summary: Minecraft 源码知识库检索服务
   description: |
@@ -16,7 +16,7 @@ info:
 servers:
   - url: http://127.0.0.1:8787
     description: 本地开发
-  - url: http://mc-atlas.internal:8787
+  - url: http://mc-librarian.internal:8787
     description: 内网共享
 
 security:
