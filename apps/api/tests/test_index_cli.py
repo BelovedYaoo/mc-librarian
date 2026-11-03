@@ -21,6 +21,7 @@ from mc_librarian.fetch.manifest import VersionDownloads
 from mc_librarian.fetch.pipeline import cache_dir_for
 from mc_librarian.fetch.tools import PipelineTools
 from mc_librarian.indexing import cli as index_cli
+from mc_librarian.indexing import memory
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
@@ -171,6 +172,56 @@ def test_stage_failure_returns_nonzero_and_prints_error(
 
     assert code == 1
     assert "parse 阶段炸了" in capsys.readouterr().err
+
+
+def test_interrupted_run_marks_the_job_failed(
+    configure_cli: None,
+    settings: Settings,
+    source_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ctrl-C（`KeyboardInterrupt`）中断时把任务标成 `failed`，不留下永久 `running` 的行。
+
+    CLI 不走服务启动时的 `_recover_interrupted`：不在这里收尾的话，该 job 会永远停在
+    `running`，之后同版本的任何任务都会被 `has_active_job` 挡住。
+    """
+
+    def interrupted(stage: str, context: runner_module.JobContext) -> dict[str, object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner_module, "run_stage", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        index_cli.main(["--version", "26.3", "--source-dir", str(source_dir)])
+
+    assert index_cli.INTERRUPTED_ERROR in capsys.readouterr().err
+
+    with Database.for_data_dir(settings.data_dir).connect() as conn:
+        rows = store.list_jobs(conn, limit=10)
+
+        assert [row.status for row in rows] == ["failed"]
+        assert rows[0].error == index_cli.INTERRUPTED_ERROR
+        assert store.has_active_job(conn, "26.3") is False
+
+    assert index_cli.INTERRUPTED_ERROR in job_logs(settings)
+
+
+def test_missing_psutil_is_logged_into_the_job(
+    configure_cli: None,
+    settings: Settings,
+    source_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`psutil` 缺失不只打到 stderr，还写进任务日志：否则 UI 上看不到「未测量」。"""
+    monkeypatch.setattr(memory, "available", lambda: False)
+
+    code = index_cli.main(["--version", "26.3", "--source-dir", str(source_dir)])
+
+    assert code == 0
+    assert index_cli.PSUTIL_MISSING_MESSAGE in capsys.readouterr().err
+    assert index_cli.PSUTIL_MISSING_MESSAGE in job_logs(settings)
 
 
 def test_unknown_version_returns_nonzero_with_manifest_error(

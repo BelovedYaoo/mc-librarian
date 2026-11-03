@@ -4,6 +4,11 @@ Python 3.13 + FastAPI + Pydantic v2。当前实现 issue #2 + #3 + #9 的范围�
 
 ## 依赖与启动
 
+前置依赖：**Python 3.13**、**Bun**（前端与脚本），以及 **ripgrep（`rg`）**——`POST /v1/search`
+的字面量通道是 ripgrep 子进程（issue #6 规格 §3 定死用 `rg`，不做内置实现）。`rg` 不在 PATH 上时
+该路降级为空并写 `warn`，服务照常起；但依赖字面量通道的测试会 `skip`，不再静默变红。
+容器里的安装记在 #15（本仓的 Dockerfile 不改）。
+
 ```bash
 # 仓库根
 bun run setup     # 创建 apps/api/.venv 并安装依赖（也安装前端依赖）
@@ -95,12 +100,14 @@ MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
 - 不给 `--source-dir`：完整五段 `download → decompile → parse → summarize → finalize`；
 - 给了 `--source-dir <dir>`：跳过 download/decompile，从 `parse` 开始（相对路径按当前目录解析）；
 - 不给 `--force` 且索引已存在：跳过重建（复用已有索引）后继续收尾，重复执行不改变产物；
-  `cache/<version>/fetch.json` 记着源码树已反编译完成时也跳过 `decompile`（与 `mc-librarian fetch`
-  共用同一个完成标记），`--force` 一律重建；
+  `cache/<version>/fetch.json` 记着 jar 已在缓存里时跳过 `download`（不再解析清单、不发 HTTP），
+  记着源码树已反编译完成时跳过 `decompile`（与 `mc-librarian fetch` 共用同一个完成标记），
+  因此源码树与索引都在时断网也能重跑；`--force` 一律重下重编；
 - `summarize` 仍是占位（摘要由 #7 落地），本命令不调 LLM；
 - 跑完版本行已登记（`db_path` 指向产出的索引），服务不需要再手工 `POST /v1/admin/versions`；
-- 输出文件数 / 行数 / token / 内存峰值 / 耗时；内存峰值按秒采样**进程树** RSS（`psutil` 是 dev
-  依赖，装不上只跳过测量并记一条 warn，不阻断）。
+- 输出文件数 / 行数 / token / 内存峰值 / 耗时；token 按 `cl100k_base` 真分词（`tiktoken`）计，
+  `tiktoken` 装不上时退回「字符 ÷ 3.5」估算并写 warn；内存峰值按秒采样**进程树** RSS（`psutil`
+  是 dev 依赖，装不上只跳过测量并把 warn 写进 stderr 与任务日志，不阻断）。
 
 退出码：`0` 成功、`1` 任务失败（`error` 打到 stderr）、`2` 参数错误。
 

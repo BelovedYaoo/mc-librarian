@@ -14,7 +14,7 @@ from typing import Final
 from mc_librarian.config import Settings
 from mc_librarian.indexing import query
 from mc_librarian.indexing.layout import source_root
-from mc_librarian.indexing.text import split_lines, tokens_from_chars
+from mc_librarian.indexing.text import count_tokens, split_lines
 from mc_librarian.retrieval.channels import (
     Candidate,
     Channel,
@@ -59,10 +59,12 @@ def search(
     total = sum(len(candidates) for candidates in channels.values())
     fused = fuse(channels)[: request.limit]
 
-    reader = _SourceReader(settings, request.version)
-    snippets = [_snippet(reader, hit) for hit in fused]
-    costs = [tokens_from_chars(len(snippet)) if snippet else 0 for snippet in snippets]
-    kept = apply_token_budget(fused, costs, request.max_tokens)
+    snippets = _snippets(settings, request, fused)
+    costs = [
+        count_tokens(_content_text(request, hit, snippet))
+        for hit, snippet in zip(fused, snippets, strict=True)
+    ]
+    kept = apply_token_budget(costs, request.max_tokens)
     hits = [_to_hit(request, fused[index], snippets[index], costs[index]) for index in kept]
 
     return SearchResponse(
@@ -76,13 +78,13 @@ def search(
 
 
 def _to_hit(request: SearchRequest, hit: FusedHit, snippet: str | None, tokens: int) -> Hit:
-    """融合命中 → 契约 `Hit`；`detail=locate` 时不带 `snippet` 与 `summary`（规格 §5）。"""
+    """融合命中 → 契约 `Hit`；`detail=locate` 时不带 `snippet` 与 `summary`（规格 §5）。
+
+    `id` 用融合用的实体键（`Candidate.key`，带行区间）：Java 允许同名重载方法，
+    只拼 `version:path#symbol` 会让两条重载命中拿到同一个 id，前端列表撞 key。
+    """
     candidate = hit.candidate
-    identifier = (
-        f"{request.version}:{candidate.path}#{candidate.symbol}"
-        if candidate.symbol
-        else f"{request.version}:{candidate.path}:{candidate.start_line}"
-    )
+    identifier = f"{request.version}:{candidate.key}"
     include_body = request.detail == "snippet"
 
     return Hit(
@@ -98,6 +100,40 @@ def _to_hit(request: SearchRequest, hit: FusedHit, snippet: str | None, tokens: 
         snippet=snippet if include_body else None,
         tokens=tokens,
     )
+
+
+def _snippets(
+    settings: Settings, request: SearchRequest, fused: list[FusedHit]
+) -> list[str | None]:
+    """每条命中的源码片段；`locate` 不返回片段，也就不为它读盘（规格 §5）。"""
+    if request.detail != "snippet":
+        return [None] * len(fused)
+
+    reader = _SourceReader(settings, request.version)
+
+    return [_snippet(reader, hit) for hit in fused]
+
+
+def _content_text(request: SearchRequest, hit: FusedHit, snippet: str | None) -> str:
+    """一条命中**实际返回**的文本内容，`tokens` 与 `max_tokens` 预算都按它算（规格 §5/§6）。
+
+    `locate` 只有定位字段（版本、路径、行区间、符号、`why`），没有片段与摘要；`snippet` 才
+    把它们算进去。拿片段成本给 `locate` 记账，既虚报了它返回的 token，又让预算被不存在的
+    片段吃掉——与 `docs/01-api.md` 的「`locate` 省 5–10 倍 token」相悖。
+    """
+    candidate = hit.candidate
+    parts = [
+        f"{request.version}:{candidate.path}",
+        f"{candidate.start_line}-{candidate.end_line}",
+        candidate.symbol or "",
+        *hit.channels,
+    ]
+
+    if request.detail == "snippet":
+        parts.append(candidate.summary or "")
+        parts.append(snippet or "")
+
+    return " ".join(parts)
 
 
 def _snippet(reader: _SourceReader, hit: FusedHit) -> str | None:

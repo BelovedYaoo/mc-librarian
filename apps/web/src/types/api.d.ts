@@ -626,7 +626,11 @@ export interface components {
             took_ms: number;
         };
         Hit: {
-            /** @example 1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory */
+            /**
+             * @description 融合实体键（`<version>:<path>#<symbol>:<start>-<end>`，文件级命中为 `<version>:<path>:<line>`）。
+             *     带行区间是为了让同名重载方法拿到不同的 id（前端列表靠它做 key）。
+             * @example 1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory:6-68
+             */
             id: string;
             /** @enum {string} */
             type: "class" | "method" | "field" | "file";
@@ -639,6 +643,10 @@ export interface components {
             why: ("summary" | "symbol" | "literal" | "reference")[];
             summary?: string;
             snippet?: string;
+            /**
+             * @description 这条命中要占多少上下文，按**实际返回内容**计（`cl100k_base` 真分词）：
+             *     `detail=locate` 只算定位字段，`snippet` 另含片段与摘要；`max_tokens` 按它累加。
+             */
             tokens?: number;
         };
         SymbolDetail: {

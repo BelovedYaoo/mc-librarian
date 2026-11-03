@@ -24,6 +24,7 @@ from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.manifest import HttpManifestResolver, VersionDownloads
 from mc_librarian.fetch.pipeline import (
     CHECKPOINT_FILE_NAME,
+    CLIENT_JAR_NAME,
     FetchContext,
     cache_dir_for,
     count_java_files,
@@ -727,8 +728,8 @@ def test_runner_persists_fetch_checkpoint_for_next_run(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`JobRunner` 跑完 `download`/`decompile` 也写 `cache/<version>/fetch.json`，
-    因此下一个 job（或 `mc-librarian fetch`）能据此跳过反编译。"""
-    tools, _, _, _, decompiler = fake_tools({"26.3": MODERN})
+    因此下一个 job（或 `mc-librarian fetch`）能据此跳过联网与反编译。"""
+    tools, manifest, downloader, _, decompiler = fake_tools({"26.3": MODERN})
     monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
 
     run_one_job(settings, "26.3", {})
@@ -740,6 +741,60 @@ def test_runner_persists_fetch_checkpoint_for_next_run(
     run_one_job(settings, "26.3", {})
 
     assert len(decompiler.calls) == 1
+    assert manifest.calls == ["26.3"], "第二次不再解析清单（不发 HTTP）"
+    assert len(downloader.calls) == 1
+
+
+def test_new_job_skips_download_when_jar_is_cached(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """标记记着 `download` 完成且 jar 还在：新任务不再调 `manifest.resolve`（断网也能重跑）。"""
+    tools, manifest, downloader, _, decompiler = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    marker = write_fetch_marker(settings, "26.3", java_files=2)
+    jar = marker.parent / CLIENT_JAR_NAME
+    jar.write_bytes(b"jar")
+    plant_source_tree(settings, "26.3", files=1)
+
+    checkpoint = job_checkpoint(settings, run_one_job(settings, "26.3", {"force": False}))
+
+    assert manifest.calls == []
+    assert downloader.calls == []
+    assert decompiler.calls == []
+    # 复用的产物就是标记里那一条：`decompile` 与版本登记都靠它。
+    assert checkpoint["jar_path"] == str(jar)
+    assert checkpoint["obfuscated"] is False
+    assert checkpoint["java_files"] == 2
+
+
+def test_missing_jar_re_downloads_even_with_the_marker(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """标记为真但 jar 已被删：照常重新下载（半份标记不能当完成证据）。"""
+    tools, manifest, downloader, _, _ = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    write_fetch_marker(settings, "26.3", java_files=2)
+    plant_source_tree(settings, "26.3", files=1)
+
+    run_one_job(settings, "26.3", {"force": False})
+
+    assert manifest.calls == ["26.3"]
+    assert len(downloader.calls) == 1
+
+
+def test_force_re_downloads_even_with_cached_jar(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--force` 绕过复用：jar 在缓存里也重新解析清单（`download_stage` 仍会复用那份 jar）。"""
+    tools, manifest, _, _, _ = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    marker = write_fetch_marker(settings, "26.3", java_files=2)
+    (marker.parent / CLIENT_JAR_NAME).write_bytes(b"jar")
+    plant_source_tree(settings, "26.3", files=1)
+
+    run_one_job(settings, "26.3", {"force": True})
+
+    assert manifest.calls == ["26.3"]
 
 
 def test_full_pipeline_index_is_queryable_without_manual_registration(

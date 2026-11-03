@@ -1,12 +1,16 @@
 """混合检索 `POST /v1/search`（issue #6）。
 
 三路通道各自独立测试（直接调通道函数，用 fixture 索引库 + fixture 源码树），
-再加融合、`why`、`detail`、`max_tokens`、`path_prefix`、`suggestions` 与三条降级路径。
+再加融合、`why`、`detail`、`max_tokens`、`path_prefix`、`suggestions` 与降级路径。
 索引与源码都写在 `tmp_path`，不碰仓库里的真实数据（`mc-librarian-data/`）。
+
+`literal` 通道要跑真实的 `rg` 子进程（规格 §3 定死用 ripgrep，不做内置实现），所以依赖它的
+用例在 `rg` 不在 PATH 上时 `pytest.skip`：否则没装 ripgrep 的机器上 `bun run check` 直接红。
 """
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -36,6 +40,11 @@ WHY_ORDER = ["summary", "symbol", "literal", "reference"]
 # 大方法：让 `snippet` 成为响应体的主要体积，才能验证 `locate` 的体量优势。
 BIG_METHOD_LINES = 80
 BIG_PATH = "net/big/Big.java"
+
+requires_ripgrep = pytest.mark.skipif(
+    shutil.which(channels.RG_BINARY) is None,
+    reason="literal 通道要跑 ripgrep 子进程：把 rg 放进 PATH 后再跑这条用例",
+)
 
 
 def silent(_level: str, _message: str) -> None:
@@ -129,6 +138,27 @@ def build_big_version(settings: Settings, conn: sqlite3.Connection) -> Path:
     return build_version(settings, conn, {BIG_PATH: "\n".join(lines) + "\n"})
 
 
+FTS5_SUMMARIES = (
+    "CREATE VIRTUAL TABLE summaries USING fts5(fqn, text_zh, keywords, tokens)",
+    "INSERT INTO summaries (fqn, text_zh, keywords, tokens)"
+    " VALUES ('net.minecraft.world.Mob', '自然生成分类：定义怪物数量上限 spawninterval',"
+    " 'spawninterval', 'tokens')",
+)
+
+
+def write_summaries(settings: Settings, statements: tuple[str, ...]) -> None:
+    """在索引库里建 `summaries`（#7 的产物），供摘要通道的接入与降级用例使用。"""
+    writable = sqlite3.connect(index_path(settings.data_dir, VERSION))
+
+    try:
+        for statement in statements:
+            writable.execute(statement)
+
+        writable.commit()
+    finally:
+        writable.close()
+
+
 # ----------------------------------------------------------------------
 # 三路通道（直接调通道函数）
 # ----------------------------------------------------------------------
@@ -146,6 +176,7 @@ def test_symbol_channel_reuses_four_level_matching(
     ]
 
 
+@requires_ripgrep
 def test_literal_channel_reports_file_lines(
     settings: Settings, indexed: Path, index_conn: sqlite3.Connection
 ) -> None:
@@ -159,6 +190,7 @@ def test_literal_channel_reports_file_lines(
     ]
 
 
+@requires_ripgrep
 def test_literal_channel_normalizes_to_innermost_symbol(
     settings: Settings, indexed: Path, index_conn: sqlite3.Connection
 ) -> None:
@@ -198,6 +230,7 @@ def test_summary_channel_is_empty_without_the_table(
 # ----------------------------------------------------------------------
 
 
+@requires_ripgrep
 def test_fusion_merges_two_channels_and_puts_the_hit_first(
     user_client: TestClient, indexed: Path
 ) -> None:
@@ -214,6 +247,7 @@ def test_fusion_merges_two_channels_and_puts_the_hit_first(
     assert merged["net.minecraft.world.World#spawn"] == ["literal", "reference"]
 
 
+@requires_ripgrep
 def test_total_counts_candidates_before_fusion(user_client: TestClient, indexed: Path) -> None:
     """`total` 是融合前的候选总数：symbol 1 + literal 3 + reference 2 = 6。"""
     body = post_search(user_client, {"query": "tick"})
@@ -275,6 +309,38 @@ def test_locate_response_is_a_fraction_of_snippet(
     assert len(located.content) < len(full.content) / 3
 
 
+def test_locate_tokens_count_only_what_locate_returns(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection
+) -> None:
+    """`locate` 的 `tokens` 按实际返回内容计（不含 `snippet`/`summary`），不拿片段成本充数。"""
+    build_big_version(settings, conn)
+    body = {"query": "computeSpawnBudget", "limit": 10}
+    full = post_search(user_client, body)
+    located = post_search(user_client, {**body, "detail": "locate"})
+
+    full_tokens = sum(hit["tokens"] for hit in full["hits"])
+    locate_tokens = sum(hit["tokens"] for hit in located["hits"])
+
+    # 同一个 query、同一批命中：locate 的 token 量级是 snippet 的十几分之一（见 `docs/01-api.md`）。
+    assert locate_tokens * 5 <= full_tokens
+    assert all(hit["tokens"] < 100 for hit in located["hits"])
+
+
+def test_locate_budget_fits_more_hits_than_snippet(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection
+) -> None:
+    """同一个 `max_tokens` 下 `locate` 装得下更多条目：预算按实际返回内容算，不被片段成本吃掉。"""
+    build_big_version(settings, conn)
+    body = {"query": "computeSpawnBudget", "limit": 10, "max_tokens": 200}
+    full = post_search(user_client, body)
+    located = post_search(user_client, {**body, "detail": "locate"})
+
+    # `huge` 的片段自己就超预算，只因为「至少返回第一条」才在 snippet 下留下。
+    assert len(full["hits"]) == 1
+    assert len(located["hits"]) > len(full["hits"])
+    assert sum(hit["tokens"] for hit in located["hits"]) <= 200
+
+
 def test_max_tokens_drops_after_budget_but_keeps_the_first(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection
 ) -> None:
@@ -288,6 +354,7 @@ def test_max_tokens_drops_after_budget_but_keeps_the_first(
     assert sum(hit.get("tokens") or 0 for hit in hits) <= 200 or len(hits) == 1
 
 
+@requires_ripgrep
 def test_path_prefix_filters_candidates_before_fusion(
     user_client: TestClient, indexed: Path
 ) -> None:
@@ -300,6 +367,7 @@ def test_path_prefix_filters_candidates_before_fusion(
     assert all(hit["path"] == WORLD_PATH for hit in with_prefix["hits"])
 
 
+@requires_ripgrep
 def test_suggestions_drop_query_words_and_cap_at_five(
     user_client: TestClient, indexed: Path
 ) -> None:
@@ -319,7 +387,7 @@ def test_suggestions_drop_query_words_and_cap_at_five(
 def test_overloaded_methods_stay_separate(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection
 ) -> None:
-    """同名重载方法是不同实体，不能因为 fqn 相同而被并成一条。"""
+    """同名重载方法是不同实体：既不被并成一条，也不撞 `id`（前端列表靠它做 key）。"""
     build_version(
         settings,
         conn,
@@ -339,31 +407,14 @@ def test_overloaded_methods_stay_separate(
     assert len(hits) == 2
     assert {tuple(hit["lines"]) for hit in hits} == {(4, 4), (5, 5)}
     assert {hit["symbol"] for hit in hits} == {"net.over.Over#pick"}
+    assert len({hit["id"] for hit in hits}) == 2, "重载方法的 id 必须带行区间才不重复"
 
 
 def test_summary_channel_contributes_when_the_table_exists(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
 ) -> None:
     """`summaries` 表就位后（#7），摘要通道真正接入融合（本票只留接口）。"""
-    index = index_path(settings.data_dir, VERSION)
-    writable = sqlite3.connect(index)
-
-    try:
-        writable.executescript(
-            "CREATE VIRTUAL TABLE summaries USING fts5(fqn, text_zh, keywords, tokens)"
-        )
-        writable.execute(
-            "INSERT INTO summaries (fqn, text_zh, keywords, tokens) VALUES (?, ?, ?, ?)",
-            (
-                "net.minecraft.world.Mob",
-                "自然生成分类：定义怪物数量上限 spawninterval",
-                "spawninterval",
-                "tokens",
-            ),
-        )
-        writable.commit()
-    finally:
-        writable.close()
+    write_summaries(settings, FTS5_SUMMARIES)
 
     body = post_search(user_client, {"query": "spawninterval"})
 
@@ -371,6 +422,43 @@ def test_summary_channel_contributes_when_the_table_exists(
     assert body["hits"][0]["why"] == ["summary"]
     assert body["hits"][0]["symbol"] == "net.minecraft.world.Mob"
     assert body["hits"][0]["summary"]
+
+
+def test_summary_channel_degrades_when_table_is_not_fts5(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
+) -> None:
+    """`summaries` 存在但不是 FTS5（建错 / 被外部改过）时该路返回空，不 500（规格 §8）。"""
+    write_summaries(
+        settings, ("CREATE TABLE summaries (fqn TEXT, text_zh TEXT, keywords TEXT, tokens TEXT)",)
+    )
+
+    body = post_search(user_client, {"query": "spawninterval"})
+
+    assert all("summary" not in hit["why"] for hit in body["hits"])
+
+
+def test_summary_channel_degrades_on_fts_syntax_in_query(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
+) -> None:
+    """query 含 FTS 语法（`"`、`*`、`-`……）时摘要路返回空、其余路照常，整体 200。
+
+    这些字符在 FTS5 的 `MATCH` 里是语法错误（`unterminated string` 等），不是「查询不合法」：
+    规格 §8 要求任何一路为空都不算错误。
+    """
+    write_summaries(settings, FTS5_SUMMARIES)
+
+    for raw_query in ('"', "*", "-"):
+        response = user_client.post(
+            "/v1/search", json={"version": VERSION, "query": raw_query}
+        )
+
+        assert response.status_code == 200, f"query={raw_query!r}：{response.text}"
+        assert all("summary" not in hit["why"] for hit in response.json()["hits"])
+
+    # `"` 在 fixture 的 `data/*.json` 里是字面量：其余路确实照常返回。
+    literal = user_client.post("/v1/search", json={"version": VERSION, "query": '"'}).json()
+
+    assert literal["hits"]
 
 
 def test_empty_result_is_200_with_empty_arrays(

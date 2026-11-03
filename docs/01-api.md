@@ -50,6 +50,10 @@
 - **`suggestions`**：从同批命中的方法名/字段名里挑出区分度最高的几个，把「查询改写」变成「挑一个建议」。
 
 `detail=locate` 只返回 `path + lines`，用于「先定位、后精读」的两段式调用，比直接给片段省 5–10 倍 token。
+每条命中的 `tokens` 按**该条实际返回的内容**计：`locate` 只算定位字段（版本 / 路径 / 行区间 /
+符号 / `why`），`snippet` 才把片段与摘要算进去；`max_tokens` 预算也按同一个数，否则 `locate`
+的预算会被不存在的片段成本吃掉（实测 26.3：同一 query 下 `locate` 的 token 之和是 `snippet`
+的 1/3–1/8.5，`max_tokens=400` 时能装下 12 条 vs 5 条）。计数口径是 `cl100k_base` 真分词。
 
 **四路候选在服务端用 RRF 融合**：三路的分数量纲不可比（FTS5 的 bm25、符号匹配级别、ripgrep 无分数），
 所以不做分数加权，而是 `score(d) = Σ 1/(60 + rank_c(d))`，每路各取前 50 条候选，再按本次最高分
@@ -60,7 +64,8 @@
 
 字面量通道是 ripgrep 子进程（`--json --max-count 50 --max-columns 200 --max-filesize 2M --no-ignore`，
 超时 5 秒）；超时或不可用时该路返回空并写 `warn`，不影响另外几路。引用通道在 query 命中某个符号名时
-反查 `refs` 表；摘要通道本票只留接口（`summaries` 表由 #7 建，不存在时返回空、不报错）。
+反查 `refs` 表；摘要通道本票只留接口（`summaries` 表由 #7 建，不存在时返回空、不报错；表在但不是
+FTS5、或 query 含 FTS 语法（`"`、`*`、`-`……）时同样返回空并写 `warn`，不把该路的问题升级成 500）。
 
 ### 4.2 `GET /v1/symbol`
 
@@ -181,3 +186,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | 复审修复（#21 关闭前最后一轮）：`JobRunner._loop` 的异常兜底自身不再抛——`_fail` 失败只记 error 日志，单次失败不会让 asyncio 任务静默死亡、任务队列永久停摆；`_finish` 事务体去掉 `assert`（`python -O` 下会失效）并把 checkpoint 取值改成缺键/类型不对退回 0 的安全形式（保留单一事务，终态 + 版本登记 + 审计仍原子）；`start()` 的 `_recover_interrupted` 包异常，DB busy 不再阻断启动；文档订正 `POST /v1/admin/versions` 的 `source_size_bytes`（源码根不存在时保留原值，首次注册写 0）；契约补 `JobCreate.options.obfuscated` 显式传 `null` 返回 422。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | issue #6：`POST /v1/search` 真正落地——四路召回（symbol / literal / reference，summary 留接口）用 RRF（k=60，每路前 50）融合、按最高分归一化；`literal` 走 ripgrep 子进程（固定参数 + 5 秒超时，不可用/超时降级为空并写 `warn`），`reference` 反查 `refs` 表，`summary` 表不存在时返回空；`why` 去重且顺序固定，`detail=locate` 不带 `snippet`/`summary`，`max_tokens` 按 score 降序截断但至少保留第一条，`path_prefix` 在候选阶段过滤，`suggestions` 按「排除 query 词 + 索引库出现次数升序」取前 5；契约补 `/v1/search` 的 401/404/422 与 `total` 语义；前端 `/browse` 升级为检索调试台（`why` 按通道着色、展开 `snippet`、建议可点击）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | issue #13：新增端到端命令 `mc-librarian index --version <v> [--source-dir <dir>] [--force]`——复用 `JobRunner` 与 checkpoint，不给 `--source-dir` 跑完整五段、给了则从 `parse` 开始，跑完由 `_finish` 登记版本（`db_path` 指向产出索引，不需要再手工注册）；未给 `--force` 且索引已存在时跳过 `parse` 重建（CLI 置 `options.reuse_index`，API 任务不设该键、语义不变）；`download`/`decompile` 的完成状态收敛到 `<data_dir>/cache/<version>/fetch.json`（`JobRunner` 每跑完一段就并进去，与 `mc-librarian fetch` 共用同一份），该标记记着 `decompile` 已完成且源码树还在时新任务不再重复反编译（`force=true` 一律重建）；内存峰值按秒采样**进程树** RSS（`psutil` 为 dev 依赖，导入失败只降级为不测量并记 warn）；退出码三态（0 成功 / 1 任务失败 / 2 参数错误）；`summarize` 仍是占位（摘要由 #7 落地）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | 复审修复（#6 × #13）：token 口径改为 `cl100k_base` 真分词（`tiktoken` 进运行时依赖，常数估算降为 fallback 并写 warn）——`max_tokens` 预算与索引统计同一口径，与 #13 验收标准的实测值可比；`detail=locate` 的 `tokens` 按实际返回内容计（不再拿片段成本充数），预算也因此装得下更多条目；`Hit.id` 带上行区间（同名重载方法不再撞 id）；摘要通道整路包 `try/except sqlite3.Error`（表不是 FTS5、或 query 含 FTS 语法时返回空 + `warn`，不再 500）；`download` 也按 fetch 完成标记与 jar 存在性跳过联网（`--force` 除外）；CLI 被 Ctrl-C 中断时把任务标为 `failed`（不再留下永久 `running` 的行）；`psutil` 缺失的 warn 同时写进任务日志；ripgrep 记为 `apps/api` 的前置依赖，依赖它的测试在 `rg` 缺失时 skip。属 v0.2 设计内的增量补齐，`info.version` 不变 |

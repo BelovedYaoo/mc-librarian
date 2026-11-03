@@ -9,6 +9,9 @@ dependencies = [
   "fastapi>=0.118",
   "pydantic>=2.12",
   "pydantic-settings>=2.11",
+  # token 计数口径：`#13` 的验收标准（26.3 约 7.5M token）是用 cl100k 真分词器实测的，
+  # 常数估算在同一批源码上偏 13%–27%，两个口径不可比。装不上时退回常数估算并写 warn。
+  "tiktoken>=0.14",
   # 钉在 <0.26：0.26.0 的 Python 绑定在遍历成员（读 `member.type` /
   # `child_by_field_name`）时会堆损坏，真实大源码树上随机段错误，且无法在代码层规避
   # （不是 Tree 生命周期问题）。见 issue #22，上游修复后再解除。

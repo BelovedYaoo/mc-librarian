@@ -17,7 +17,7 @@ from mc_librarian.auth.deps import CurrentUser, DbConn, SettingsDep
 from mc_librarian.config import Settings
 from mc_librarian.indexing import java, query
 from mc_librarian.indexing.layout import source_root
-from mc_librarian.indexing.text import split_lines, tokens_from_chars
+from mc_librarian.indexing.text import count_tokens, split_lines
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.retrieval import search as run_search
@@ -270,7 +270,7 @@ def read_file(
     used = 0
 
     for line in selected:
-        cost = tokens_from_chars(len(line) + 1)
+        cost = count_tokens(line + "\n")
 
         if kept and used + cost > max_tokens:
             break

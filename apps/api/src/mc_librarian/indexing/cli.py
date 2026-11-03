@@ -4,8 +4,8 @@
 流水线本身不在这里：命令只负责建任务、跑完、汇总，执行复用 `JobRunner` 与 checkpoint。
 
 - 不给 `--source-dir`：完整五段 `download → decompile → parse → summarize → finalize`；
-  源码树已反编译完成（`cache/<version>/fetch.json` 记着，与 `mc-librarian fetch` 共用）时跳过
-  `decompile`；
+  jar 已在缓存里（`cache/<version>/fetch.json` 记着 `download` 完成）时不联网重下，源码树已
+  反编译完成时跳过 `decompile`（两个标记都与 `mc-librarian fetch` 共用）；
 - 给了 `--source-dir`：跳过 download/decompile，从 `parse` 开始；
 - 不给 `--force` 且 `db/<version>.sqlite` 已是合法索引：跳过重建（复用已有索引）后继续收尾，
   因此重复执行同一命令不会改动已有产物；
@@ -29,7 +29,6 @@ from mc_librarian.db import Database, transaction
 from mc_librarian.indexing import memory
 from mc_librarian.indexing.build import read_index_totals
 from mc_librarian.indexing.layout import index_path
-from mc_librarian.indexing.text import CHARS_PER_TOKEN
 from mc_librarian.jobs import store
 from mc_librarian.jobs.runner import (
     REUSE_MESSAGES,
@@ -42,6 +41,8 @@ from mc_librarian.schemas import VERSION_PATTERN, Job, LogLevel
 
 # `psutil` 是 dev 依赖：装不上（生产不装）时跳过内存峰值测量，流水线照跑。
 PSUTIL_MISSING_MESSAGE: Final = "psutil 不可用，跳过内存峰值测量（pip install psutil）"
+# 被 Ctrl-C / 未预期异常中断时的失败原因：CLI 不跑服务启动时的恢复，得自己收尾。
+INTERRUPTED_ERROR: Final = "命令被中断（Ctrl-C 或未预期异常），任务已标记为失败"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
 def build_options(source_dir: Path | None, *, force: bool) -> dict[str, Any]:
     """任务参数。
 
-    - `force`：`--force` 时重建，`reuse_source_tree` 与 `reuse_index_stats` 都据此绕过复用；
+    - `force`：`--force` 时重建，`reuse_download_stats`/`reuse_source_tree`/`reuse_index_stats`
+      都据此绕过复用；
     - `reuse_index`：CLI 的索引幂等语义（未给 `--force` 时复用已有索引）。API 任务不设这个键，
       因此「提交即重建」的既有语义不变；
     - `source_dir`：已被 `main` 转成绝对路径，覆盖 `JobContext.source_dir` 的「相对数据根解析」。
@@ -127,7 +129,9 @@ async def run_job(settings: Settings, database: Database, job: Job) -> int:
     if memory.available():
         sampler.start()
     else:
+        # 同时写进任务日志：只在 stderr 上说的话，UI 里看到的是一个没有内存峰值的任务。
         print(PSUTIL_MISSING_MESSAGE, file=sys.stderr)
+        _append_log(database, job.id, "warn", PSUTIL_MISSING_MESSAGE)
 
     runner = JobRunner(settings, database)
 
@@ -136,6 +140,13 @@ async def run_job(settings: Settings, database: Database, job: Job) -> int:
     except StageError as error:
         print(f"index 失败：{error}", file=sys.stderr)
         return 1
+    except BaseException:
+        # Ctrl-C（含取消协程的 `CancelledError`）或未预期异常：CLI 不走服务启动时的
+        # `_recover_interrupted`，不在这里收尾的话任务会永久停在 `running`，之后同版本的
+        # 任务会被 `has_active_job` 挡住。标记失败后原样抛出，退出码与 traceback 不变。
+        _fail_job(database, job.id)
+        print(INTERRUPTED_ERROR, file=sys.stderr)
+        raise
     finally:
         # 反编译的 java 子进程已经退出，峰值就此定下；先停采样再汇总。
         peak_bytes = sampler.stop()
@@ -178,6 +189,26 @@ def _find_checkpoint(database: Database, job_id: str) -> dict[str, Any]:
     return {} if row is None else store.checkpoint_of(row)
 
 
+def _fail_job(database: Database, job_id: str) -> None:
+    """被中断的任务写失败终态；带 `running` 状态守卫，不覆盖已写入的终态。
+
+    先写终态、确认真的写进去了才追加日志（与 `JobRunner._fail` 同一取舍）：
+    已 `succeeded` 的任务不该多出一条与状态不符的 error 日志。
+    """
+    with database.connect() as conn, transaction(conn):
+        updated = store.finish(
+            conn,
+            job_id,
+            status="failed",
+            message="任务失败",
+            error=INTERRUPTED_ERROR,
+            expected_status="running",
+        )
+
+        if updated:
+            store.append_log(conn, job_id, level="error", message=INTERRUPTED_ERROR)
+
+
 def _append_log(database: Database, job_id: str, level: LogLevel, message: str) -> None:
     with database.connect() as conn, transaction(conn):
         store.append_log(conn, job_id, level=level, message=message)
@@ -215,7 +246,7 @@ def _print_summary(
     if totals is not None:
         print(f"索引文件：{totals.files}")
         print(f"行数：{totals.lines}")
-        print(f"token：{totals.tokens}（按 {CHARS_PER_TOKEN} 字符/token 估算）")
+        print(f"token：{totals.tokens}（cl100k 口径）")
 
     if peak_bytes is not None:
         print(f"内存峰值：{memory.format_bytes(peak_bytes)}")

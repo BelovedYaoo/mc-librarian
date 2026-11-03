@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Final
 
 from mc_librarian.indexing import java
-from mc_librarian.indexing.text import count_lines, tokens_from_chars
+from mc_librarian.indexing.text import count_lines, count_tokens
 from mc_librarian.schemas import LogLevel
 
 JAVA_SUFFIX: Final = ".java"
@@ -261,7 +261,7 @@ def build_index(
             log("warn", f"parse：跳过 {relative}（{error}）")
             continue
 
-        tokens = tokens_from_chars(len(text))
+        tokens = count_tokens(text)
         total_tokens += tokens
         total_size += size_bytes
         parsed_file: java.ParsedFile | None = None

@@ -65,10 +65,12 @@ def fuse(channels: dict[Channel, list[Candidate]]) -> list[FusedHit]:
     return fused
 
 
-def apply_token_budget(hits: list[FusedHit], costs: list[int], max_tokens: int) -> list[int]:
-    """按 score 降序累加 `tokens`，超出预算即丢弃当前及之后的条目（规格 §6）。
+def apply_token_budget(costs: list[int], max_tokens: int) -> list[int]:
+    """按 score 降序累加各条命中的 `tokens`，超出预算即丢弃当前及之后的条目（规格 §6）。
 
-    **至少返回第一条**（即使它自己就超预算），避免「有命中却返回空」。返回保留的下标。
+    `costs` 与 `fuse` 的结果同序、同长（调用方按 `detail` 决定每条的成本，见
+    `retrieval.service`）。**至少返回第一条**（即使它自己就超预算），避免「有命中却返回空」。
+    返回保留的下标。
     """
     kept: list[int] = []
     used = 0

@@ -9,7 +9,8 @@
 
 `literal` / `reference` 拿到的是「文件 + 行号」，统一经 `query.symbol_at` 归一化成所在的最内层
 符号：同一实体被多路召回时才能被 RRF 累加，`why` 也才会有多个值（规格 §1）。任何一路为空
-（含 ripgrep 不可用 / 超时、`summaries` 表不存在）都不算错误（规格 §8）。
+（含 ripgrep 不可用 / 超时、`summaries` 表不存在或不是 FTS5、query 含 FTS 语法）都不算错误
+（规格 §8）。
 """
 
 from __future__ import annotations
@@ -137,26 +138,38 @@ def summary_candidates(
     """摘要通道接口：`summaries` 表由 #7 建，不存在时返回空、不报错（规格 §2）。
 
     表在时按文档 schema（`summaries(fqn, text_zh, keywords, tokens)`）做 FTS5 查询，
-    bm25 升序（越负越相关，排在前）。
+    bm25 升序（越负越相关，排在前）。整路包 `try/except sqlite3.Error`：表不是 FTS5、
+    或 query 含 FTS 语法（`"`、`*`、`-`、`AND`……）时 SQL 会抛 `OperationalError`，
+    那是「这一路没结果」，不是请求失败（规格 §8）。
     """
-    if not query.has_table(connection, "summaries"):
+    try:
+        if not query.has_table(connection, "summaries"):
+            return []
+
+        sql = (
+            "SELECT summaries.fqn AS fqn, summaries.text_zh AS text_zh, c.kind AS kind,"
+            " f.path AS path, c.start_line AS start_line, c.end_line AS end_line"
+            " FROM summaries JOIN classes c ON c.fqn = summaries.fqn"
+            " JOIN files f ON f.id = c.file_id"
+            " WHERE summaries MATCH ?"
+        )
+        params: list[object] = [text]
+
+        if path_prefix:
+            sql += " AND substr(f.path, 1, length(?)) = ?"
+            params.extend([path_prefix, path_prefix])
+
+        sql += " ORDER BY bm25(summaries) LIMIT ?"
+        params.append(CHANNEL_LIMIT)
+
+        # `fetchall()` 放在 try 里：游标是惰性的，迭代期间才真正执行 SQL。
+        rows = connection.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        logger.warning(
+            "摘要通道查询失败（summaries 不是 FTS5 表，或 query 含 FTS 语法），该路返回空",
+            exc_info=True,
+        )
         return []
-
-    sql = (
-        "SELECT summaries.fqn AS fqn, summaries.text_zh AS text_zh, c.kind AS kind,"
-        " f.path AS path, c.start_line AS start_line, c.end_line AS end_line"
-        " FROM summaries JOIN classes c ON c.fqn = summaries.fqn"
-        " JOIN files f ON f.id = c.file_id"
-        " WHERE summaries MATCH ?"
-    )
-    params: list[object] = [text]
-
-    if path_prefix:
-        sql += " AND substr(f.path, 1, length(?)) = ?"
-        params.extend([path_prefix, path_prefix])
-
-    sql += " ORDER BY bm25(summaries) LIMIT ?"
-    params.append(CHANNEL_LIMIT)
 
     return [
         Candidate(
@@ -168,7 +181,7 @@ def summary_candidates(
             end_line=int(row["end_line"]),
             summary=row["text_zh"],
         )
-        for row in connection.execute(sql, params)
+        for row in rows
     ]
 
 

@@ -88,7 +88,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `control.sqlite` | 控制面数据库（账号、任务、版本注册表、审计……） |
 | `db/<version>.sqlite` | 单版本索引库，服务以 `mode=ro` 打开 |
 | `src/<version>/` | 反编译 / 就位后的源码树，`outline`/`read` 实时读取 |
-| `cache/<version>/` | 下载与反编译的中间产物（client jar、官方 mappings、fetch checkpoint）；`fetch.json` 是 `download`/`decompile` 的**完成标记**，`mc-librarian fetch` 与 `mc-librarian index` 共用它判断是否重复反编译（见 §4 的流程） |
+| `cache/<version>/` | 下载与反编译的中间产物（client jar、官方 mappings、fetch checkpoint）；`fetch.json` 是 `download`/`decompile` 的**完成标记**，`mc-librarian fetch` 与 `mc-librarian index` 共用它判断是否重复解析清单（联网）、重复反编译（见 §4 的流程） |
 | `jobs/`、`logs/` | 规格预留的任务工作目录与日志目录 |
 
 ### 5.1 控制面 `control.sqlite`
@@ -147,12 +147,19 @@ summaries(fqn, text_zh, keywords, tokens)           -- FTS5, jieba 预分词（#
 
 运行时依赖因此是：**JRE + vineflower jar + SpecialSource shaded jar**（后者仅 ≤ 1.21.11 的版本需要）。
 
-| 版本 | 文件 | 行数 | token |
+| 版本 | 文件 | 行数 | token（cl100k 口径） |
 |---|---|---|---|
-| 1.12.2 | 2,050 | 27 万 | 3.9M（映射后估算） |
-| 1.20.1 | 4,786 | 48 万 | 5.1M（映射后估算） |
-| 1.21.8 | 6,105 | 56 万 | 6.0M（映射后估算） |
-| 26.3 | 7,301 | 77 万 | **7.51M（实测）** |
+| 1.12.2 | 2,050 | 27 万 | 3.9M（旧口径「字符 ÷ 3.5」估算，非 cl100k） |
+| 1.20.1 | 4,786 | 48 万 | 5.1M（旧口径估算，非 cl100k） |
+| 1.21.8 | 6,105 | 56 万 | 6.0M（旧口径估算，非 cl100k） |
+| 26.3 | 7,301 | 77 万 | **7.51M（cl100k 实测）** |
+
+**token 口径是 `cl100k_base` 真分词**（`apps/api/src/mc_librarian/indexing/text.py` 的
+`count_tokens`，`tiktoken` 是运行时依赖）。上表里 26.3 一行是实测：整棵树 7,301 个 `.java`、
+33,341,288 字符、7,507,491 token（4.44 字符/token），索引内 7,272 个文件为 7,446,355 token；
+`mc-librarian index` 的输出就是后者。其余三行是**旧口径**（字符 ÷ 3.5）的估算，与 cl100k 不可比：
+同一常数在 26.3 上给出 9.52M（比 cl100k 高 27%）。同一个常数在不同代码库上差 ±40%，
+所以常数估算已降级为 `tiktoken` 不可用时的 fallback（并写 `warn`）。
 
 ## 7. 决策记录
 

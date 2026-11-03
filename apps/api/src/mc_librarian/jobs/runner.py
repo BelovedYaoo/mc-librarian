@@ -16,9 +16,11 @@
 - `options.reuse_index` 为真且 `db/<version>.sqlite` 已是合法索引时，跳过 `parse`（不重建），
   直接复用已有索引的统计：`mc-librarian index` 未给 `--force` 时的幂等语义（见
   `reuse_index_stats`）。
-- `cache/<version>/fetch.json`（与 `mc-librarian fetch` 共用）记着 `decompile` 已完成且源码树
-  还在、又没给 `--force` 时，跳过 `decompile`（见 `reuse_source_tree`）；跑完 `download`/
-  `decompile` 会把完成状态写回该文件（见 `persist_fetch_stage`）。
+- `cache/<version>/fetch.json`（与 `mc-librarian fetch` 共用）记着 `download` 已完成且 jar 还在
+  缓存里、又没给 `--force` 时，跳过 `download`（不再解析清单、不发 HTTP，见
+  `reuse_download_stats`）；记着 `decompile` 已完成且源码树还在时，跳过 `decompile`（见
+  `reuse_source_tree`）；跑完 `download`/`decompile` 会把完成状态写回该文件（见
+  `persist_fetch_stage`）。
 - `run_job(job_id)` 是 CLI 的入口：只认领并跑完指定的那一个任务，不走常驻队列循环。
 
 `#4`/`#5` 实现 `parse`：就位源码树、tree-sitter 解析、原子写出 `db/<version>.sqlite`；
@@ -43,6 +45,7 @@ from mc_librarian.db import Database, transaction
 from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.pipeline import (
     CHECKPOINT_FILE_NAME,
+    CLIENT_JAR_NAME,
     FETCH_STAGES,
     FetchContext,
     cache_dir_for,
@@ -86,7 +89,10 @@ INDEX_DISABLED_ERROR: Final = (
 REUSE_INDEX_MESSAGE: Final = "索引已存在，跳过重建（用 --force 重建）"
 # 源码树已反编译完成时的同类提示。
 REUSE_SOURCE_TREE_MESSAGE: Final = "源码树已存在，跳过反编译（用 --force 重建）"
+# jar 已在缓存里、`download` 无需再解析清单（联网）时的同类提示。
+REUSE_DOWNLOAD_MESSAGE: Final = "jar 已在缓存里，跳过联网（用 --force 重下）"
 REUSE_MESSAGES: Final[dict[str, str]] = {
+    "download": REUSE_DOWNLOAD_MESSAGE,
     "parse": REUSE_INDEX_MESSAGE,
     "decompile": REUSE_SOURCE_TREE_MESSAGE,
 }
@@ -219,6 +225,53 @@ def reuse_source_tree(
     }
 
 
+def reuse_download_stats(
+    options: Mapping[str, Any], data_dir: Path, version: str
+) -> dict[str, Any] | None:
+    """`download` 已完成且 jar 还在缓存里时，返回复用要并入 checkpoint 的产物；否则 `None`。
+
+    判据与 `reuse_source_tree` 同源（`<data_dir>/cache/<version>/fetch.json`），再加 jar 存在性。
+    满足时**不再调 `manifest.resolve`**，所以断网也能重跑「源码树与索引都已在」的版本——
+    以前未给 `--source-dir` 的重复执行会在 `download` 阶段发 HTTP，断网直接 exit 1。
+    `options.force` 为真一律重跑（`--force` 的语义是「重下重编」）。
+
+    标记里缺 `jar_path`/`obfuscated`（`decompile` 与版本登记都要用）或 jar 已被删时也重跑：
+    半份标记不能当完成证据（与 `reuse_source_tree` 不用「目录里有 `.java`」同一取舍）。
+    """
+    if options.get("force") is True:
+        return None
+
+    persisted = read_checkpoint(fetch_checkpoint_path(data_dir, version))
+
+    if "download" not in done_stages(persisted):
+        return None
+
+    raw_jar = persisted.get("jar_path")
+    obfuscated = persisted.get("obfuscated")
+    client_jar = cache_dir_for(data_dir, version) / CLIENT_JAR_NAME
+
+    if not isinstance(raw_jar, str) or not raw_jar:
+        return None
+
+    if not isinstance(obfuscated, bool) or not client_jar.is_file():
+        return None
+
+    jar = Path(raw_jar)
+
+    if not jar.is_file():
+        return None
+
+    return {
+        "client_jar_path": str(client_jar),
+        "client_jar_bytes": client_jar.stat().st_size,
+        "jar_path": str(jar),
+        "jar_bytes": jar.stat().st_size,
+        "mappings_path": persisted.get("mappings_path"),
+        "remapped_jar_path": persisted.get("remapped_jar_path"),
+        "obfuscated": obfuscated,
+    }
+
+
 def reuse_stage_stats(
     stage: str, options: Mapping[str, Any], data_dir: Path, version: str
 ) -> dict[str, Any] | None:
@@ -226,11 +279,15 @@ def reuse_stage_stats(
 
     - `parse`：`options.reuse_index` 为真且 `db/<version>.sqlite` 已是合法索引——只有
       `mc-librarian index` 会设这个键（API 任务不设，保持「提交即重建」的既有语义）；
-    - `decompile`：`options.force` 不为真且按版本的 fetch checkpoint 记着该阶段已完成、
-      源码树还在（与 `mc-librarian fetch` 共用，API 任务同样受益）。
+    - `download`：按版本的 fetch checkpoint 记着该阶段已完成、jar 还在缓存里，且没给
+      `--force`——跳过联网解析清单；
+    - `decompile`：同上，标记记着该阶段已完成且源码树还在（API 任务同样受益）。
     """
     if stage == "parse":
         return reuse_index_stats(options, data_dir, version)
+
+    if stage == "download":
+        return reuse_download_stats(options, data_dir, version)
 
     if stage == "decompile":
         return reuse_source_tree(options, data_dir, version)
