@@ -1,131 +1,116 @@
-# MC Librarian API · v0.1
+# MC Librarian API · v0.2
 
-> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)。本文是人读版，解释「为什么这么设计」。
+> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（22 个端点 / 23 个 schema，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
 
 ## 1. 定位
 
-MC Librarian 是一个**只读**的代码知识库服务。它把一个 Minecraft 版本的反编译源码变成三路可检索的索引：
+一个带账号体系的 Minecraft 源码知识库：检索接口给 agent 和前端用，管理接口给后台用，`/ask` 给人类直接提问用。
+
+三路召回在**服务端**融合，调用方不需要知道该用哪条通道：
 
 | 通道 | 数据来源 | 回答的问题 | 召回标记 |
 |---|---|---|---|
-| 摘要 | 每个类一句中文描述 + 关键英文标识符 | 「哪个类管这事」 | `summary` |
-| 符号 | tree-sitter 解析出的类/方法/字段表 | 「这个符号在哪、谁在用」 | `symbol` |
-| 字面量 | ripgrep 全文索引 | 「这串字面量/正则在哪」 | `literal` |
-
-`POST /v1/search` 在**服务端**完成三路召回与融合，调用方（agent 或人）不需要知道该用哪条通道。这是刻意的：让模型做「选哪个工具」的决策，失败率远高于让它做「读结果、改写查询」。
+| 摘要 | 每个类 3 行中文描述 + 关键英文标识符 | 「哪个类管这事」 | `summary` |
+| 符号 | tree-sitter 解析的类/方法/字段表 + 引用表 | 「这个符号在哪、谁在用」 | `symbol` |
+| 字面量 | ripgrep 全文检索 | 「这串字面量/正则在哪」 | `literal` |
 
 ## 2. 通用约定
 
-- **无状态**：每个请求自带 `version`，服务端不保存会话。
-- **版本显式**：没有「当前版本」这种隐式状态。多版本并存时这是唯一不出错的方式。
-- **预算控制**：`max_tokens` 由调用方给，服务端按 score 降序截断。默认 4000。
+- **无状态**：检索接口不自带会话，`version` 每个请求显式传，**不支持 `latest`**。
+- **预算控制**：`max_tokens` 由调用方给，服务端按 score 降序截断。
 - **错误格式**：RFC 7807 `application/problem+json`。
-- **鉴权**：`Authorization: Bearer <token>`，token 来自环境变量 `MC_ATLAS_TOKEN`。内网可关闭（配置项）。
+- **认证**：两种并列——浏览器用 `mc_librarian_session` cookie（HttpOnly + Secure + SameSite=Lax），脚本用 `mcl_` 前缀的个人 access token。
+- **授权**：`user` 可用检索与问答；`admin` 额外可用 `/v1/admin/*`。前端隐藏菜单只是体验，后端每个端点独立校验。
 
-## 3. 端点
+## 3. 端点总览
 
-### 3.1 `POST /v1/search` — 混合检索
+| 分组 | 端点 | 角色 |
+|---|---|---|
+| meta | `GET /v1/health`、`GET /v1/versions` | 公开 / 登录 |
+| retrieve | `POST /v1/search`、`GET /v1/symbol`、`GET /v1/references` | user |
+| read | `GET /v1/outline`、`GET /v1/read` | user |
+| answer | `POST /v1/ask`（SSE） | user |
+| auth | `login` / `logout` / `me` / `tokens` | 公开 / 本人 |
+| admin | `users`、`jobs`、`jobs/{id}/logs`、`settings`、`usage`、`audit` | admin |
 
-```json
-{
-  "query": "刷怪上限",
-  "version": "1.20.1",
-  "path_prefix": "net/minecraft/world",
-  "kind": "any",
-  "detail": "snippet",
-  "limit": 10,
-  "max_tokens": 4000
-}
-```
+## 4. 检索接口
 
-```json
-{
-  "query": "刷怪上限",
-  "version": "1.20.1",
-  "hits": [
-    {
-      "id": "1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory",
-      "type": "class",
-      "version": "1.20.1",
-      "path": "net/minecraft/world/entity/MobCategory.java",
-      "symbol": "net.minecraft.world.entity.MobCategory",
-      "lines": [12, 88],
-      "score": 0.87,
-      "why": ["summary", "symbol"],
-      "summary": "自然生成分类：定义怪物/动物/环境生物的最大数量上限、生成间距与每区块生成预算",
-      "snippet": "public enum MobCategory {\n   MONSTER(\"monster\", 70, false, false, 128),",
-      "tokens": 180
-    }
-  ],
-  "suggestions": ["NaturalSpawner", "maxInstancesPerChunk", "spawnCategoryForChunk"],
-  "total": 23,
-  "took_ms": 8
-}
-```
-
-**`why` 是给调用方模型看的导航信号**：`summary` 说明是语义命中（可以信摘要），`symbol` 说明是名字命中（可能同名不同义），`literal` 说明只是字面量巧合。不同来源的可信度不同，模型据此决定要不要 `read`。
-
-**`suggestions` 是下一步的查询候选**：从同批命中的方法名/字段名里挑出区分度最高的几个。它把「查询改写」这件难事变成「挑一个建议」，显著降低弱模型空转的概率。
-
-`detail=locate` 只返回 path + lines，用于「先定位、后精读」的两段式调用，比直接给片段省 5–10 倍 token。
-
-### 3.2 `GET /v1/symbol` — 符号查找
-
-```
-GET /v1/symbol?version=1.20.1&name=MobCategory&fuzzy=true
-```
-
-返回 `SymbolDetail[]`：全限定名、签名、路径、行号、父类、接口、类摘要、成员列表。
-`fuzzy=true` 时按「简单名 → 后缀匹配 → 编辑距离」三级降级。
-
-### 3.3 `GET /v1/references` — 反查引用
-
-```
-GET /v1/references?version=1.20.1&symbol=MobCategory%23getMaxInstancesPerChunk
-```
-
-返回 `path + lines + enclosing(所在方法) + kind`。
-数据来自 AST 启发式提取，**召回优先于精确**：覆盖调用、字段访问、类型声明三类，允许少量误报（由调用方 read 时证伪），但尽量不漏。
-
-### 3.4 `GET /v1/outline` — 文件骨架
-
-返回包名、imports、类/方法签名与行号，**不返回方法体**。这是 agent 最常用的第一步：先看骨架决定读哪段，避免整文件读入。
-
-### 3.5 `GET /v1/read` — 源码切片
-
-```
-GET /v1/read?version=1.20.1&path=...&start=120&end=260&max_tokens=4000
-```
-
-`start`/`end` 必填。这是刻意的约束：不提供「读整个文件」的便利，因为对 5M token 的语料，整文件读取是上下文爆炸的主要来源。
-
-### 3.6 `POST /v1/ask` — 服务端问答（可选）
+### 4.1 `POST /v1/search`
 
 ```json
-{ "question": "为什么 1.18 之后刷怪塔效率变低了？", "version": "1.20.1" }
+{ "query": "刷怪上限", "version": "1.20.1", "path_prefix": "net/minecraft/world", "limit": 10, "max_tokens": 4000 }
 ```
 
-服务端跑「检索 → 读取 → 作答」循环，返回中文答案 + `citations[]` + `steps[]`（工具调用轨迹）。
-未配置生成模型时返回 `501`。
+响应里两个字段是刻意设计的：
 
-**它和 agent 无关**：任何 HTTP 客户端都能用，curl、网页、n8n、Dify 都行。这是「人类直接中文提问」的入口。
+- **`why`**：`summary` 说明是语义命中（可以信摘要）、`symbol` 说明是名字命中（可能同名不同义）、`literal` 说明只是字面量巧合。模型据此判断要不要继续 `read`。
+- **`suggestions`**：从同批命中的方法名/字段名里挑出区分度最高的几个，把「查询改写」变成「挑一个建议」。
 
-## 4. 三个接入方式
+`detail=locate` 只返回 `path + lines`，用于「先定位、后精读」的两段式调用，比直接给片段省 5–10 倍 token。
+
+### 4.2 `GET /v1/symbol`
+
+`fuzzy=true` 时按「简单名 → 后缀匹配 → 编辑距离」三级降级。返回签名、父类、接口、注解、类摘要、成员列表。
+
+### 4.3 `GET /v1/references`
+
+反查引用，返回 `path + lines + enclosing(所在方法) + kind`。数据来自 AST 启发式提取，**召回优先于精确**：允许少量误报（`read` 时会被证伪），但尽量不漏。
+
+### 4.4 `GET /v1/outline` / `GET /v1/read`
+
+`outline` 返回包名、imports、类与方法签名和行号，不含方法体——agent 最常用的第一步。
+`read` 强制要求 `start`/`end`，**不提供整文件读取**：对 5M token 的语料，整文件读取是上下文爆炸的主要来源。
+
+## 5. `/v1/ask`：SSE 事件序列
+
+```
+event: step      {"tool":"kb_search","args":{"query":"刷怪上限","version":"1.20.1"}}
+event: step      {"tool":"kb_read","args":{"path":"...","start":120,"end":260}}
+event: delta     {"text":"1.18 之后…"}
+event: citation  {"path":"net/minecraft/world/entity/MobCategory.java","lines":[12,88],"symbol":"..."}
+event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_usd":0.0021,"latency_ms":9300}}
+```
+
+- `step` 让前端能把「正在检索什么」画出来，也让调用方知道答案的依据路径。
+- `citation` 与 `delta` 分离，前端可以把引用做成可点击的代码定位。
+- 请求头 `Accept: application/json` 时退化为一次性返回完整 `AskResponse`，方便脚本调用。
+- 全局开关 `settings.ask.enabled=false` 时返回 `429`，用于异常时快速止血。
+
+## 6. 账号体系
+
+- **首次启动**：检测 `users` 表为空 → 强制进入 setup 向导创建唯一管理员；创建成功后 `/setup` 永久关闭。
+- **建号**：管理员创建用户，返回**一次性邀请链接**（48 小时有效），用户自行设置密码——管理员不需要也不应该知道别人的密码。
+- **角色**：`admin` / `user`，可提升可降级；**最后一个 admin 不允许降级或停用**。
+- **PAT**：每人可签发多个，单独吊销，展示 `last_used_at` 与前缀。
+- **审计**：角色变更、禁用、PAT 签发/吊销、设置修改、任务创建全部落 `audit` 表。
+
+## 7. 管理接口
+
+| 端点 | 说明 |
+|---|---|
+| `POST /v1/admin/jobs` | 创建索引任务，立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
+| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize，`progress` 0–1 |
+| `GET /v1/admin/jobs/{id}/logs` | 分页日志；`Accept: text/event-stream` 可增量跟随 |
+| `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
+| `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly |
+| `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
+| `GET /v1/admin/audit` | 审计日志 |
+
+**用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定。
+
+## 8. 三种接入方式
 
 | 方式 | 适用 | 来源 |
 |---|---|---|
-| OpenAPI 3.1 | Dify / n8n / LangChain / 自研 | `doc/openapi.yaml` |
-| MCP | Claude Code / Cursor / pi | 后续 `adapters/mcp.py`，薄封装上述端点 |
-| 直接 HTTP | 自研 agent / 脚本 | 同上 |
+| OpenAPI 3.1 | 前端生成的 TS 客户端、Dify / n8n / LangChain | `doc/openapi.yaml` |
+| MCP | Claude Code / Cursor / pi | `apps/api` 内薄适配器 |
+| 直接 HTTP | 脚本、curl | 同上 |
 
-MCP 只是适配器，不是架构的一部分。删掉它服务照常工作。
+前端 `packages/api-client` 由 `openapi-typescript` 从本文件生成，CI 校验 `app.openapi()` 与文档一致，防止契约漂移。
 
-## 5. 未定项
-
-见 `00-overview.md` 的「决策记录」。当前待确认的编号会在那里同步。
-
-## 6. 变更记录
+## 9. 变更记录
 
 | 日期 | 版本 | 内容 |
 |---|---|---|
 | 2026-11-03 | 0.1.0 | 初稿：search / symbol / references / outline / read / ask |
+| 2026-11-03 | 0.2.0 | 加账号体系、PAT、admin（users/jobs/settings/usage/audit）、ask 改 SSE、`latest` 移除 |

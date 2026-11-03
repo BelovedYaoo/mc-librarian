@@ -1,24 +1,26 @@
 # mc-librarian
 
-Minecraft 源码知识库检索服务。把反编译后的 MC 源码变成可被 agent 和人类检索的只读 HTTP API。
+Minecraft 源码知识库与中文问答服务。
 
-- 三路混合检索：中文摘要 / AST 符号 / ripgrep 字面量
-- 无状态、多版本、显式 `version` 参数
-- 核心是 HTTP + OpenAPI，MCP 只是可选适配器
+- 三路混合检索：中文类摘要 / AST 符号与引用 / ripgrep 字面量
+- 每个版本一个索引，`version` 显式传参，无隐式状态
+- 账号体系（admin / user）、个人 access token、审计与用量记录
+- 前端：版本管理 · 问答 · 检索调试台 · 任务队列 · 设置
 
 ## 目录
 
 ```
-doc/
-  openapi.yaml    接口契约（机器可读）
-  01-api.md       API 说明与设计理由
-  00-overview.md  架构、数据结构、决策记录
+apps/api          Python：FastAPI + JobRunner + 索引 CLI
+apps/web          React + Vite + MUI
+packages/         生成的 API 客户端、精简版 UI 组件库
+deploy/           Dockerfile / Caddyfile / compose
+doc/              openapi.yaml（契约）、01-api.md、00-overview.md
 ```
 
 ## 状态
 
-设计阶段。索引与服务的实现尚未开始，见 `doc/00-overview.md` §7 里程碑。
+设计定稿，实现未开始。见 `doc/00-overview.md` §8 里程碑。
 
 ## 数据
 
-源码与索引产物不入库，见 `.gitignore`。
+源码与索引产物不入库，默认放在同级目录 `mc-librarian-data/`。

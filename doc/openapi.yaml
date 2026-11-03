@@ -1,36 +1,36 @@
 openapi: 3.1.0
 info:
   title: MC Librarian API
-  version: 0.1.0
-  summary: Minecraft 源码知识库检索服务
+  version: 0.2.0
+  summary: Minecraft 源码知识库与问答服务
   description: |
-    面向 agent 与人类的代码知识库。对每个 Minecraft 版本提供三路混合检索：
+    面向 agent 与人类、带账号体系的代码知识库服务。对每个 Minecraft 版本提供三路混合检索：
 
-    - **summary** — 中文类摘要（将中文问题直接映射到类）
-    - **symbol** — 类/方法/字段符号索引（AST 派生，精确）
-    - **literal** — 源码字面量/正则检索（ripgrep 派生）
+    - **summary** — 中文类摘要（中文问题直接映射到类）
+    - **symbol** — 类/方法/字段符号表（tree-sitter 派生）
+    - **literal** — 源码字面量与正则检索（ripgrep 派生）
 
-    设计约束：无状态；`version` 显式传参；每个响应带 `why`（命中原因）与
-    `suggestions`（下一步可搜的符号）；调用方通过 `max_tokens` 控制上下文预算。
+    设计约束：检索接口无状态、`version` 显式必传（不支持 `latest`）；响应带 `why` 与
+    `suggestions`；调用方用 `max_tokens` 控制上下文预算；索引由 `JobRunner` 异步执行，
+    接口只返回 `202 + job_id`。
 
 servers:
+  - url: https://mc.example.com
+    description: 生产（占位域名）
   - url: http://127.0.0.1:8787
     description: 本地开发
-  - url: http://mc-librarian.internal:8787
-    description: 内网共享
 
 security:
+  - cookieAuth: []
   - bearerAuth: []
 
 tags:
   - name: meta
-    description: 服务与版本元信息
   - name: retrieve
-    description: 检索类接口
   - name: read
-    description: 读取类接口
   - name: answer
-    description: 服务端问答（可选）
+  - name: auth
+  - name: admin
 
 paths:
   /v1/health:
@@ -49,7 +49,7 @@ paths:
                 required: [status, version]
                 properties:
                   status: { type: string, const: ok }
-                  version: { type: string, example: "0.1.0" }
+                  version: { type: string, example: "0.2.0" }
 
   /v1/versions:
     get:
@@ -73,9 +73,6 @@ paths:
     post:
       tags: [retrieve]
       summary: 混合检索（摘要 / 符号 / 字面量）
-      description: |
-        单次调用内部完成三路召回与融合，返回统一排序的命中列表。
-        每个命中通过 `why` 标明召回来源，便于调用方判断下一步动作。
       operationId: search
       requestBody:
         required: true
@@ -89,13 +86,12 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { $ref: "#/components/responses/VersionNotFound" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/symbol:
     get:
       tags: [retrieve]
       summary: 符号查找
-      description: 按类名/方法名/字段名查找，支持精确与模糊两种模式。
       operationId: getSymbol
       parameters:
         - $ref: "#/components/parameters/Version"
@@ -103,7 +99,6 @@ paths:
           in: query
           required: true
           schema: { type: string, minLength: 1, maxLength: 256 }
-          description: 简单名（`MobCategory`）或全限定名（`net.minecraft.world.entity.MobCategory`）
         - name: fuzzy
           in: query
           schema: { type: boolean, default: true }
@@ -127,9 +122,6 @@ paths:
     get:
       tags: [retrieve]
       summary: 反查引用
-      description: |
-        返回引用了指定符号的位置。数据来自 AST 启发式提取，覆盖调用、字段访问、
-        类型声明三类，召回优先于精确。
       operationId: getReferences
       parameters:
         - $ref: "#/components/parameters/Version"
@@ -137,7 +129,7 @@ paths:
           in: query
           required: true
           schema: { type: string }
-          description: 方法名（`spawnCategoryForChunk`）或 `Class#method`
+          description: 方法名或 `Class#method`
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
@@ -152,7 +144,6 @@ paths:
     get:
       tags: [read]
       summary: 文件骨架
-      description: 返回该文件的包名、导入、类与成员的签名及行号区间，不返回方法体。
       operationId: getOutline
       parameters:
         - $ref: "#/components/parameters/Version"
@@ -163,15 +154,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Outline" }
-        "404": { $ref: "#/components/responses/PathNotFound" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/read:
     get:
       tags: [read]
       summary: 源码切片
-      description: |
-        按行号读取源码。必须显式传 `start`/`end`（可由 `/v1/outline` 得到），
-        避免整文件读入撑爆调用方上下文。
+      description: "`start`/`end` 必填，不提供整文件读取。"
       operationId: readFile
       parameters:
         - $ref: "#/components/parameters/Version"
@@ -193,17 +182,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FileSlice" }
-        "404": { $ref: "#/components/responses/PathNotFound" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/ask:
     post:
       tags: [answer]
       summary: 中文问答（服务端检索循环）
       description: |
-        可选能力。服务端执行「检索 → 读取 → 作答」循环，直接返回带引用的中文答案。
-        未配置生成模型时返回 501。
-
-        该端点与 agent 无关，供人类或非 agent 客户端直接调用。
+        默认返回 `text/event-stream`：`step` → `delta`* → `citation`* → `done`。
+        请求头 `Accept: application/json` 时退化为一次性返回完整 `AskResponse`。
       operationId: ask
       requestBody:
         required: true
@@ -214,17 +201,372 @@ paths:
         "200":
           description: OK
           content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/AskEvent" }
             application/json:
               schema: { $ref: "#/components/schemas/AskResponse" }
-        "501":
+        "429":
+          description: 全局问答已暂停或超出并发
+        "503":
           description: 未配置生成模型
+
+  /v1/auth/login:
+    post:
+      tags: [auth]
+      summary: 登录（换取 session cookie）
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: HttpOnly + Secure + SameSite=Lax，有效期见设置
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: 注销当前会话
+      operationId: logout
+      responses:
+        "204": { description: 已注销 }
+
+  /v1/auth/me:
+    get:
+      tags: [auth]
+      summary: 当前用户
+      operationId: getMe
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/tokens:
+    get:
+      tags: [auth]
+      summary: 我的 access token 列表
+      operationId: listTokens
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/TokenInfo" }
+    post:
+      tags: [auth]
+      summary: 签发 access token
+      description: 明文 token 只在创建时返回一次。
+      operationId: createToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+                expires_in_days: { type: integer, minimum: 1, maximum: 3650, default: 365 }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string, description: 仅此一次返回 }
+                  info: { $ref: "#/components/schemas/TokenInfo" }
+
+  /v1/auth/tokens/{tokenId}:
+    delete:
+      tags: [auth]
+      summary: 吊销 access token
+      operationId: revokeToken
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: 已吊销 }
+
+  /v1/admin/users:
+    get:
+      tags: [admin]
+      summary: 用户列表
+      operationId: listUsers
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+    post:
+      tags: [admin]
+      summary: 创建用户
+      description: 创建后返回一次性邀请链接；管理员不设置也不需要知道用户密码。
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32, pattern: "^[a-zA-Z0-9_.-]+$" }
+                role: { type: string, enum: [admin, user], default: user }
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  invite_url: { type: string, description: 一次性邀请链接，48 小时有效 }
+        "409": { description: 用户名已存在 }
+
+  /v1/admin/users/{userId}:
+    patch:
+      tags: [admin]
+      summary: 修改角色或启用状态
+      description: 不允许把最后一个 admin 降级或停用。
+      operationId: patchUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string, enum: [admin, user] }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "409": { description: 违反最后管理员保护 }
+
+  /v1/admin/jobs:
+    get:
+      tags: [admin]
+      summary: 任务列表
+      operationId: listJobs
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [queued, running, succeeded, failed, canceled] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+    post:
+      tags: [admin]
+      summary: 创建索引任务
+      description: 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
+      operationId: createJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobCreate" }
+      responses:
+        "202":
+          description: 已入队
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "409": { description: 已有同类任务在运行或该版本正在索引 }
+
+  /v1/admin/jobs/{jobId}:
+    get:
+      tags: [admin]
+      summary: 任务详情
+      operationId: getJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /v1/admin/jobs/{jobId}/logs:
+    get:
+      tags: [admin]
+      summary: 任务日志
+      description: "支持 `Accept: text/event-stream` 增量跟随；默认返回分页文本。"
+      operationId: getJobLogs
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - name: after
+          in: query
+          schema: { type: integer, default: 0 }
+          description: 返回 id 大于该值的日志
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 500 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lines:
+                    type: array
+                    items: { $ref: "#/components/schemas/JobLog" }
+
+  /v1/admin/jobs/{jobId}/cancel:
+    post:
+      tags: [admin]
+      summary: 取消任务
+      description: 只对 queued/running 有效；running 任务在当前阶段边界停止。
+      operationId: cancelJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "202":
+          description: 已请求取消
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /v1/admin/settings:
+    get:
+      tags: [admin]
+      summary: 读取设置
+      description: 密钥字段只返回是否已设置，不返回明文。
+      operationId: getSettings
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+    put:
+      tags: [admin]
+      summary: 更新设置
+      operationId: putSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Settings" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+
+  /v1/admin/usage:
+    get:
+      tags: [admin]
+      summary: 用量统计
+      description: 按请求粒度记录，可聚合。无硬预算，仅用于观测与告警。
+      operationId: getUsage
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: user_id
+          in: query
+          schema: { type: string }
+        - name: group_by
+          in: query
+          schema: { type: string, enum: [day, user, version, model], default: day }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageReport" }
+
+  /v1/admin/audit:
+    get:
+      tags: [admin]
+      summary: 审计日志
+      operationId: listAudit
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: actor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
 
 components:
   securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: mc_librarian_session
     bearerAuth:
       type: http
       scheme: bearer
-      description: 静态 token，配置于服务端环境变量 `MC_ATLAS_TOKEN`
+      description: 个人 access token（`mcl_` 前缀）
 
   parameters:
     Version:
@@ -232,13 +574,18 @@ components:
       in: query
       required: true
       schema: { type: string, examples: ["1.20.1"] }
-      description: 目标版本，必须已在服务端完成索引
+      description: 目标版本，必须已完成索引；不支持 latest
     Path:
       name: path
       in: query
       required: true
       schema: { type: string }
-      description: 相对仓库根的路径，如 `net/minecraft/world/entity/MobCategory.java`
+      description: 相对仓库根的路径
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string }
 
   responses:
     BadRequest:
@@ -246,18 +593,28 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
-    VersionNotFound:
-      description: 版本未索引
+    Unauthorized:
+      description: 未认证
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
-    PathNotFound:
-      description: 路径不存在
+    NotFound:
+      description: 资源不存在
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
 
   schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, example: "about:blank" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+
     SymbolKind:
       type: string
       enum: [any, class, method, field]
@@ -267,42 +624,28 @@ components:
       type: object
       required: [version, files, tokens, indexed_at]
       properties:
-        version: { type: string, examples: ["1.20.1"] }
-        files: { type: integer, example: 4786 }
-        tokens: { type: integer, example: 5100000, description: 源码 token 总量（cl100k 估算） }
+        version: { type: string }
+        files: { type: integer }
+        tokens: { type: integer, description: 源码 token 总量（cl100k 估算） }
         indexed_at: { type: string, format: date-time }
-        obfuscated: { type: boolean, description: 该版本是否用官方映射重映射过 }
-        has_summaries: { type: boolean, description: 中文摘要层是否已构建 }
+        obfuscated: { type: boolean, description: 是否经官方映射重映射 }
+        has_summaries: { type: boolean }
+        source_size_bytes: { type: integer }
 
     SearchRequest:
       type: object
       required: [query, version]
       properties:
-        query:
-          type: string
-          minLength: 1
-          maxLength: 512
-          description: 中文自然语言、英文标识符或正则均可
-        version: { type: string, examples: ["1.20.1"] }
-        path_prefix:
-          type: string
-          description: 限定路径前缀，如 `net/minecraft/world/entity`
-        kind:
-          $ref: "#/components/schemas/SymbolKind"
+        query: { type: string, minLength: 1, maxLength: 512 }
+        version: { type: string }
+        path_prefix: { type: string }
+        kind: { $ref: "#/components/schemas/SymbolKind" }
         detail:
           type: string
           enum: [locate, snippet]
           default: snippet
-          description: |
-            `locate` 只返回定位信息（path + lines），最省 token；
-            `snippet` 附带截断后的源码片段
         limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
-        max_tokens:
-          type: integer
-          minimum: 200
-          maximum: 32000
-          default: 4000
-          description: 本次响应内容预算（估算值），超出时按 score 降序截断
+        max_tokens: { type: integer, minimum: 200, maximum: 32000, default: 4000 }
 
     SearchResponse:
       type: object
@@ -316,49 +659,39 @@ components:
         suggestions:
           type: array
           items: { type: string }
-          description: 建议下一步搜索的符号名（用于调用方改写查询）
-        total: { type: integer, description: 融合前的候选总数 }
+        total: { type: integer }
         took_ms: { type: integer }
 
     Hit:
       type: object
       required: [id, type, version, path, lines, score, why]
       properties:
-        id:
-          type: string
-          example: "1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory"
+        id: { type: string, example: "1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory" }
         type: { type: string, enum: [class, method, field, file] }
         version: { type: string }
         path: { type: string }
-        symbol: { type: string, description: 类全名或 `Class#method` }
-        lines:
-          type: array
-          items: { type: integer }
-          minItems: 2
-          maxItems: 2
-          description: "[start, end]，1-based，闭区间"
-        score: { type: number, format: float, minimum: 0, maximum: 1 }
+        symbol: { type: string }
+        lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+        score: { type: number, format: float }
         why:
           type: array
           items: { type: string, enum: [summary, symbol, literal, reference] }
-          description: 召回来源，可多选
-        summary: { type: string, description: 该类的中文摘要（若有） }
-        snippet: { type: string, description: 截断后的源码，`detail=snippet` 时返回 }
-        tokens: { type: integer, description: 该命中占用的估算 token }
+        summary: { type: string }
+        snippet: { type: string }
+        tokens: { type: integer }
 
     SymbolDetail:
       type: object
       required: [fqn, kind, path, lines]
       properties:
-        fqn: { type: string, example: "net.minecraft.world.entity.MobCategory" }
+        fqn: { type: string }
         kind: { type: string, enum: [class, method, field] }
         signature: { type: string }
         path: { type: string }
         lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
         superclass: { type: string }
-        interfaces:
-          type: array
-          items: { type: string }
+        interfaces: { type: array, items: { type: string } }
+        annotations: { type: array, items: { type: string } }
         summary: { type: string }
         members:
           type: array
@@ -384,7 +717,7 @@ components:
             properties:
               path: { type: string }
               lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
-              enclosing: { type: string, description: 所在方法，如 `Class#method` }
+              enclosing: { type: string }
               kind: { type: string, enum: [call, field, type, other] }
               snippet: { type: string }
 
@@ -423,7 +756,7 @@ components:
         end: { type: integer }
         total_lines: { type: integer }
         content: { type: string }
-        truncated: { type: boolean, description: 因 max_tokens 被截断时为 true }
+        truncated: { type: boolean }
 
     AskRequest:
       type: object
@@ -432,13 +765,44 @@ components:
         question: { type: string, minLength: 1, maxLength: 2000 }
         version: { type: string }
         max_steps: { type: integer, minimum: 1, maximum: 12, default: 6 }
-        max_tokens: { type: integer, minimum: 500, maximum: 64000, default: 16000 }
+        max_answer_tokens: { type: integer, minimum: 500, maximum: 32000, default: 8000 }
+
+    AskEvent:
+      oneOf:
+        - type: object
+          required: [type, tool, args]
+          properties:
+            type: { type: string, const: step }
+            tool: { type: string }
+            args: { type: object, additionalProperties: true }
+        - type: object
+          required: [type, text]
+          properties:
+            type: { type: string, const: delta }
+            text: { type: string }
+        - type: object
+          required: [type, path, lines]
+          properties:
+            type: { type: string, const: citation }
+            path: { type: string }
+            lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+            symbol: { type: string }
+        - type: object
+          required: [type, usage]
+          properties:
+            type: { type: string, const: done }
+            usage: { $ref: "#/components/schemas/Usage" }
+        - type: object
+          required: [type, problem]
+          properties:
+            type: { type: string, const: error }
+            problem: { $ref: "#/components/schemas/Problem" }
 
     AskResponse:
       type: object
       required: [answer, citations]
       properties:
-        answer: { type: string, description: 中文答案 }
+        answer: { type: string }
         citations:
           type: array
           items:
@@ -454,18 +818,150 @@ components:
             properties:
               tool: { type: string }
               args: { type: object, additionalProperties: true }
-        usage:
+        usage: { $ref: "#/components/schemas/Usage" }
+
+    Usage:
+      type: object
+      properties:
+        prompt_tokens: { type: integer }
+        completion_tokens: { type: integer }
+        cost_usd: { type: number, format: float }
+        latency_ms: { type: integer }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, minLength: 8, maxLength: 128 }
+
+    User:
+      type: object
+      required: [id, username, role, enabled]
+      properties:
+        id: { type: string }
+        username: { type: string }
+        role: { type: string, enum: [admin, user] }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        last_login_at: { type: string, format: date-time }
+
+    TokenInfo:
+      type: object
+      required: [id, name, prefix, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        prefix: { type: string, description: 前 8 位，用于辨认 }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+
+    Job:
+      type: object
+      required: [id, kind, status, created_at]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [index, reindex, summarize] }
+        version: { type: string }
+        status: { type: string, enum: [queued, running, succeeded, failed, canceled] }
+        stage:
+          type: string
+          enum: [download, decompile, parse, summarize, finalize]
+        progress: { type: number, format: float, minimum: 0, maximum: 1 }
+        message: { type: string }
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        created_by: { type: string }
+
+    JobCreate:
+      type: object
+      required: [kind, version]
+      properties:
+        kind: { type: string, enum: [index, reindex, summarize] }
+        version: { type: string, examples: ["26.3"] }
+        options:
           type: object
           properties:
-            prompt_tokens: { type: integer }
-            completion_tokens: { type: integer }
+            with_summaries: { type: boolean, default: true }
+            force: { type: boolean, default: false }
 
-    Problem:
+    JobLog:
       type: object
-      required: [type, title, status]
+      required: [id, ts, level, message]
       properties:
-        type: { type: string, example: "about:blank" }
-        title: { type: string }
-        status: { type: integer }
-        detail: { type: string }
-        instance: { type: string }
+        id: { type: integer }
+        ts: { type: string, format: date-time }
+        level: { type: string, enum: [debug, info, warn, error] }
+        message: { type: string }
+
+    Settings:
+      type: object
+      properties:
+        llm:
+          type: object
+          properties:
+            base_url: { type: string }
+            model: { type: string, example: "deepseek-4.1-flash" }
+            api_key_set: { type: boolean, readOnly: true }
+            api_key: { type: string, writeOnly: true }
+            temperature: { type: number, default: 0.2 }
+        ask:
+          type: object
+          properties:
+            max_steps: { type: integer, default: 6 }
+            max_answer_tokens: { type: integer, default: 8000 }
+            timeout_s: { type: integer, default: 120 }
+            enabled: { type: boolean, default: true, description: 全局熔断开关 }
+        index:
+          type: object
+          properties:
+            java_xmx: { type: string, default: "3g" }
+            summary_batch_size: { type: integer, default: 40 }
+            summary_concurrency: { type: integer, default: 4 }
+        security:
+          type: object
+          properties:
+            session_ttl_hours: { type: integer, default: 168 }
+            invite_ttl_hours: { type: integer, default: 48 }
+            max_concurrent_asks: { type: integer, default: 4 }
+        alerts:
+          type: object
+          properties:
+            webhook_url: { type: string, writeOnly: true }
+            daily_token_threshold: { type: integer }
+            daily_cost_threshold_usd: { type: number }
+
+    UsageReport:
+      type: object
+      required: [from, to, totals, buckets]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        totals: { $ref: "#/components/schemas/Usage" }
+        buckets:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              requests: { type: integer }
+              prompt_tokens: { type: integer }
+              completion_tokens: { type: integer }
+              cost_usd: { type: number, format: float }
+
+    AuditEntry:
+      type: object
+      required: [id, actor, action, created_at]
+      properties:
+        id: { type: string }
+        actor: { type: string }
+        action: { type: string, example: "user.role_changed" }
+        target: { type: string }
+        detail: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        ip: { type: string }
