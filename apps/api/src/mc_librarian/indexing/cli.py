@@ -97,9 +97,15 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # 提前告知哪些阶段会复用已有产物（规格补充 §2）；实际跳过由 `JobRunner` 按同一判据执行。
-    for stage in stages_for(options):
-        if reuse_stage_stats(stage, options, settings.data_dir, args.version) is not None:
-            print(REUSE_MESSAGES[stage])
+    try:
+        for stage in stages_for(options):
+            if reuse_stage_stats(stage, options, settings.data_dir, args.version) is not None:
+                print(REUSE_MESSAGES[stage])
+    except BaseException:
+        # 建完 job 后、`asyncio.run` 之前被 Ctrl-C：任务还没被 runner 认领，得在这里收尾，
+        # 否则会留下一条永久 `queued` 的行（`run_job` 的收尾只覆盖它自己的窗口）。
+        _fail_job(database, job.id)
+        raise
 
     return asyncio.run(run_job(settings, database, job))
 
@@ -190,20 +196,28 @@ def _find_checkpoint(database: Database, job_id: str) -> dict[str, Any]:
 
 
 def _fail_job(database: Database, job_id: str) -> None:
-    """被中断的任务写失败终态；带 `running` 状态守卫，不覆盖已写入的终态。
+    """被中断的任务写失败终态；带状态守卫，不覆盖已写入的终态。
+
+    覆盖两个窗口：任务已被 runner 认领（`running`），以及刚建好、还没被认领（`queued`）——
+    后者是 Ctrl-C 打在 `JobRunner.run_job` 认领之前时留下的行，不处理就会永久停在 `queued`，
+    之后同版本的任务都被 `has_active_job` 挡住。
 
     先写终态、确认真的写进去了才追加日志（与 `JobRunner._fail` 同一取舍）：
     已 `succeeded` 的任务不该多出一条与状态不符的 error 日志。
     """
     with database.connect() as conn, transaction(conn):
-        updated = store.finish(
-            conn,
-            job_id,
-            status="failed",
-            message="任务失败",
-            error=INTERRUPTED_ERROR,
-            expected_status="running",
-        )
+        updated = False
+
+        for status in ("running", "queued"):
+            written = store.finish(
+                conn,
+                job_id,
+                status="failed",
+                message="任务失败",
+                error=INTERRUPTED_ERROR,
+                expected_status=status,
+            )
+            updated = updated or bool(written)
 
         if updated:
             store.append_log(conn, job_id, level="error", message=INTERRUPTED_ERROR)

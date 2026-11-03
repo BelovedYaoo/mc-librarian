@@ -77,7 +77,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | 证书 | OHTTPS 自动续期的 `*.belovedyaoo.top` 泛域名 |
 | 发版 | **不接 CI/CD**。发版频率低，手工 `docker compose up -d` + 网关 conf 变更 |
 
-**索引不在节点上构建。** 节点只有 3.5 GiB 内存，反编译一个 5–7M token 的版本需要 3–4 GiB，硬跑会拖垮同机的其它服务。本地工作站上的流程是：`mc-librarian index --version <v>` 一条命令从官方 jar 跑完 `download → decompile → parse → summarize → finalize` 五段，直接产出 `db/<version>.sqlite` 并登记版本（已有源码树时加 `--source-dir <dir>` 跳过前两段；`cache/<version>/fetch.json` 记着源码树已反编译完成时跳过 `decompile`；未给 `--force` 时复用已有索引）；也可以先 `mc-librarian fetch --version <v> --out <src dir>` 取源码树，再调 `POST /v1/admin/jobs`（省略 `options` 走完整五段，给了 `options.source_dir` 则从 `parse` 开始）。把 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与「注册索引」入口。
+**索引不在节点上构建。** 节点只有 3.5 GiB 内存，而反编译一个 5–7M token 的版本**实测内存峰值是 4.5 GiB**（口径：psutil 进程树 RSS、1s 采样、含 java 子进程），硬跑会拖垮同机的其它服务。本地工作站上的流程是：`mc-librarian index --version <v>` 一条命令从官方 jar 跑完 `download → decompile → parse → summarize → finalize` 五段，直接产出 `db/<version>.sqlite` 并登记版本（已有源码树时加 `--source-dir <dir>` 跳过前两段；`cache/<version>/fetch.json` 记着源码树已反编译完成时跳过 `decompile`；未给 `--force` 时复用已有索引）；也可以先 `mc-librarian fetch --version <v> --out <src dir>` 取源码树，再调 `POST /v1/admin/jobs`（省略 `options` 走完整五段，给了 `options.source_dir` 则从 `parse` 开始）。把 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与「注册索引」入口。
 
 ## 5. 数据模型
 
@@ -147,12 +147,15 @@ summaries(fqn, text_zh, keywords, tokens)           -- FTS5, jieba 预分词（#
 
 运行时依赖因此是：**JRE + vineflower jar + SpecialSource shaded jar**（后者仅 ≤ 1.21.11 的版本需要）。
 
-| 版本 | 文件 | 行数 | token（cl100k 口径） |
-|---|---|---|---|
-| 1.12.2 | 2,050 | 27 万 | 3.9M（旧口径「字符 ÷ 3.5」估算，非 cl100k） |
-| 1.20.1 | 4,786 | 48 万 | 5.1M（旧口径估算，非 cl100k） |
-| 1.21.8 | 6,105 | 56 万 | 6.0M（旧口径估算，非 cl100k） |
-| 26.3 | 7,301 | 77 万 | **7.51M（cl100k 实测）** |
+| 版本 | 文件 | 行数 | token（cl100k 口径） | 内存峰值（实测） |
+|---|---|---|---|---|
+| 1.12.2 | 2,050 | 27 万 | 3.9M（旧口径「字符 ÷ 3.5」估算，非 cl100k） | — |
+| 1.20.1 | 4,786 | 48 万 | 5.1M（旧口径估算，非 cl100k） | — |
+| 1.21.8 | 6,105 | 56 万 | 6.0M（旧口径估算，非 cl100k） | — |
+| 26.3 | 7,301 | 77 万 | **7.51M（cl100k 实测）** | **4.5 GiB** |
+
+「内存峰值（实测）」口径：`mc-librarian index` 用 psutil 按秒采样**进程树** RSS（含反编译的 java 子进程），
+26.3 五段跑完的峰值为 4.5 GiB。
 
 **token 口径是 `cl100k_base` 真分词**（`apps/api/src/mc_librarian/indexing/text.py` 的
 `count_tokens`，`tiktoken` 是运行时依赖）。上表里 26.3 一行是实测：整棵树 7,301 个 `.java`、
@@ -160,6 +163,12 @@ summaries(fqn, text_zh, keywords, tokens)           -- FTS5, jieba 预分词（#
 `mc-librarian index` 的输出就是后者。其余三行是**旧口径**（字符 ÷ 3.5）的估算，与 cl100k 不可比：
 同一常数在 26.3 上给出 9.52M（比 cl100k 高 27%）。同一个常数在不同代码库上差 ±40%，
 所以常数估算已降级为 `tiktoken` 不可用时的 fallback（并写 `warn`）。
+
+**`tiktoken` 的词表首次使用会联网拉取**（`openaipublic.blob.core.windows.net`）。生产节点拉不到时会
+阻塞在一次 HTTP 超时上，然后静默退回常数估算——服务启动时会预热一次并把当前口径写进 INFO 日志
+（`token 计数：cl100k（tiktoken）` 或 `token 计数：字符估算 fallback（原因：…）`），让口径漂移可见。
+生产镜像应**预置词表缓存**（设 `TIKTOKEN_CACHE_DIR` 并把 `cl100k_base` 词表文件放进去）；在镜像里
+预置记在 #15（本仓的 Dockerfile 不改）。
 
 ## 7. 决策记录
 

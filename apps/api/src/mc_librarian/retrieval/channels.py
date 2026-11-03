@@ -165,9 +165,10 @@ def summary_candidates(
         # `fetchall()` 放在 try 里：游标是惰性的，迭代期间才真正执行 SQL。
         rows = connection.execute(sql, params).fetchall()
     except sqlite3.Error:
+        # 规格明确的正常降级（summaries 不是 FTS5、query 含 FTS 语法）：用户随手输一个
+        # `-` 或 `"` 都会走到这里，打完整 traceback 的噪声大于信息量，只留 warn 与原因。
         logger.warning(
-            "摘要通道查询失败（summaries 不是 FTS5 表，或 query 含 FTS 语法），该路返回空",
-            exc_info=True,
+            "摘要通道查询失败（summaries 不是 FTS5 表，或 query 含 FTS 语法），该路返回空"
         )
         return []
 

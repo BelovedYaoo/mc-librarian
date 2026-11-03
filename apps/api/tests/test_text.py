@@ -11,14 +11,18 @@ import logging
 import sys
 
 import pytest
+from fastapi.testclient import TestClient
 
+from mc_librarian.config import Settings
 from mc_librarian.indexing import text
+from mc_librarian.main import create_app
 
 
 @pytest.fixture(autouse=True)
 def clear_encoder_cache() -> None:
-    """`_encoder` 是 `lru_cache` 的：每个用例都从干净状态开始，否则会串味。"""
+    """`_encoder` / `_load_encoder` 都是 `lru_cache` 的：每个用例都从干净状态开始，否则会串味。"""
     text._encoder.cache_clear()
+    text._load_encoder.cache_clear()
 
 
 def test_count_tokens_matches_cl100k() -> None:
@@ -61,3 +65,53 @@ def test_encoder_failure_is_logged_once(
             text.count_tokens("abc")
 
     assert len(caplog.records) == 1
+
+
+def test_warmup_token_counting_reports_cl100k(monkeypatch: pytest.MonkeyPatch) -> None:
+    """词表可用时 warmup 不抛，口径描述是 cl100k。"""
+    monkeypatch.setattr(text, "_load_encoder", lambda: (lambda _text: [0], None))
+
+    assert text.warmup_token_counting() == "token 计数：cl100k（tiktoken）"
+
+
+def test_warmup_token_counting_reports_fallback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """词表不可用时 warmup 不抛，口径描述是字符估算 + 原因，并写一条 warn。"""
+    monkeypatch.setattr(text, "_load_encoder", lambda: (None, "拉词表超时"))
+
+    with caplog.at_level(logging.WARNING, logger="mc_librarian.indexing.text"):
+        description = text.warmup_token_counting()
+
+    assert description == "token 计数：字符估算 fallback（原因：拉词表超时）"
+    assert "tiktoken 不可用" in caplog.text
+
+
+def test_lifespan_logs_cl100k_token_counting(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """词表可用时启动日志写出 cl100k 口径。"""
+    monkeypatch.setattr(text, "_load_encoder", lambda: (lambda _text: [0], None))
+
+    with (
+        caplog.at_level(logging.INFO, logger="mc_librarian"),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert "token 计数：cl100k（tiktoken）" in caplog.text
+
+
+def test_lifespan_logs_fallback_token_counting(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """词表不可用时启动不抛，日志写出字符估算口径与原因（口径漂移可见）。"""
+    monkeypatch.setattr(text, "_load_encoder", lambda: (None, "拉词表超时"))
+
+    with (
+        caplog.at_level(logging.INFO, logger="mc_librarian"),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert "token 计数：字符估算 fallback（原因：拉词表超时）" in caplog.text

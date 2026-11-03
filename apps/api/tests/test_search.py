@@ -455,10 +455,22 @@ def test_summary_channel_degrades_on_fts_syntax_in_query(
         assert response.status_code == 200, f"query={raw_query!r}：{response.text}"
         assert all("summary" not in hit["why"] for hit in response.json()["hits"])
 
-    # `"` 在 fixture 的 `data/*.json` 里是字面量：其余路确实照常返回。
-    literal = user_client.post("/v1/search", json={"version": VERSION, "query": '"'}).json()
 
-    assert literal["hits"]
+@requires_ripgrep
+def test_fts_syntax_query_still_reaches_the_literal_channel(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
+) -> None:
+    """摘要路因 FTS 语法降级后，`literal` 路照常返回（`"` 在 fixture 的 `data/*.json` 里是字面量）。
+
+    断言落在 `literal` 上，所以依赖 `rg`：symbol 路的编辑距离降级也可能对 `"` 返回命中，
+    但那不代表字面量通道正常（见 `test_summary_channel_degrades_on_fts_syntax_in_query`）。
+    """
+    write_summaries(settings, FTS5_SUMMARIES)
+
+    body = post_search(user_client, {"query": '"'})
+
+    assert any("literal" in hit["why"] for hit in body["hits"])
+    assert all("summary" not in hit["why"] for hit in body["hits"])
 
 
 def test_empty_result_is_200_with_empty_arrays(

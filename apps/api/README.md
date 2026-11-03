@@ -9,6 +9,12 @@ Python 3.13 + FastAPI + Pydantic v2。当前实现 issue #2 + #3 + #9 的范围�
 该路降级为空并写 `warn`，服务照常起；但依赖字面量通道的测试会 `skip`，不再静默变红。
 容器里的安装记在 #15（本仓的 Dockerfile 不改）。
 
+`tiktoken` 的 `cl100k_base` 词表**首次使用时联网拉取**（`openaipublic.blob.core.windows.net`）。
+生产节点拉不到时会阻塞在一次 HTTP 超时上，然后静默退回「字符 ÷ 3.5」估算并改变 `max_tokens`
+的语义。服务启动时会预热一次并把当前口径写进 INFO 日志（`token 计数：cl100k（tiktoken）` 或
+`token 计数：字符估算 fallback（原因：…）`）。生产镜像应**预置词表缓存**（设 `TIKTOKEN_CACHE_DIR`
+并把 `cl100k_base` 的词表文件放进去）；在镜像里预置记在 #15（本仓的 Dockerfile 不改）。
+
 ```bash
 # 仓库根
 bun run setup     # 创建 apps/api/.venv 并安装依赖（也安装前端依赖）
@@ -38,6 +44,7 @@ cd apps/api
 | `MC_LIBRARIAN_VINEFLOWER_JAR` | 空 | Vineflower jar 路径（反编译必需） |
 | `MC_LIBRARIAN_SPECIALSOURCE_JAR` | 空 | SpecialSource shaded jar 路径（≤ 1.21.11 的版本 remap 必需） |
 | `MC_LIBRARIAN_DECOMPILE_MEMORY` | `4G` | Vineflower 的 `-Xmx`，形如 `4G` / `512M` |
+| `TIKTOKEN_CACHE_DIR` | 系统临时目录的 `data-gym-cache` | `tiktoken` 词表缓存目录（非 `MC_LIBRARIAN_*`）；生产镜像预置词表后指向它，避免节点拉不到词表时退回常数估算 |
 
 生产护栏：`MC_LIBRARIAN_ENV=production` 而 `MC_LIBRARIAN_COOKIE_SECURE` 仍为 false 时，
 进程**启动即失败**并提示需要开 `Secure`——避免公网部署把会话 cookie 裸跑在 http 上。
@@ -106,8 +113,8 @@ MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
 - `summarize` 仍是占位（摘要由 #7 落地），本命令不调 LLM；
 - 跑完版本行已登记（`db_path` 指向产出的索引），服务不需要再手工 `POST /v1/admin/versions`；
 - 输出文件数 / 行数 / token / 内存峰值 / 耗时；token 按 `cl100k_base` 真分词（`tiktoken`）计，
-  `tiktoken` 装不上时退回「字符 ÷ 3.5」估算并写 warn；内存峰值按秒采样**进程树** RSS（`psutil`
-  是 dev 依赖，装不上只跳过测量并把 warn 写进 stderr 与任务日志，不阻断）。
+  `tiktoken` 装不上（或拉不到词表）时退回「字符 ÷ 3.5」估算并写 warn；内存峰值按秒采样**进程树** RSS
+  （`psutil` 是 dev 依赖，装不上只跳过测量并把 warn 写进 stderr 与任务日志，不阻断）。
 
 退出码：`0` 成功、`1` 任务失败（`error` 打到 stderr）、`2` 参数错误。
 

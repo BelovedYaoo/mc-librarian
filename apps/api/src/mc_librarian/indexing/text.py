@@ -5,6 +5,10 @@ cl100k 实测的，而「字符 ÷ 3.5」这种常数估算在同一批源码上
 上差 ±40%，两个口径不可比）。因此 `count_tokens` 是唯一的计数入口，常数估算只在 tiktoken
 不可用（没装，或首次使用拉不到 BPE 词表）时兜底并写一条 `warn`。
 
+`tiktoken` 首次使用会去 `openaipublic.blob.core.windows.net` 拉 BPE 词表：生产节点拉不到时
+会阻塞在一次 HTTP 超时上，然后静默退回常数估算。`warmup_token_counting` 供 FastAPI lifespan
+在启动时预热一次，并把当前口径写进 INFO 日志，让漂移可见而不是在第一次检索时才暴露。
+
 行数口径必须与 `read` 端点的切片口径一致（规格 §2 的 1-based 闭区间）：
 按 `\\n` 切分，结尾换行不额外产生一行；`\\r\\n` 由 `Path.read_text` 的通用换行翻译成 `\\n`。
 """
@@ -30,24 +34,51 @@ def tokens_from_chars(chars: int) -> int:
 
 
 @lru_cache(maxsize=1)
-def _encoder() -> Callable[[str], list[int]] | None:
-    """cl100k_base 的编码函数；加载失败返回 `None`。
+def _load_encoder() -> tuple[Callable[[str], list[int]] | None, str | None]:
+    """加载 cl100k_base 的编码函数；返回 (编码函数, 失败原因)，失败时编码函数为 `None`。
 
     缓存（含失败结果）是刻意的：一次索引要过几千个文件，每次都重试加载会让日志被同一条
-    `warn` 淹没。`encode_ordinary` 忽略特殊词元（源码里出现 `<|endoftext|>` 这类字面量时
-    默认的 `encode` 会抛异常）。
+    `warn` 淹没，也会让每次计数都卡在一次 HTTP 超时上。`encode_ordinary` 忽略特殊词元
+    （源码里出现 `<|endoftext|>` 这类字面量时默认的 `encode` 会抛异常）。
     """
     try:
         import tiktoken
 
         encoding = tiktoken.get_encoding(CL100K_ENCODING)
     except Exception as error:  # 未安装、或离线时拉不到词表
-        logger.warning(
-            "tiktoken 不可用（%s），token 退回按 %.1f 字符/token 估算", error, CHARS_PER_TOKEN
-        )
-        return None
+        return None, str(error)
 
-    return encoding.encode_ordinary
+    return encoding.encode_ordinary, None
+
+
+@lru_cache(maxsize=1)
+def _encoder() -> Callable[[str], list[int]] | None:
+    """cl100k_base 的编码函数；加载失败返回 `None` 并写一条 `warn`（每个进程只写一次）。"""
+    encoder, reason = _load_encoder()
+
+    if encoder is None:
+        logger.warning(
+            "tiktoken 不可用（%s），token 退回按 %.1f 字符/token 估算", reason, CHARS_PER_TOKEN
+        )
+
+    return encoder
+
+
+def warmup_token_counting() -> str:
+    """启动时预热一次 token 计数，返回当前口径的一句话描述（供 lifespan 记 INFO 日志）。
+
+    `tiktoken` 首次使用会联网拉 BPE 词表：生产节点拉不到时会阻塞在一次 HTTP 超时上，然后
+    静默退回常数估算并改变 `max_tokens` 的语义。预热把这次阻塞挪到启动阶段，并让当前口径
+    出现在日志里（`token 计数：cl100k（tiktoken）` 或 `token 计数：字符估算 fallback（原因：…）`），
+    而不是在第一次检索时才漂移。
+    """
+    count_tokens("warmup")
+    encoder, reason = _load_encoder()
+
+    if encoder is None:
+        return f"token 计数：字符估算 fallback（原因：{reason}）"
+
+    return "token 计数：cl100k（tiktoken）"
 
 
 def count_tokens(text: str) -> int:

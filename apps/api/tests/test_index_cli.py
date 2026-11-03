@@ -207,6 +207,63 @@ def test_interrupted_run_marks_the_job_failed(
     assert index_cli.INTERRUPTED_ERROR in job_logs(settings)
 
 
+def test_interrupted_before_claim_marks_the_job_failed(
+    configure_cli: None,
+    settings: Settings,
+    source_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """建完 job、被 runner 认领前被 Ctrl-C：任务还是 `queued`，也必须标成 `failed`。
+
+    这个窗口里 `JobRunner.run_job` 还没把任务置为 `running`，只按 `running` 守卫收尾会留下
+    一条永久 `queued` 的行；之后同版本的任务都被 `has_active_job` 挡住。
+    """
+
+    async def interrupted(self: runner_module.JobRunner, job_id: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner_module.JobRunner, "run_job", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        index_cli.main(["--version", "26.3", "--source-dir", str(source_dir)])
+
+    assert index_cli.INTERRUPTED_ERROR in capsys.readouterr().err
+
+    with Database.for_data_dir(settings.data_dir).connect() as conn:
+        rows = store.list_jobs(conn, limit=10)
+
+        assert [row.status for row in rows] == ["failed"]
+        assert rows[0].error == index_cli.INTERRUPTED_ERROR
+        assert store.has_active_job(conn, "26.3") is False
+
+    assert index_cli.INTERRUPTED_ERROR in job_logs(settings)
+
+
+def test_interrupted_before_asyncio_run_marks_the_job_failed(
+    configure_cli: None,
+    settings: Settings,
+    source_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`asyncio.run` 之前（复用提示循环里）被 Ctrl-C：同样不留永久 `queued` 的行。"""
+
+    def interrupted(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(index_cli, "stages_for", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        index_cli.main(["--version", "26.3", "--source-dir", str(source_dir)])
+
+    with Database.for_data_dir(settings.data_dir).connect() as conn:
+        rows = store.list_jobs(conn, limit=10)
+
+        assert [row.status for row in rows] == ["failed"]
+        assert rows[0].error == index_cli.INTERRUPTED_ERROR
+        assert store.has_active_job(conn, "26.3") is False
+
+
 def test_missing_psutil_is_logged_into_the_job(
     configure_cli: None,
     settings: Settings,
