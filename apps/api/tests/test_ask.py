@@ -437,9 +437,10 @@ def test_ask_returns_429_when_concurrency_is_full(
     user_client: TestClient, indexed: Path, fake_chat: FakeChat, settings: Settings
 ) -> None:
     limiter = cast("Any", user_client.app).state.ask_limiter
+    limit = settings.max_concurrent_asks
 
-    for _ in range(settings.max_concurrent_asks):
-        assert limiter.try_acquire()
+    for _ in range(limit):
+        assert limiter.try_acquire(limit)
 
     fake_chat.script = [final_answer("答案。")]
     full = ask(user_client)

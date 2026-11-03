@@ -3,6 +3,9 @@
 超出上限的请求**直接 429**，不排队：问答是长连接（SSE），排队会让调用方一直等，且每个在跑的
 问答都要占着一份上下文预算。计数是同步的（无 await），在单线程事件循环里 `try_acquire` 与
 `release` 之间不会插入其他请求。
+
+上限**不在这里存**：`settings.security.max_concurrent_asks` 可以在设置页改（issue #11），
+存一份就在启动时钉死了。`try_acquire(limit)` 每次拿当前有效值，改完立即生效。
 """
 
 from __future__ import annotations
@@ -11,17 +14,16 @@ from __future__ import annotations
 class AskLimiter:
     """同时在跑的问答数上限。"""
 
-    def __init__(self, limit: int) -> None:
-        self._limit = limit
+    def __init__(self) -> None:
         self._active = 0
 
     @property
     def active(self) -> int:
         return self._active
 
-    def try_acquire(self) -> bool:
-        """占一个槽位；已满返回 `False`（调用方回 429）。"""
-        if self._active >= self._limit:
+    def try_acquire(self, limit: int) -> bool:
+        """占一个槽位；已满返回 `False`（调用方回 429）。`limit` 是当前的有效上限。"""
+        if self._active >= limit:
             return False
 
         self._active += 1

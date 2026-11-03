@@ -54,9 +54,11 @@ docker network inspect deploy-net >/dev/null 2>&1 || docker network create deplo
 
 # 2) 起两个容器。端口用非默认值，避免与并行车道/本机服务冲突；
 #    ENV/COOKIE_SECURE 显式降回 dev，否则会命中生产护栏（见 §4）
+#    SECRET 是设置表里密钥值的加密主密钥，缺它服务启动即失败（见 §4）
 #    数据根写 ../../mc-librarian-data：compose 的挂载源按 deploy/ 解析（见下表）。
 cd <仓库根>
 MC_LIBRARIAN_ENV=dev MC_LIBRARIAN_COOKIE_SECURE=false \
+MC_LIBRARIAN_SECRET=$(openssl rand -hex 32) \
 MC_LIBRARIAN_DATA_DIR=../../mc-librarian-data \
   docker compose -f deploy/compose.yaml up -d --build
 ```
@@ -165,15 +167,17 @@ sudo install -d -o 10001 -g 10001 /opt/mc-librarian-data
 ```bash
 cd /opt/mc-librarian
 MC_LIBRARIAN_DATA_DIR=/opt/mc-librarian-data \
+MC_LIBRARIAN_SECRET='<至少 16 个字符的随机串，例如 openssl rand -hex 32>' \
   docker compose -f deploy/compose.yaml up -d
 ```
 
-compose 的默认值就是生产口径，无需额外设置：
+compose 的默认值就是生产口径，除了 `MC_LIBRARIAN_SECRET`（必填，没有默认值）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MC_LIBRARIAN_ENV` | `production` | `production` 下强制要求 cookie 有 `Secure` |
 | `MC_LIBRARIAN_COOKIE_SECURE` | `true` | 与上一行配对；缺一个进程会**启动即失败** |
+| `MC_LIBRARIAN_SECRET` | （必填） | `settings` 表里密钥值的 AES-GCM 主密钥；缺它进程**启动即失败**。**不能丢也不能换**：丢了/换了库里已存的密钥就解不开（需重设 `llm.api_key` / `alerts.webhook_url`） |
 | `MC_LIBRARIAN_INDEX_ENABLED` | `false` | 节点不构建索引 |
 | `MC_LIBRARIAN_DATA_DIR`（compose 变量） | `../../mc-librarian-data` | 宿主数据根，节点上显式传绝对路径 |
 | `MC_LIBRARIAN_API_PORT` / `MC_LIBRARIAN_WEB_PORT` | `18787` / `15173` | 只绑 `127.0.0.1`，供本地排障 |
@@ -221,6 +225,14 @@ curl -s -X POST https://mc-librarian.belovedyaoo.top/v1/admin/versions \
   ```
   配置错误，服务未启动：
     - settings：生产环境必须给会话 cookie 加 Secure：请设置 MC_LIBRARIAN_COOKIE_SECURE=true。
+  ```
+
+- 主密钥缺失：`settings` 表里的密钥用 AES-GCM 加密，缺 `MC_LIBRARIAN_SECRET`（或短于 16 字符）
+  时进程启动即失败并提示怎么设。它**不能临时生成**——生成后重启，库里已存的密文就解不开了：
+
+  ```
+  缺少主密钥 MC_LIBRARIAN_SECRET（至少 16 个字符）：`settings` 表里的密钥（`llm.api_key` /
+  `alerts.webhook_url`）用 AES-GCM 加密存储，没有主密钥无法读写。
   ```
 
 - tiktoken 词表已在**镜像内**预置（`TIKTOKEN_CACHE_DIR=/opt/mc-librarian/tiktoken-cache`），

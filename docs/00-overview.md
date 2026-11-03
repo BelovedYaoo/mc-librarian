@@ -78,6 +78,8 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | 发版 | **不接 CI/CD**。发版频率低，手工 `docker compose up -d` + 网关 conf 变更 |
 
 **索引不在节点上构建。** 节点只有 3.5 GiB 内存，而反编译一个 5–7M token 的版本**实测内存峰值是 4.5 GiB**（口径：psutil 进程树 RSS、1s 采样、含 java 子进程），硬跑会拖垮同机的其它服务。本地工作站上的流程是：`mc-librarian index --version <v>` 一条命令从官方 jar 跑完 `download → decompile → parse → summarize → finalize` 五段，直接产出 `db/<version>.sqlite` 并登记版本（已有源码树时加 `--source-dir <dir>` 跳过前两段；`cache/<version>/fetch.json` 记着源码树已反编译完成时跳过 `decompile`；未给 `--force` 时复用已有索引）；也可以先 `mc-librarian fetch --version <v> --out <src dir>` 取源码树，再调 `POST /v1/admin/jobs`（省略 `options` 走完整五段，给了 `options.source_dir` 则从 `parse` 开始）。把 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与「注册索引」入口。
+节点上还必须给 `MC_LIBRARIAN_SECRET`（`settings` 表里密钥值的 AES-GCM 主密钥）：缺失时服务启动失败，
+且不能事后临时生成（重启后旧密文解不开）。
 
 ## 5. 数据模型
 
@@ -105,7 +107,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行；注册时数据根里没有 `src/<version>/` 则 `source_size_bytes` 保留原值，首次注册写 0） |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
 | `audit` | id, actor_id, action, target, detail_json, ip, created_at |
-| `settings` | key, value_json, encrypted |
+| `settings` | key, value_json, encrypted, updated_at, updated_by（只存**被显式改过**的键，删一行 = 回退环境配置；`encrypted=1` 的行 `value_json` 是 AES-GCM 密文，主密钥 `MC_LIBRARIAN_SECRET` 缺失时服务启动失败） |
 
 迁移机制刻意做得很薄（只用标准库 `sqlite3`，不引入 ORM）：`schema_version` 表记已应用的版本号，
 每个迁移就是「版本号 + 一组 `CREATE ... IF NOT EXISTS`」，启动时按序补齐未应用的版本，因此重启幂等，

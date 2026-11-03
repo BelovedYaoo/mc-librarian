@@ -522,14 +522,17 @@ export interface paths {
         };
         /**
          * 读取设置
-         * @description **只读**：值从运行时配置（`MC_LIBRARIAN_*`）派生，没有持久化。只返回真实存在的块，
-         *     未实现的块（`llm`/`ask`/`security`/`alerts`）整块省略，不拿示例默认值填充。
-         *     `settings` 表、持久化与 `PUT` 随 #11 落地。
+         * @description 值 = `settings` 表里的覆盖 + `MC_LIBRARIAN_*` 运行时配置兜底；每次请求实时查库，
+         *     所以保存后立即生效。只返回**真实存在**的值：`llm.base_url` / `llm.model` / 告警阈值
+         *     未配置时整字段省略，不拿示例默认值填充。密钥只回 `api_key_set` / `webhook_url_set`。
          */
         get: operations["getSettings"];
         /**
          * 更新设置
-         * @description 尚未实现（`settings` 表与持久化随 #11 落地）。
+         * @description **部分更新**：只改请求里给出的字段，未给的保持原值（前端可以只提交一个开关）。
+         *     值给 `null`（密钥给空字符串）= 清除该覆盖，回退环境配置。
+         *     `index.enabled` 是部署级闸门（只读），不在可改项里，传了返回 `422`。
+         *     保存后立即生效，不需要重启；每次更新写一条 `settings.updated` 审计，只记改了哪些键。
          */
         put: operations["putSettings"];
         post?: never;
@@ -720,10 +723,10 @@ export interface components {
         AskRequest: {
             question: string;
             version: string;
-            /** @default 6 */
-            max_steps: number;
-            /** @default 8000 */
-            max_answer_tokens: number;
+            /** @description 省略时用服务端设置 `settings.ask.max_steps`（默认 6） */
+            max_steps?: number | null;
+            /** @description 省略时用服务端设置 `settings.ask.max_answer_tokens`（默认 8000） */
+            max_answer_tokens?: number | null;
         };
         AskEvent: {
             /** @constant */
@@ -897,57 +900,131 @@ export interface components {
             level: "debug" | "info" | "warn" | "error";
             message: string;
         };
+        /**
+         * @description `GET/PUT /v1/admin/settings` 的响应。值 = 数据库覆盖 + 环境配置兜底；
+         *     未配置的可选字段（`llm.base_url` / `llm.model` / 告警阈值）整字段省略。
+         */
         Settings: {
-            llm?: {
-                base_url?: string;
-                /** @example deepseek-4.1-flash */
-                model?: string;
-                readonly api_key_set?: boolean;
-                api_key?: string;
-                /** @default 0.2 */
-                temperature: number;
-            };
-            ask?: {
-                /** @default 6 */
-                max_steps: number;
-                /** @default 8000 */
-                max_answer_tokens: number;
-                /** @default 120 */
-                timeout_s: number;
-                /**
-                 * @description 全局熔断开关
-                 * @default true
-                 */
-                enabled: boolean;
-            };
-            index?: {
-                /**
-                 * @description 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
-                 *     `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
-                 *     `POST /v1/admin/versions` 注册。只读：值是部署级配置，当前不可通过 `PUT` 修改。
-                 * @default true
-                 */
-                enabled: boolean;
-                /** @default 4G */
-                java_xmx: string;
-                /** @default 40 */
-                summary_batch_size: number;
-                /** @default 4 */
-                summary_concurrency: number;
-            };
-            security?: {
-                /** @default 168 */
-                session_ttl_hours: number;
-                /** @default 48 */
-                invite_ttl_hours: number;
-                /** @default 4 */
-                max_concurrent_asks: number;
-            };
-            alerts?: {
-                webhook_url?: string;
-                daily_token_threshold?: number;
-                daily_cost_threshold_usd?: number;
-            };
+            llm: components["schemas"]["LlmSettings"];
+            ask: components["schemas"]["AskSettings"];
+            index: components["schemas"]["IndexSettings"];
+            security: components["schemas"]["SecuritySettings"];
+            alerts: components["schemas"]["AlertsSettings"];
+        };
+        /** @description 生成模型配置。密钥只写不读：响应里只有 `api_key_set`，不回明文也不回密文。 */
+        LlmSettings: {
+            /** @description OpenAI 兼容端点；未配置（环境变量与数据库都没有）时整字段省略 */
+            base_url?: string | null;
+            /** @example deepseek-4.1-flash */
+            model?: string | null;
+            /** @description 采样温度；默认 0（确定性输出，摘要与问答都要求可复现），上限 2 */
+            temperature: number;
+            /** @description 是否已设置 `llm.api_key`（数据库覆盖或环境变量任一有值） */
+            readonly api_key_set: boolean;
+        };
+        AskSettings: {
+            /**
+             * @description `AskRequest.max_steps` 省略时的服务端默认值
+             * @default 6
+             */
+            max_steps: number;
+            /**
+             * @description `AskRequest.max_answer_tokens` 省略时的服务端默认值
+             * @default 8000
+             */
+            max_answer_tokens: number;
+            /** @default 120 */
+            timeout_s: number;
+            /**
+             * @description 全局熔断开关；`false` 时 `/v1/ask` 返回 429，检索不受影响
+             * @default true
+             */
+            enabled: boolean;
+        };
+        IndexSettings: {
+            /**
+             * @description 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
+             *     `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
+             *     `POST /v1/admin/versions` 注册。只读：值是部署级配置，不可通过 `PUT` 修改。
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * @description 反编译时传给 java 的 `-Xmx`
+             * @default 4G
+             */
+            java_xmx: string;
+            /** @default 40 */
+            summary_batch_size: number;
+            /** @default 4 */
+            summary_concurrency: number;
+        };
+        SecuritySettings: {
+            /**
+             * @description 会话有效期（小时）；改后只影响新下发的 cookie
+             * @default 168
+             */
+            session_ttl_hours: number;
+            /**
+             * @description 一次性邀请链接的有效期（小时）
+             * @default 48
+             */
+            invite_ttl_hours: number;
+            /**
+             * @description 同时在跑的问答数上限；超出返回 429
+             * @default 4
+             */
+            max_concurrent_asks: number;
+        };
+        /** @description 用量告警（`GET /v1/admin/usage` 的阈值与 Webhook）。未配置的阈值不回 0。 */
+        AlertsSettings: {
+            /** @description 是否已设置 `alerts.webhook_url` */
+            readonly webhook_url_set: boolean;
+            /** @description 每日 token 告警阈值；未配置时整字段省略 */
+            daily_token_threshold?: number | null;
+            /** @description 每日成本告警阈值（美元）；未配置时整字段省略 */
+            daily_cost_threshold_usd?: number | null;
+        };
+        /**
+         * @description `PUT /v1/admin/settings` 的请求体。**部分更新**：只有出现在请求里的字段会被写，
+         *     未给的保持原值；值给 `null`（密钥给空字符串）= 清除该覆盖，回退环境配置。
+         *     未列出的字段（如 `index.enabled`）一律不可改，传了返回 422。
+         */
+        SettingsUpdate: {
+            llm?: components["schemas"]["LlmSettingsUpdate"];
+            ask?: components["schemas"]["AskSettingsUpdate"];
+            index?: components["schemas"]["IndexSettingsUpdate"];
+            security?: components["schemas"]["SecuritySettingsUpdate"];
+            alerts?: components["schemas"]["AlertsSettingsUpdate"];
+        };
+        LlmSettingsUpdate: {
+            base_url?: string | null;
+            model?: string | null;
+            /** @description 空字符串（或 `null`）= 清除密钥；明文只进不出 */
+            api_key?: string | null;
+            temperature?: number | null;
+        };
+        AskSettingsUpdate: {
+            max_steps?: number | null;
+            max_answer_tokens?: number | null;
+            timeout_s?: number | null;
+            enabled?: boolean | null;
+        };
+        IndexSettingsUpdate: {
+            java_xmx?: string | null;
+            summary_batch_size?: number | null;
+            summary_concurrency?: number | null;
+        };
+        SecuritySettingsUpdate: {
+            session_ttl_hours?: number | null;
+            invite_ttl_hours?: number | null;
+            max_concurrent_asks?: number | null;
+        };
+        AlertsSettingsUpdate: {
+            /** @description 空字符串（或 `null`）= 清除；明文只进不出 */
+            webhook_url?: string | null;
+            daily_token_threshold?: number | null;
+            daily_cost_threshold_usd?: number | null;
         };
         UsageReport: {
             /** Format: date */
@@ -1878,11 +1955,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["Settings"];
+                "application/json": components["schemas"]["SettingsUpdate"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description OK（返回更新后的完整设置） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1892,6 +1969,7 @@ export interface operations {
                 };
             };
             403: components["responses"]["Forbidden"];
+            422: components["responses"]["BadRequest"];
         };
     };
     getUsage: {

@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from mc_librarian import audit
+from mc_librarian import audit, settings_store
 from mc_librarian.config import LlmConfigError, Settings, resolve_llm_config
 from mc_librarian.db import Database, transaction
 from mc_librarian.fetch.errors import FetchError
@@ -118,7 +118,8 @@ class JobContext:
     """一个阶段的输入：任务版本 + 参数 + 数据根 + 日志回调 + checkpoint/工具链/运行时配置。
 
     `checkpoint` 与 `tools` 供 `download`/`decompile` 两段使用；`settings` 供 `summarize` 读
-    LLM 配置（`#11` 未落地前只从环境变量读）；`parse` 只需要 `version`/`options`/`data_dir`/`log`，
+    LLM 配置与分批参数（`#11` 之后是 `JobRunner` 在任务开始时解析出的**有效配置**：
+    数据库覆盖 + 环境配置）；`parse` 只需要 `version`/`options`/`data_dir`/`log`，
     parse-only 任务不传 `tools`。
     """
 
@@ -526,10 +527,30 @@ class JobRunner:
         self._settings = settings
         self._database = database
         self._poll_interval = poll_interval
-        # 下载/remap/反编译的工具链；测试注入假实现，生产走 `Settings` 里的 jar 路径。
-        self._tools = tools if tools is not None else default_tools(settings)
+        # 下载/remap/反编译的工具链；测试注入假实现，生产每个任务按**当时**的有效配置重建
+        # （`index.java_xmx` 可以在设置页改，见 `_effective_settings`）。
+        self._tools = tools
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
+
+    def _effective_settings(self) -> Settings:
+        """数据库覆盖 + 环境配置，任务开始时实时读一次（issue #11 的「立即生效」）。
+
+        读失败（库忙 / 主密钥换了）不阻止任务：退回进程配置继续跑，只记一条 warn。
+        """
+        try:
+            with self._database.connect() as conn:
+                return settings_store.effective_settings(
+                    self._settings, settings_store.read_overrides(conn, self._settings)
+                )
+        except Exception:
+            logger.exception("读取设置覆盖失败，任务改用进程配置")
+
+            return self._settings
+
+    def _tools_for(self, settings: Settings) -> PipelineTools:
+        """工具链：测试注入的实例优先，否则按当前有效配置重建（`-Xmx` 取设置页的值）。"""
+        return self._tools if self._tools is not None else default_tools(settings)
 
     async def start(self) -> None:
         if self._task is not None:
@@ -609,6 +630,9 @@ class JobRunner:
         version = str(row["version"])
         options = store.options_of(row)
         checkpoint = store.checkpoint_of(row)
+        # 设置页改过的值在任务开始时生效（每个阶段用同一份快照，中途改设置不影响本次任务）。
+        settings = self._effective_settings()
+        tools = self._tools_for(settings)
         done = {str(item) for item in checkpoint.get("stages", [])}
         stages = stages_for(options)
         total = len(stages)
@@ -627,7 +651,7 @@ class JobRunner:
             # 已有产物可复用时不再重跑该阶段（规格补充 §2）：`decompile` 复用已就绪的源码树，
             # `parse` 复用已有索引。产物字节不变，因此重复执行同一命令是幂等的。
             reused = await asyncio.to_thread(
-                reuse_stage_stats, stage, options, self._settings.data_dir, version
+                reuse_stage_stats, stage, options, settings.data_dir, version
             )
 
             if reused is not None:
@@ -653,11 +677,11 @@ class JobRunner:
             context = JobContext(
                 version=version,
                 options=options,
-                data_dir=self._settings.data_dir,
+                data_dir=settings.data_dir,
                 log=lambda level, message: self._log(job_id, level, message),
                 checkpoint=checkpoint,
-                tools=self._tools,
-                settings=self._settings,
+                tools=tools,
+                settings=settings,
             )
 
             try:

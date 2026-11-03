@@ -53,7 +53,7 @@ class Migration:
 
 # v1：账号与会话；v2：个人访问令牌（pats）；v3：邀请与审计（invites/audit）；
 # v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile；
-# v6：用量（usage，issue #8 建表、`#12` 只读聚合）。
+# v6：用量（usage，issue #8 建表、`#12` 只读聚合）；v7：实例设置（settings，issue #11）。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -268,6 +268,25 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
               latency_ms        INTEGER NOT NULL DEFAULT 0,
               version           TEXT,
               created_at        TEXT NOT NULL
+            )
+            """,
+        ),
+    ),
+    # v7：实例设置（issue #11）。只存**被显式改过**的键（`settings_store`）：删一行 = 回退
+    # 环境配置，所以「数据库覆盖 + 环境配置兜底」不需要空值占位。
+    # `key` 就是契约 `Settings` 里的路径（`llm.base_url` 等）；`value_json` 是 JSON 文本，
+    # `encrypted=1` 的行存 AES-GCM 密文（base64，主密钥来自 `MC_LIBRARIAN_SECRET`，
+    # 缺失时服务启动失败——见 `secretbox.require_secret`）。
+    Migration(
+        version=7,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+              key        TEXT PRIMARY KEY,
+              value_json TEXT NOT NULL,
+              encrypted  INTEGER NOT NULL DEFAULT 0 CHECK (encrypted IN (0, 1)),
+              updated_at TEXT NOT NULL,
+              updated_by TEXT REFERENCES users (id)
             )
             """,
         ),

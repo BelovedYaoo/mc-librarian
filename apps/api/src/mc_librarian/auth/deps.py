@@ -3,6 +3,9 @@
 `get_db` 是 async 生成器（建/关连接在事件循环线程），其余依赖与路由都是同步函数，
 由 FastAPI 丢进线程池执行——它们里面有 argon2 与 sqlite 这类阻塞调用，
 放事件循环里会卡住所有并发请求。连接本身已开 `check_same_thread=False`（见 `db.connect`）。
+
+`get_effective_settings` 在进程配置上叠一层 `settings` 表覆盖（issue #11）：每次请求**实时查库**，
+所以设置页保存后立刻生效；不碰设置的路由用 `SettingsDep` 就够了，不必多一次查库。
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from mc_librarian import settings_store
 from mc_librarian.auth import sessions, tokens
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import Database
@@ -48,6 +52,20 @@ def client_ip(request: Request) -> str | None:
 DbConn = Annotated[sqlite3.Connection, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 DatabaseDep = Annotated[Database, Depends(get_database)]
+
+
+def get_effective_settings(conn: DbConn, settings: SettingsDep) -> Settings:
+    """数据库覆盖 + 环境配置（issue #11）：依赖里实时查一次 `settings` 表。
+
+    同一个请求内 `Depends(get_db)` 是同一个连接（FastAPI 按请求缓存依赖），所以这里查的
+    就是路由后面用的那条连接。
+    """
+    return settings_store.effective_settings(
+        settings, settings_store.read_overrides(conn, settings)
+    )
+
+
+EffectiveSettingsDep = Annotated[Settings, Depends(get_effective_settings)]
 
 
 def get_current_user(

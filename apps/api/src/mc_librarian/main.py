@@ -27,6 +27,7 @@ from mc_librarian.indexing.text import warmup_token_counting
 from mc_librarian.jobs import JobRunner, store
 from mc_librarian.problems import component_schema, install_exception_handlers
 from mc_librarian.schemas import answer_schemas
+from mc_librarian.secretbox import require_secret
 
 logger = logging.getLogger("mc_librarian")
 
@@ -89,11 +90,14 @@ SECURITY_SCHEMES: Final = {
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     database: Database = app.state.db
+    # 主密钥先查：`settings` 表里的密钥用 AES-GCM 加密，没有主密钥服务无法读写它们，
+    # 而自动生成并落盘会让重启后旧密文解不开——所以缺失/过短直接启动失败。
+    require_secret(settings.secret)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     source = "MC_LIBRARIAN_DATA_DIR" if settings.data_dir_from_env else "默认（仓库之外）"
 
-    # 问答并发闸门随应用创建：槽位数来自部署配置，测试直接拿 app.state 断言（规格 §7）。
-    app.state.ask_limiter = AskLimiter(settings.max_concurrent_asks)
+    # 问答并发闸门随应用创建：槽位数不在这里定，`/v1/ask` 每次拿当前有效上限（设置页可改）。
+    app.state.ask_limiter = AskLimiter()
 
     version = database.initialize()
 

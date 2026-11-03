@@ -33,6 +33,10 @@ services:
       MC_LIBRARIAN_COOKIE_SECURE: ${MC_LIBRARIAN_COOKIE_SECURE:-true}
       # 节点只有 3.5 GiB 内存，索引在本地工作站产出后上传，不在节点上构建。
       MC_LIBRARIAN_INDEX_ENABLED: ${MC_LIBRARIAN_INDEX_ENABLED:-false}
+      # 主密钥（`settings` 表里密钥值的 AES-GCM 主密钥，见 issue #11）。
+      # 没有它服务启动即失败（不自动生成：重启后旧密文会解不开），所以用 `:?` 在 compose
+      # 层就报错，而不是让容器反复重启。
+      MC_LIBRARIAN_SECRET: ${MC_LIBRARIAN_SECRET:?设置 MC_LIBRARIAN_SECRET（至少 16 个字符，例如 openssl rand -hex 32）}
     volumes:
       # 数据根：control.sqlite / db / src / cache（docs/00-overview.md §5）。
       # 相对路径的基准是本文件所在目录（deploy/），不是 shell 的工作目录；生产上给绝对路径。
