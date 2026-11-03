@@ -1,0 +1,20 @@
+{
+  "name": "mc-librarian",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Minecraft 源码知识库与中文问答服务（单仓：apps/api + apps/web）",
+  "packageManager": "bun@1.4.3",
+  "workspaces": ["apps/web"],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "node scripts/dev.mjs",
+    "check": "node scripts/check.mjs",
+    "typecheck": "bun run --cwd apps/web typecheck",
+    "lint": "bun run --cwd apps/web lint",
+    "build": "bun run --cwd apps/web build"
+  }
+}

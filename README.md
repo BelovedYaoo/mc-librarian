@@ -19,8 +19,28 @@ docs/              openapi.yaml（契约）、01-api.md、00-overview.md
 
 ## 状态
 
-设计定稿，实现未开始。见 `docs/00-overview.md` §8 里程碑。
+骨架可运行（issue #2）：后端 `/v1/health` + `/openapi.json`，前端空壳页面显示后端健康状态。
+登录、索引、检索、问答等能力见 `docs/00-overview.md` §8 里程碑与对应 issue。
+
+## 快速开始
+
+前置：Python 3.13、Bun。首次执行：
+
+```bash
+bun run setup     # 建 apps/api/.venv、装后端与前端依赖
+bun run dev       # 同时起 api(127.0.0.1:8787) 与 web(127.0.0.1:5173)，两端都热重载
+```
+
+打开 <http://127.0.0.1:5173/> 即可看到后端健康状态。前端只认 `/api` 前缀，开发期由
+vite 代理到后端，生产期由 Caddy 反代；两部分都无需区分环境。
+
+校验（typecheck / lint / mypy / pytest）：
+
+```bash
+bun run check
+```
 
 ## 数据
 
-源码与索引产物不入库，默认放在同级目录 `mc-librarian-data/`。
+源码与索引产物不入库。数据根由 `MC_LIBRARIAN_DATA_DIR` 指定，默认是
+仓库**之外**的同级目录 `../mc-librarian-data/`（见 `docs/00-overview.md` §4）。

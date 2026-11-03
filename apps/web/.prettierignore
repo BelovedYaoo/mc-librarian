@@ -1,0 +1,6 @@
+# 生成产物，不做格式化
+src/types/api.d.ts
+
+dist/*
+build/*
+node_modules/*

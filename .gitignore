@@ -1,12 +1,10 @@
 # data / build artifacts (never commit)
-src/
-db/
-data/
+# 数据根默认在仓库之外（D9），这里只兜底本地残留：
+# 注意不要写 `src/`、`db/` 这类裸目录，否则会误伤 apps/api/src。
+mc-librarian-data/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal
-index/
-out/
 
 # python
 __pycache__/
@@ -15,6 +13,14 @@ __pycache__/
 venv/
 .pytest_cache/
 *.egg-info/
+.ruff_cache/
+.mypy_cache/
+
+# node / frontend
+node_modules/
+dist/
+build/
+*.tsbuildinfo
 
 # secrets
 .env

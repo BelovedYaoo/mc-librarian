@@ -1,0 +1,57 @@
+[project]
+name = "mc-librarian-api"
+version = "0.2.0"
+description = "mc-librarian：Minecraft 源码知识库与中文问答服务 · 后端 API"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi>=0.118",
+  "pydantic>=2.12",
+  "pydantic-settings>=2.11",
+  "uvicorn[standard]>=0.37",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28",
+  "mypy>=1.19",
+  "pytest>=8.4",
+  "pyyaml>=6.0.2",
+  "ruff>=0.14",
+  "types-pyyaml>=6.0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mc_librarian"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文文案里的全角标点是刻意的，不当作 ambiguous unicode。
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mc_librarian"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
