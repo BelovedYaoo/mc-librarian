@@ -389,7 +389,8 @@ export interface paths {
         /**
          * 创建索引任务
          * @description 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
-         *     给了 `options.source_dir` 从 `parse` 开始，否则从 `download` 开始（见 `JobCreate`）。
+         *     只接受带 `options.source_dir` 的任务，阶段序列固定 `parse → summarize → finalize`；
+         *     缺 `options.source_dir` 返回 422（`download`/`decompile` 待 #13 引入，见 `JobCreate`）。
          */
         post: operations["createJob"];
         delete?: never;
@@ -768,8 +769,12 @@ export interface components {
             version?: string;
             /** @enum {string} */
             status: "queued" | "running" | "succeeded" | "failed" | "canceled";
-            /** @enum {string} */
-            stage?: "download" | "decompile" | "parse" | "summarize" | "finalize";
+            /**
+             * @description 任务当前阶段。`#4` 固定为 `parse → summarize → finalize`；
+             *     `#13` 会在前面补 `download`/`decompile`（存储层 CHECK 已保留这两个历史值）。
+             * @enum {string}
+             */
+            stage?: "parse" | "summarize" | "finalize";
             /** Format: float */
             progress?: number;
             message?: string;
@@ -789,15 +794,15 @@ export interface components {
             version: string;
             options?: {
                 /**
-                 * @description 源码根目录；相对路径按数据根解析。可选：
+                 * @description 源码根目录；相对路径按数据根解析。**必填**：
                  *
-                 *     - 给了 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始（设计文档：`download`/`decompile` 跳过）；
-                 *     - 没给 → 阶段序列 `download → decompile → parse → summarize → finalize`。
+                 *     - 有 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始；
+                 *     - 缺 `source_dir` → 422。`download`/`decompile` 属于 #13，`#4` 不实现也不占位，
+                 *       `#13` 落地后才会把它改成可选并补上这两段。
                  *
-                 *     #4 里 `download`/`decompile` 是占位实现，标记完成的同时写一条 warn 日志说明「待 #13」；
                  *     `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */
-                source_dir?: string;
+                source_dir: string;
                 /** @default false */
                 force: boolean;
             };

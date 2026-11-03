@@ -3,8 +3,7 @@
 设计（见 `docs/00-overview.md` §4、D13）：
 
 - 进程内单任务串行消费，没有独立 worker；一次只跑一个任务（并发 1）。
-- 阶段序列按创建参数选择：给了 `options.source_dir` 时跳过 `download`/`decompile`，从
-  `parse` 开始；没给时走完整的 `download → decompile → parse → summarize → finalize`。
+- 阶段序列固定为 `parse → summarize → finalize`（`#4`；`#13` 会在前面补 `download`/`decompile`）。
   每完成一个阶段就把阶段名与产物写进 `jobs.checkpoint`；认领任务时跳过已完成的阶段，
   失败后重排即可续跑。
 - `cancel` 只在**阶段边界**生效：阶段内部不中断，跑完当前阶段后检查标志再收尾；终态写入
@@ -13,7 +12,7 @@
   否则它们永远不会再被认领。
 - 阻塞的文件扫描与 sqlite 读写都丢进 `asyncio.to_thread`，不占事件循环。
 
-#4 只真正实现 `parse`（统计文件数与 token）；其余阶段是占位，见 #13。
+`#4` 只真正实现 `parse`（统计文件数与 token）；`summarize`/`finalize` 是占位，见 #13。
 """
 
 from __future__ import annotations
@@ -36,13 +35,10 @@ from mc_librarian.schemas import LogLevel
 logger = logging.getLogger("mc_librarian.jobs")
 
 # 阶段顺序即进度分母；`checkpoint.stages` 记已完成的阶段名。
-# 没给 `source_dir` 时走完整序列（先下载/反编译源码）。
-FULL_STAGES: Final[tuple[str, ...]] = ("download", "decompile", "parse", "summarize", "finalize")
-# 给了 `source_dir` 时跳过 download/decompile，直接从 parse 开始（设计文档）。
-SOURCE_STAGES: Final[tuple[str, ...]] = ("parse", "summarize", "finalize")
-# #4 里这两个阶段是占位：标记完成的同时写 warn 日志，不假装真的做了（#13 接管）。
-PLACEHOLDER_STAGES: Final[tuple[str, ...]] = ("download", "decompile")
-# 两个序列的收尾阶段，取消时用来描述停在哪。
+# `#4` 只支持带 `options.source_dir` 的任务（接口层缺它就 422），所以阶段序列固定这三段；
+# `#13` 落地真实版本流水线时会在前面补 `download`/`decompile`。
+STAGES: Final[tuple[str, ...]] = ("parse", "summarize", "finalize")
+# 收尾阶段，取消时用来描述停在哪。
 FINAL_STAGE: Final = "finalize"
 
 # token 估算：不引入 tiktoken 依赖，按「字符数 ÷ 3.5」近似 cl100k 词元数（#13 可换真分词）。
@@ -61,13 +57,9 @@ class StageError(RuntimeError):
 
 @dataclass(frozen=True)
 class JobContext:
-    """一个阶段的输入：任务参数 + 已完成的 checkpoint + 日志回调。"""
+    """一个阶段的输入：任务参数 + 数据根 + 日志回调。"""
 
-    job_id: str
-    kind: str
-    version: str
     options: dict[str, Any]
-    checkpoint: dict[str, Any]
     data_dir: Path
     log: Callable[[LogLevel, str], None]
 
@@ -84,18 +76,17 @@ class JobContext:
         return path if path.is_absolute() else (self.data_dir / path)
 
 
-def estimate_tokens(text: str) -> int:
-    """按 `CHARS_PER_TOKEN` 估算一段文本的 token 数。"""
-    return tokens_from_chars(len(text))
-
-
 def tokens_from_chars(chars: int) -> int:
     """按 `CHARS_PER_TOKEN` 估算 `chars` 个字符的 token 数。"""
     return int(chars / CHARS_PER_TOKEN)
 
 
 def iter_source_files(root: Path) -> Iterator[Path]:
-    """索引范围内的文件：`*.java` 递归 + `data/` 全量（D11，排除 `assets/`）。"""
+    """索引范围内的文件，白名单只有两类：`*.java`（递归）与 `data/` 下全量（D11）。
+
+    白名单之外一律不索引，因此 `assets/` 这类目录（不在白名单内）天然被排除；
+    先 yield 的 `.java` 用 `seen` 去重，`data/` 下的同名文件不会重复产出。
+    """
     seen: set[Path] = set()
 
     for path in sorted(root.rglob(f"*{JAVA_SUFFIX}")):
@@ -113,24 +104,14 @@ def iter_source_files(root: Path) -> Iterator[Path]:
             yield path
 
 
-def stage_sequence(options: dict[str, Any]) -> tuple[str, ...]:
-    """按创建参数选阶段序列：有 `source_dir` 时跳过 download/decompile，从 parse 开始。"""
-    raw = options.get("source_dir")
-
-    return SOURCE_STAGES if isinstance(raw, str) and raw else FULL_STAGES
-
-
 def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     """执行一个阶段，返回要并入 checkpoint 的产物。
 
-    #4 只实现 `parse`；download/decompile/summarize/finalize 留给 #13 接真正的流水线，
-    这里一律标记完成（download/decompile 额外写一条 warn 日志，不假装真的做了）。
+    `#4` 只实现 `parse`（统计文件数与 token 估算）；`summarize`/`finalize` 待 #13 接真正的
+    流水线，这里只标记完成。
     """
     if stage == "parse":
         return _parse_stage(context)
-
-    if stage in PLACEHOLDER_STAGES:
-        context.log("warn", f"{stage}：本阶段尚未实现，待 #13；仅标记完成")
 
     return {}
 
@@ -229,29 +210,27 @@ class JobRunner:
     async def _execute(self, row: sqlite3.Row) -> None:
         job_id = str(row["id"])
         version = str(row["version"])
-        kind = str(row["kind"])
         options = store.options_of(row)
         checkpoint = store.checkpoint_of(row)
         done = {str(item) for item in checkpoint.get("stages", [])}
-        stages = stage_sequence(options)
-        total = len(stages)
+        total = len(STAGES)
+        # 当前停在的阶段（与 `jobs.stage` 列一致）；取消时用它写 `stage` 与 `message`。
+        current_stage: str | None = None
 
-        for index, stage in enumerate(stages):
+        for index, stage in enumerate(STAGES):
             if stage in done:
+                current_stage = stage
                 continue
 
             if await asyncio.to_thread(self._is_cancel_requested, job_id):
-                await asyncio.to_thread(self._cancel, job_id, stage)
+                await asyncio.to_thread(self._cancel, job_id, current_stage)
                 return
 
             await asyncio.to_thread(self._mark, job_id, stage, index / total)
+            current_stage = stage
 
             context = JobContext(
-                job_id=job_id,
-                kind=kind,
-                version=version,
                 options=options,
-                checkpoint=checkpoint,
                 data_dir=self._settings.data_dir,
                 log=lambda level, message: self._log(job_id, level, message),
             )
@@ -268,7 +247,7 @@ class JobRunner:
             done.add(stage)
             checkpoint = {
                 **checkpoint,
-                "stages": [name for name in stages if name in done],
+                "stages": [name for name in STAGES if name in done],
                 **stats,
             }
             await asyncio.to_thread(
@@ -342,9 +321,9 @@ class JobRunner:
     def _finish(self, job_id: str, version: str, checkpoint: dict[str, Any]) -> None:
         """全部阶段完成：终态与取消标志在同一条 UPDATE 里判定，再按实际终态记账。
 
-        `succeeded` 时登记版本行（只更新 `files`/`tokens`/`indexed_at`）并写一条
-        `version.recorded` 审计；`canceled` 时不碰版本表。这样 finalize 执行期间到达的
-        取消不会被吞掉。
+        `succeeded` 时登记版本行：**仅当版本未注册时插入一行**，已注册版本不动；
+        真的插入了才写 `version.recorded` 审计。`canceled` 时不碰版本表。这样 finalize
+        执行期间到达的取消不会被吞掉。
         """
         with self._database.connect() as conn, transaction(conn):
             status = store.finish_succeeded_or_canceled(
@@ -355,19 +334,22 @@ class JobRunner:
             )
 
             if status == "succeeded":
-                recorded = store.record_job_version(
+                inserted = store.insert_version_if_absent(
                     conn,
                     version=version,
                     files=int(checkpoint.get("files", 0)),
                     tokens=int(checkpoint.get("tokens", 0)),
                 )
-                audit.record(
-                    conn,
-                    actor_id=None,
-                    action=audit.ACTION_VERSION_RECORDED,
-                    target=recorded.version,
-                    detail={"files": recorded.files, "tokens": recorded.tokens},
-                )
+
+                if inserted is not None:
+                    audit.record(
+                        conn,
+                        actor_id=None,
+                        action=audit.ACTION_VERSION_RECORDED,
+                        target=inserted.version,
+                        detail={"files": inserted.files, "tokens": inserted.tokens},
+                    )
+
                 store.append_log(conn, job_id, level="info", message="任务完成")
             elif status == "canceled":
                 store.append_log(
@@ -375,25 +357,45 @@ class JobRunner:
                 )
 
     def _fail(self, job_id: str, error: str) -> None:
+        """兜底失败：先带状态守卫写终态，确认真的写进去了才追加 error 日志。
+
+        已 succeeded 的任务不会被改回 failed（`expected_status` 守卫），也不该多出一条
+        与状态不符的 error 日志。
+        """
         with self._database.connect() as conn, transaction(conn):
-            store.append_log(conn, job_id, level="error", message=error)
-            store.finish(
+            updated = store.finish(
                 conn,
                 job_id,
                 status="failed",
                 message="任务失败",
                 error=error,
-                # 状态守卫：兜底异常不能把已经 succeeded 的任务改回 failed。
                 expected_status="running",
             )
 
-    def _cancel(self, job_id: str, stage: str) -> None:
+            if updated:
+                store.append_log(conn, job_id, level="error", message=error)
+
+    def _cancel(self, job_id: str, stage: str | None) -> None:
+        """在阶段边界取消。
+
+        `stage` 是任务**当前停在**的阶段（与 `jobs.stage` 列一致），不是即将开始的下一段，
+        这样 `message` 与 `stage` 不会互相矛盾。先带守卫写终态，写进去了才记日志。
+        """
+        if stage is None:
+            message = "已取消（尚未开始阶段）"
+            log_message = "任务在开始阶段前被取消"
+        else:
+            message = f"已取消（停在 {stage}）"
+            log_message = f"在 {stage} 阶段边界取消"
+
         with self._database.connect() as conn, transaction(conn):
-            store.append_log(conn, job_id, level="warn", message=f"在 {stage} 阶段边界取消")
-            store.finish(
+            updated = store.finish(
                 conn,
                 job_id,
                 status="canceled",
-                message=f"已取消（停在 {stage}）",
+                message=message,
                 expected_status="running",
             )
+
+            if updated:
+                store.append_log(conn, job_id, level="warn", message=log_message)

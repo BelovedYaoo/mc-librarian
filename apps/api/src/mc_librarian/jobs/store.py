@@ -203,14 +203,15 @@ def requeue(conn: sqlite3.Connection, job_id: str) -> Job | None:
     UPDATE 带状态守卫并在调用方事务里执行，按 rowcount 判定（TOCTOU 安全）。
     `checkpoint` 原样保留，runner 认领后跳过已完成的阶段；`cancel_requested` 一并清零，
     否则 `claim_next`（只认 `cancel_requested = 0`）永远不会再认领它；`started_at` 也清空，
-    让下一次认领写入新的开始时间。
+    让下一次认领写入新的开始时间。`stage`/`progress`/`message`/`error` 是上一轮执行的
+    残留，一并清空，避免排队中的任务显示旧阶段与部分进度。
     """
     placeholders = ", ".join("?" for _ in RETRYABLE_STATUSES)
     cursor = conn.execute(
-        "UPDATE jobs SET status = 'queued', cancel_requested = 0, error = NULL,"
-        " started_at = NULL, finished_at = NULL, message = ?"
+        "UPDATE jobs SET status = 'queued', cancel_requested = 0, stage = NULL, progress = 0,"
+        " message = NULL, error = NULL, started_at = NULL, finished_at = NULL"
         f" WHERE id = ? AND status IN ({placeholders})",
-        ("已重新排队，从上次中断处续跑", job_id, *RETRYABLE_STATUSES),
+        (job_id, *RETRYABLE_STATUSES),
     )
 
     if cursor.rowcount == 0:
@@ -226,6 +227,9 @@ def requeue_running(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
     只认 `queued`，所以不收回来这些任务永远不会再跑。**不能丢取消意图**：
     `cancel_requested=1` 的行说明用户已请求取消，直接置为 `canceled`（而不是重新排队后又
     跑起来）；其余行才收回 `queued`，`started_at` 是「当前这次执行」的瞬态状态，一并清空。
+
+    「进程启动即收回全部 running」依赖单进程假设（runner 并发 1）；多 worker 需要心跳 /
+    租约才能区分「本进程还在跑」与「上个进程死了」，见技术债 #19。
     """
     requeued = [
         str(row["id"])
@@ -438,37 +442,38 @@ def register_version(
     return registered
 
 
-def record_job_version(
+def insert_version_if_absent(
     conn: sqlite3.Connection,
     *,
     version: str,
     files: int,
     tokens: int,
-) -> VersionInfo:
-    """任务产出写版本行：只更新 `files`/`tokens`/`indexed_at`。
+) -> VersionInfo | None:
+    """任务产出登记版本：仅在版本**尚未注册**时插入一行，已存在则什么都不写。
 
     版本不存在时插入一行，其余字段用「未 remap、无摘要」的保守默认值
     （`obfuscated=0`、`has_summaries=0`、`source_size_bytes=0`、`db_path=NULL`）。
-    **绝不覆盖**管理员注册的 `db_path` 与 `has_summaries`。
+    版本已存在（管理员注册过）时**一个字段都不动**，返回 `None` 让调用方知道没写；
+    任务产出不是权威索引，想替换已注册版本请重新注册（docs/01-api.md §7）。
     """
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO versions (
           version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
         ) VALUES (?, ?, ?, ?, 0, 0, 0, NULL)
-        ON CONFLICT (version) DO UPDATE SET
-          files = excluded.files,
-          tokens = excluded.tokens,
-          indexed_at = excluded.indexed_at
+        ON CONFLICT (version) DO NOTHING
         """,
         (version, files, tokens, utc_now()),
     )
 
-    recorded = find_version(conn, version)
+    if cursor.rowcount == 0:
+        return None
 
-    assert recorded is not None, "刚写入的版本必须能查回来"
+    inserted = find_version(conn, version)
 
-    return recorded
+    assert inserted is not None, "刚写入的版本必须能查回来"
+
+    return inserted
 
 
 def find_version(conn: sqlite3.Connection, version: str) -> VersionInfo | None:

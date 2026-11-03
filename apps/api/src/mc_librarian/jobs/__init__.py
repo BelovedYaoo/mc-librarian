@@ -6,6 +6,6 @@
 
 from __future__ import annotations
 
-from .runner import FULL_STAGES, SOURCE_STAGES, JobContext, JobRunner, run_stage
+from .runner import STAGES, JobContext, JobRunner, run_stage
 
-__all__ = ["FULL_STAGES", "SOURCE_STAGES", "JobContext", "JobRunner", "run_stage"]
+__all__ = ["STAGES", "JobContext", "JobRunner", "run_stage"]

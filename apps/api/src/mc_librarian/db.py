@@ -134,6 +134,9 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     # v4：索引任务框架（issue #4）。——任务、任务日志、版本注册表。
     # `jobs` 里的 `checkpoint`/`options` 存 JSON 文本：`checkpoint` 记已完成的阶段与产物，
     # 供失败后从下一阶段续跑；`options` 记 `source_dir` 等创建参数。
+    # `kind` 与 `stage` 的 CHECK 保留了历史值（`reindex`/`summarize`、`download`/`decompile`）：
+    # 迁移只追加不改历史，存储层继续容纳旧行；接口层已收窄（`kind` 仅 `index`，`stage` 仅
+    # `parse`/`summarize`/`finalize`，见 docs/01-api.md §7 与 #13）。
     Migration(
         version=4,
         statements=(

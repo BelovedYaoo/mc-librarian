@@ -15,12 +15,18 @@ from mc_librarian.auth.deps import CurrentAdmin, DbConn, client_ip
 from mc_librarian.db import transaction
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
-from mc_librarian.schemas import Job, JobCreate, JobList, JobLogList, JobOptions, JobStatus
+from mc_librarian.schemas import Job, JobCreate, JobList, JobLogList, JobStatus
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 NOT_FOUND_TITLE = "资源不存在"
 CONFLICT_TITLE = "冲突"
+BAD_REQUEST_TITLE = "请求不合法"
+
+# `#4` 只实现带源目录的任务；不带 `source_dir` 的下载/反编译流水线待 #13。
+MISSING_SOURCE_DIR_DETAIL = (
+    "本版本只支持带 options.source_dir 的任务，download/decompile 待 #13 引入"
+)
 
 
 def _require_job(conn: DbConn, job_id: str) -> Job:
@@ -38,7 +44,8 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     summary="创建索引任务",
     description=(
         "立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。"
-        "给了 options.source_dir 从 parse 开始，否则从 download 开始。"
+        "只接受带 options.source_dir 的任务，阶段序列 parse → summarize → finalize；"
+        "缺 options.source_dir 返回 422（download/decompile 待 #13 引入）。"
     ),
     operation_id="createJob",
     responses={
@@ -48,9 +55,13 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     },
 )
 def create_job(payload: JobCreate, request: Request, conn: DbConn, admin: CurrentAdmin) -> Job:
-    options = payload.options or JobOptions()
-
     with transaction(conn):
+        # `#4` 只支持带源目录的任务：校验与入队同一事务，缺 source_dir 一律 422。
+        if payload.options is None:
+            raise ProblemException(422, BAD_REQUEST_TITLE, MISSING_SOURCE_DIR_DETAIL)
+
+        options = payload.options
+
         # 判定与入队同一事务：同版本并发提交只有一个能成功。
         if not options.force and store.has_active_job(conn, payload.version):
             raise ProblemException(

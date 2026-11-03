@@ -21,15 +21,15 @@ import { ApiError, cancelJob, retryJob } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
 
-const STAGES: readonly JobStage[] = ['download', 'decompile', 'parse', 'summarize', 'finalize'];
-
+// `#4` 只跑 `parse → summarize → finalize`（后端 `Job.stage` 枚举已收窄）。
+// 阶段标签与顺序只在这一处定义，指示器与列表的「当前阶段」共用。
 const STAGE_LABELS: Record<JobStage, string> = {
-  download: '下载',
-  decompile: '反编译',
   parse: '解析',
   summarize: '摘要',
   finalize: '收尾',
 };
+
+const STAGES = Object.keys(STAGE_LABELS) as JobStage[];
 
 type ChipColor = 'default' | 'primary' | 'success' | 'error' | 'warning' | 'info';
 

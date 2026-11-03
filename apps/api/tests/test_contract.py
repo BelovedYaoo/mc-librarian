@@ -487,6 +487,8 @@ def test_job_create_schema_matches() -> None:
 
     assert set(runtime_options["properties"]) == set(contract_options["properties"])
     assert "source_dir" in runtime_options["properties"]
+    # `#4` 只支持带源目录的任务：`source_dir` 必填（缺则 422）。
+    assert runtime_options["required"] == contract_options["required"] == ["source_dir"]
 
 
 def test_job_log_and_version_schemas_match() -> None:

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 Role = Literal["admin", "user"]
 JobKind = Literal["index"]
 JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
-JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
+JobStage = Literal["parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
 
 __all__ = [
@@ -168,7 +168,7 @@ class AuditList(BaseModel):
 class JobOptions(BaseModel):
     """创建任务时的 `options`；`source_dir` 见 docs/openapi.yaml 的 `JobCreate`。"""
 
-    source_dir: str | None = None
+    source_dir: str = Field(min_length=1)
     force: bool = False
 
 

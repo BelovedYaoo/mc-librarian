@@ -155,11 +155,32 @@ def test_create_job_rejects_retired_kinds(admin_client: TestClient) -> None:
     for rejected in ("reindex", "summarize"):
         response = admin_client.post(
             "/v1/admin/jobs",
-            json={"kind": rejected, "version": "26.3", "options": {}},
+            json={
+                "kind": rejected,
+                "version": "26.3",
+                "options": {"source_dir": "/tmp/whatever"},
+            },
         )
 
         assert response.status_code == 422
         assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_create_job_requires_source_dir(admin_client: TestClient) -> None:
+    """`#4` 只支持带源目录的任务：缺 `options.source_dir` 一律 422，不承诺五段路径。"""
+    missing = admin_client.post("/v1/admin/jobs", json={"kind": "index", "version": "26.3"})
+
+    assert missing.status_code == 422
+    assert missing.headers["content-type"].startswith("application/problem+json")
+    assert "#13" in missing.json()["detail"]
+
+    empty = admin_client.post(
+        "/v1/admin/jobs",
+        json={"kind": "index", "version": "26.3", "options": {}},
+    )
+
+    assert empty.status_code == 422
+    assert empty.headers["content-type"].startswith("application/problem+json")
 
 
 def test_source_dir_job_starts_at_parse(
@@ -176,34 +197,6 @@ def test_source_dir_job_starts_at_parse(
     release.set()
     assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
     assert calls == ["parse", "summarize", "finalize"]
-
-
-def test_job_without_source_dir_starts_at_download(
-    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """没给 `source_dir`：完整序列 `download → decompile → parse → …`，从 download 开始。"""
-    calls, started, release = recording_stage(monkeypatch, block="download")
-
-    created = admin_client.post(
-        "/v1/admin/jobs",
-        json={"kind": "index", "version": "26.3", "options": {}},
-    )
-
-    assert created.status_code == 202, created.text
-    job_id = created.json()["id"]
-
-    assert started.wait(timeout=WAIT_TIMEOUT_S), "runner 应从 download 阶段开始"
-    assert admin_client.get(f"/v1/admin/jobs/{job_id}").json()["stage"] == "download"
-
-    release.set()
-    # #4 里 download/decompile 是占位：跑到 parse 时因缺 source_dir 失败（真实流水线见 #13）。
-    assert wait_for_terminal(admin_client, job_id)["status"] == "failed"
-    assert calls == ["download", "decompile", "parse"]
-
-    logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
-    warn = [line for line in logs if line["level"] == "warn"]
-    assert any("download" in line["message"] and "#13" in line["message"] for line in warn)
-    assert any("decompile" in line["message"] and "#13" in line["message"] for line in warn)
 
 
 def test_index_job_lifecycle(
@@ -383,8 +376,9 @@ def test_cancel_running_job_stops_at_stage_boundary(
     job = wait_for_terminal(admin_client, job_id)
 
     assert job["status"] == "canceled"
-    # 停在当前阶段边界：parse 已完成，summarize 没有开始。
+    # 停在当前阶段边界：parse 已完成，summarize 没有开始；`message` 与 `stage` 一致。
     assert job["stage"] == "parse"
+    assert "parse" in (job["message"] or "")
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
     assert any(line["level"] == "warn" for line in logs)
@@ -777,7 +771,7 @@ def test_job_does_not_clobber_registered_version(
     source_dir: Path,
     conn: sqlite3.Connection,
 ) -> None:
-    """先注册版本再跑同版本任务：任务产出只更新 files/tokens，不覆盖 db_path/has_summaries。"""
+    """先注册版本再跑同版本任务：已注册版本的字段不被任务产出改写。"""
     path = settings.data_dir / "db" / "26.3.sqlite"
     write_index(path, tokens=4096, summaries=True)
 
@@ -790,15 +784,46 @@ def test_job_does_not_clobber_registered_version(
     assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
 
     row = conn.execute(
-        "SELECT db_path, has_summaries, files FROM versions WHERE version = '26.3'"
+        "SELECT db_path, has_summaries, files, tokens FROM versions WHERE version = '26.3'"
     ).fetchone()
 
     assert row["db_path"] == str(path)
     assert row["has_summaries"] == 1
-    # 任务产出的 parse 统计（2 个文件）写进去了，但 db_path/has_summaries 保持注册时的值。
-    assert row["files"] == 2
-    conn.commit()
-    conn.close()
+    # 版本已注册：任务产出一个字段都不动（注册时 files=1、tokens=4096，不是任务算出的 2）。
+    assert row["files"] == 1
+    assert row["tokens"] == 4096
+
+
+def test_registered_version_row_is_unchanged_after_job(
+    admin_client: TestClient,
+    settings: Settings,
+    source_dir: Path,
+    conn: sqlite3.Connection,
+) -> None:
+    """已注册版本跑任务后所有字段不变，也不该记 `version.recorded` 审计。"""
+    path = settings.data_dir / "db" / "26.3.sqlite"
+    write_index(path, tokens=4096, summaries=True)
+
+    assert admin_client.post("/v1/admin/versions", json={"version": "26.3"}).status_code == 201
+
+    def snapshot() -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT version, files, tokens, indexed_at, obfuscated, has_summaries,"
+            " source_size_bytes, db_path FROM versions WHERE version = '26.3'"
+        ).fetchone()
+
+        return dict(row)
+
+    before = snapshot()
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+
+    assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
+    assert snapshot() == before
+
+    actions = [
+        entry["action"] for entry in admin_client.get("/v1/admin/audit").json()["entries"]
+    ]
+    assert "version.recorded" not in actions
 
 
 def test_register_version_requires_existing_sqlite(
