@@ -6,6 +6,7 @@
 - 阶段固定为 `download → decompile → parse → summarize → finalize`，每完成一个阶段就把
   阶段名与产物写进 `jobs.checkpoint`；认领任务时跳过已完成的阶段，失败后重排即可续跑。
 - `cancel` 只在**阶段边界**生效：阶段内部不中断，跑完当前阶段后检查标志再收尾。
+- 启动时把上一次进程遗留的 `running` 任务收回 `queued`，否则它们永远不会再被认领。
 - 阻塞的文件扫描与 sqlite 读写都丢进 `asyncio.to_thread`，不占事件循环。
 
 #4 只真正实现 `parse`（统计文件数与 token）；其余阶段是占位，见 #13。
@@ -165,6 +166,8 @@ class JobRunner:
         if self._task is not None:
             return
 
+        # 先收上次进程遗留的 running，再开消费循环：否则它们永远不会被认领。
+        await asyncio.to_thread(self._recover_interrupted)
         self._stopping.clear()
         self._task = asyncio.create_task(self._loop(), name="job-runner")
 
@@ -250,11 +253,27 @@ class JobRunner:
                 self._save, job_id, checkpoint, (index + 1) / total, f"{stage} 完成"
             )
 
-        await asyncio.to_thread(self._succeed, job_id, version, options, checkpoint)
+        await asyncio.to_thread(self._succeed_if_not_canceled, job_id, version, checkpoint)
 
     # ------------------------------------------------------------------
     # 所有落库操作都开一条短连接，并在写事务里完成「写状态 + 追加日志」。
     # ------------------------------------------------------------------
+
+    def _recover_interrupted(self) -> None:
+        """启动时把遗留的 `running` 任务重排为 queued，并记一条 info 日志说明来自中断恢复。"""
+        with self._database.connect() as conn, transaction(conn):
+            job_ids = store.requeue_running(conn)
+
+            for job_id in job_ids:
+                store.append_log(
+                    conn,
+                    job_id,
+                    level="info",
+                    message="服务重启：任务从上次中断处重新排队",
+                )
+
+        if job_ids:
+            logger.info("从上次中断恢复：%d 个 running 任务重新排队", len(job_ids))
 
     def _claim(self) -> sqlite3.Row | None:
         with self._database.connect() as conn, transaction(conn):
@@ -288,11 +307,23 @@ class JobRunner:
             )
             store.append_log(conn, job_id, level="info", message=message)
 
+    def _succeed_if_not_canceled(
+        self,
+        job_id: str,
+        version: str,
+        checkpoint: dict[str, Any],
+    ) -> None:
+        """收尾前再查一次取消：阶段循环只在边界检查，finalize 执行期间到达的取消会漏掉。"""
+        if self._is_cancel_requested(job_id):
+            self._cancel(job_id, STAGES[-1])
+            return
+
+        self._succeed(job_id, version, checkpoint)
+
     def _succeed(
         self,
         job_id: str,
         version: str,
-        options: dict[str, Any],
         checkpoint: dict[str, Any],
     ) -> None:
         """全部阶段完成：登记版本（#13 起改在 finalize 校验 db 产物后再登记）。"""
@@ -302,9 +333,10 @@ class JobRunner:
                 version=version,
                 files=int(checkpoint.get("files", 0)),
                 tokens=int(checkpoint.get("tokens", 0)),
-                # #4 不 remap；`obfuscated` 沿用注册接口默认值，等 #13 按来源判定。
-                obfuscated=True,
-                has_summaries=bool(options.get("with_summaries", True)),
+                # #4 的 parse 阶段只统计文件数与 token：不 remap、不生成摘要，
+                # 这两个标记待 #7（remap）/#13（summaries）接管后按真实产物写入。
+                obfuscated=False,
+                has_summaries=False,
                 source_size_bytes=int(checkpoint.get("source_size_bytes", 0)),
                 db_path=None,
             )

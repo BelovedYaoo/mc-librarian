@@ -423,7 +423,7 @@ export interface paths {
         };
         /**
          * 任务日志
-         * @description 支持 `Accept: text/event-stream` 增量跟随；默认返回分页文本。
+         * @description 按 `?after=<id>` 增量拉取：只返回 id 大于 `after` 的日志。
          */
         get: operations["getJobLogs"];
         put?: never;
@@ -448,6 +448,27 @@ export interface paths {
          * @description 只对 queued/running 有效；running 任务在当前阶段边界停止。
          */
         post: operations["cancelJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/jobs/{jobId}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 重试任务
+         * @description 只对 `failed` / `canceled` 有效：保留 checkpoint，把同一任务重新置为 `queued`，
+         *     从下一个未完成的阶段续跑。其他状态返回 `409`。
+         */
+        post: operations["retryJob"];
         delete?: never;
         options?: never;
         head?: never;
@@ -767,7 +788,8 @@ export interface components {
             version: string;
             options?: {
                 /**
-                 * @description 源码根目录；相对路径按数据根解析。`index` / `reindex` 必填。
+                 * @description 源码根目录；相对路径按数据根解析。**当前所有 kind 都必填**：
+                 *     `parse` 阶段无条件扫描源码目录（`summarize` 的真实流水线见 #13）。
                  *     #4 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */
                 source_dir?: string;
@@ -1668,6 +1690,37 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description 任务已结束，无法取消 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    retryJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                jobId: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已重新排队 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 任务不在可重试的终态（仅 failed/canceled） */
             409: {
                 headers: {
                     [name: string]: unknown;

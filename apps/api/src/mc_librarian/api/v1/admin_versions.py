@@ -10,9 +10,10 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
-from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep
+from mc_librarian import audit
+from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
 from mc_librarian.db import transaction
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
@@ -104,8 +105,9 @@ def _sum_tokens(conn: sqlite3.Connection) -> int:
 )
 def register_version(
     payload: RegisterVersionRequest,
+    request: Request,
     conn: DbConn,
-    _admin: CurrentAdmin,
+    admin: CurrentAdmin,
     settings: SettingsDep,
 ) -> VersionInfo:
     path = index_path(settings.data_dir, payload.version)
@@ -119,7 +121,7 @@ def register_version(
         raise ProblemException(422, BAD_REQUEST_TITLE, f"索引文件不是合法的 sqlite：{path}")
 
     with transaction(conn):
-        return store.upsert_version(
+        registered = store.upsert_version(
             conn,
             version=payload.version,
             files=stats.files,
@@ -129,3 +131,18 @@ def register_version(
             source_size_bytes=path.stat().st_size,
             db_path=str(path),
         )
+        audit.record(
+            conn,
+            actor_id=admin.id,
+            action=audit.ACTION_VERSION_REGISTERED,
+            target=registered.version,
+            detail={
+                "files": registered.files,
+                "tokens": registered.tokens,
+                "obfuscated": bool(registered.obfuscated),
+                "has_summaries": bool(registered.has_summaries),
+            },
+            ip=client_ip(request),
+        )
+
+        return registered

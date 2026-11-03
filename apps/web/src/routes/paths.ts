@@ -8,6 +8,7 @@ export const paths = {
   users: '/users',
   versions: '/versions',
   jobs: '/jobs',
+  audit: '/audit',
   page404: '/error/404',
 };
 

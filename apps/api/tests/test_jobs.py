@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sqlite3
 import threading
 import time
@@ -15,8 +17,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_librarian.config import Settings
-from mc_librarian.db import LATEST_VERSION, Database
+from mc_librarian.db import LATEST_VERSION, Database, transaction
 from mc_librarian.jobs import runner as runner_module
+from mc_librarian.jobs import store
+from mc_librarian.jobs.runner import JobRunner
 
 TERMINAL = {"succeeded", "failed", "canceled"}
 SOURCE_JAVA = "package net.minecraft;\n\npublic class MobCategory {}\n"
@@ -123,10 +127,12 @@ def test_migration_creates_job_tables(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_create_job_requires_source_dir(admin_client: TestClient) -> None:
+@pytest.mark.parametrize("kind", ["index", "reindex", "summarize"])
+def test_create_job_requires_source_dir(admin_client: TestClient, kind: str) -> None:
+    """parse 阶段无条件要源目录，因此任何 kind 缺 source_dir 都在入队前被拒（不可能成功）。"""
     response = admin_client.post(
         "/v1/admin/jobs",
-        json={"kind": "index", "version": "26.3", "options": {}},
+        json={"kind": kind, "version": "26.3", "options": {}},
     )
 
     assert response.status_code == 422
@@ -168,7 +174,9 @@ def test_index_job_lifecycle(
 
     assert registered["files"] == 2
     assert registered["tokens"] > 0
-    assert registered["has_summaries"] is True
+    # #4 的 parse 阶段只统计文件数与 token：不 remap、不生成摘要（#7/#13 接管后才可能为 True）。
+    assert registered["obfuscated"] is False
+    assert registered["has_summaries"] is False
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
     assert any("parse" in line["message"] for line in logs)
@@ -190,10 +198,9 @@ def test_job_failure_records_error_summary(admin_client: TestClient, tmp_path: P
 def test_retry_resumes_from_failed_stage(
     admin_client: TestClient,
     source_dir: Path,
-    conn: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """失败重排后从 checkpoint 续跑：已完成的 download/decompile 不再执行。"""
+    """失败后经 retry 端点重排，从 checkpoint 续跑：已完成的 download/decompile 不再执行。"""
     calls: list[str] = []
     real = runner_module.run_stage
     state = {"failed_once": False}
@@ -211,16 +218,62 @@ def test_retry_resumes_from_failed_stage(
 
     job_id = submit(admin_client, "26.3", source_dir).json()["id"]
 
-    assert wait_for_terminal(admin_client, job_id)["status"] == "failed"
+    failed = wait_for_terminal(admin_client, job_id)
+    assert failed["status"] == "failed"
     assert calls == ["download", "decompile", "parse"]
 
-    # 没有 retry 端点（#4 只做框架）：直接改库把任务放回队列。
-    conn.execute("UPDATE jobs SET status = 'queued', cancel_requested = 0 WHERE id = ?", (job_id,))
-    conn.commit()
+    retry = admin_client.post(f"/v1/admin/jobs/{job_id}/retry")
+
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["status"] == "queued"
+    assert retry.json()["error"] is None
     calls.clear()
 
     assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
     assert calls == ["parse", "summarize", "finalize"]
+
+
+def test_retry_of_canceled_job_resumes_from_checkpoint(
+    admin_client: TestClient, source_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """canceled 也能重试：取消时保留的 checkpoint 决定从哪里接着跑。"""
+    started, release = blocking_stage(monkeypatch, "parse")
+
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+    assert started.wait(timeout=WAIT_TIMEOUT_S)
+
+    assert admin_client.post(f"/v1/admin/jobs/{job_id}/cancel").status_code == 202
+
+    release.set()
+    assert wait_for_terminal(admin_client, job_id)["status"] == "canceled"
+
+    retry = admin_client.post(f"/v1/admin/jobs/{job_id}/retry")
+
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["status"] == "queued"
+    assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
+
+
+def test_retry_rejects_non_terminal_states(
+    admin_client: TestClient, source_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只有 failed/canceled 能重试：succeeded 与 running 都回 409。"""
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+    assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
+
+    conflict = admin_client.post(f"/v1/admin/jobs/{job_id}/retry")
+
+    assert conflict.status_code == 409
+    assert conflict.headers["content-type"].startswith("application/problem+json")
+
+    started, release = blocking_stage(monkeypatch, "download")
+    running_id = submit(admin_client, "1.20.1", source_dir).json()["id"]
+    assert started.wait(timeout=WAIT_TIMEOUT_S)
+
+    assert admin_client.post(f"/v1/admin/jobs/{running_id}/retry").status_code == 409
+
+    release.set()
+    assert wait_for_terminal(admin_client, running_id)["status"] == "succeeded"
 
 
 def test_same_version_conflicts_unless_forced(
@@ -269,6 +322,27 @@ def test_cancel_running_job_stops_at_stage_boundary(
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
     assert any(line["level"] == "warn" for line in logs)
+
+
+def test_cancel_during_finalize_is_not_succeeded(
+    admin_client: TestClient, source_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """finalize 执行期间到达的取消不能漏掉：收尾前再查一次，命中就记 canceled。"""
+    started, release = blocking_stage(monkeypatch, "finalize")
+
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+    assert started.wait(timeout=WAIT_TIMEOUT_S)
+
+    assert admin_client.post(f"/v1/admin/jobs/{job_id}/cancel").status_code == 202
+
+    release.set()
+    job = wait_for_terminal(admin_client, job_id)
+
+    assert job["status"] == "canceled"
+    assert job["stage"] == "finalize"
+    # 没走 _succeed，版本不应被登记为已索引。
+    versions = admin_client.get("/v1/versions").json()["versions"]
+    assert all(item["version"] != "26.3" for item in versions)
 
 
 def test_cancel_queued_job(
@@ -338,6 +412,7 @@ def test_unknown_job_is_404(admin_client: TestClient) -> None:
     assert admin_client.get("/v1/admin/jobs/nope").status_code == 404
     assert admin_client.get("/v1/admin/jobs/nope/logs").status_code == 404
     assert admin_client.post("/v1/admin/jobs/nope/cancel").status_code == 404
+    assert admin_client.post("/v1/admin/jobs/nope/retry").status_code == 404
 
 
 def test_job_list_filters_by_status(admin_client: TestClient, source_dir: Path) -> None:
@@ -349,6 +424,76 @@ def test_job_list_filters_by_status(admin_client: TestClient, source_dir: Path) 
 
     queued = admin_client.get("/v1/admin/jobs", params={"status": "queued"}).json()["jobs"]
     assert queued == []
+
+
+# ----------------------------------------------------------------------
+# 崩溃恢复 / 审计
+# ----------------------------------------------------------------------
+
+
+def test_runner_requeues_interrupted_running_jobs(settings: Settings, source_dir: Path) -> None:
+    """进程崩溃留下的 running 行在下次启动时回到 queued，并从 checkpoint 续跑。"""
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    with database.connect() as conn, transaction(conn):
+        job = store.create(
+            conn,
+            kind="index",
+            version="26.3",
+            options={"source_dir": str(source_dir)},
+            created_by=None,
+        )
+        # 模拟「上一次进程在 parse 完成后被杀」：status 停在 running，checkpoint 已落盘。
+        conn.execute(
+            "UPDATE jobs SET status = 'running', checkpoint = ? WHERE id = ?",
+            (json.dumps({"stages": ["download", "decompile", "parse"]}), job.id),
+        )
+
+    runner = JobRunner(settings, database, poll_interval=0.01)
+
+    async def run_until_terminal() -> None:
+        await runner.start()
+
+        try:
+            deadline = time.monotonic() + WAIT_TIMEOUT_S
+            while time.monotonic() < deadline:
+                with database.connect() as conn:
+                    current = store.find(conn, job.id)
+
+                if current is not None and current.status in TERMINAL:
+                    return
+
+                await asyncio.sleep(0.02)
+
+            raise AssertionError("重排后的任务未在超时内跑完")
+        finally:
+            await runner.stop()
+
+    asyncio.run(run_until_terminal())
+
+    with database.connect() as conn:
+        finished = store.find(conn, job.id)
+        logs = store.list_logs(conn, job.id)
+
+    assert finished is not None
+    assert finished.status == "succeeded"
+    assert any("中断" in line.message for line in logs)
+
+
+def test_create_job_records_audit(
+    admin_client: TestClient, source_dir: Path, conn: sqlite3.Connection
+) -> None:
+    admin = admin_client.get("/v1/auth/me").json()
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+    assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
+
+    rows = conn.execute("SELECT actor_id, action, target, detail_json FROM audit").fetchall()
+    created = next(row for row in rows if row["action"] == "job.created")
+
+    assert created["actor_id"] == admin["id"]
+    assert created["target"] == job_id
+    assert json.loads(created["detail_json"]) == {"kind": "index", "version": "26.3"}
 
 
 # ----------------------------------------------------------------------
@@ -385,6 +530,19 @@ def test_register_version_requires_existing_sqlite(
 
     versions = admin_client.get("/v1/versions").json()["versions"]
     assert [item["version"] for item in versions] == ["1.20.1"]
+
+
+def test_register_version_records_audit(admin_client: TestClient, settings: Settings) -> None:
+    write_index(settings.data_dir / "db" / "1.20.1.sqlite", tokens=4096)
+
+    assert admin_client.post("/v1/admin/versions", json={"version": "1.20.1"}).status_code == 201
+
+    entry = admin_client.get("/v1/admin/audit").json()["entries"][0]
+
+    assert entry["action"] == "version.registered"
+    assert entry["target"] == "1.20.1"
+    assert entry["detail"]["files"] == 1
+    assert entry["detail"]["tokens"] == 4096
 
 
 def test_register_version_rejects_non_sqlite(admin_client: TestClient, settings: Settings) -> None:

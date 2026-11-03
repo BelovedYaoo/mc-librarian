@@ -82,7 +82,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `pats` | id, user_id, name, token_hash, prefix, expires_at, last_used_at, revoked_at |
 | `invites` | id, user_id, token_hash, expires_at, used_at |
 | `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
-| `jobs` | id, kind, version, status, stage, progress, error, created_by, timestamps |
+| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps |
 | `job_logs` | id, job_id, ts, level, message |
 | `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
@@ -149,7 +149,7 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 | D14 | 写入模型 | API 只写控制面 DB；`POST /admin/jobs` → 202 + job_id |
 | D15 | 部署 | docker compose，2 容器（api、web）；TLS 由边缘节点 `gateway-nginx` 终止 |
 | D16 | 前端底座 | React + Vite + MUI 9 + 精简版 react-core |
-| D17 | 权限实现 | 自写 `RoleGuard`；删除 react-core/authorization 与私有依赖 |
+| D17 | 权限实现 | 自写 `RequireAuth` / `RequireAdmin`（`apps/web/src/routes/components/auth-guard.tsx`）；删除 react-core/authorization 与私有依赖 |
 | D18 | 前端交付 | web 镜像内嵌 `dist`，只提供静态文件与 `/api/*` 反代入口；TLS/证书在边缘节点 `gateway-nginx` |
 | D19 | 契约同步 | `openapi-typescript` 生成 `apps/web/src/types/api.d.ts`；无 CI，由 `scripts/check.mjs` 漂移守卫 + `tests/test_contract.py` 校验一致性 |
 | D20 | 摘要粒度 | 类级 3 行，按 package 分批（30–50 个类/次） |

@@ -119,6 +119,23 @@ def test_using_token_updates_last_used_at(admin_client: TestClient) -> None:
     assert next(item for item in after if item["id"] == token_id)["last_used_at"] is not None
 
 
+def test_token_lifecycle_records_audit(admin_client: TestClient, conn: sqlite3.Connection) -> None:
+    """PAT 签发/吊销各落一条审计，`target` 用可辨认的前缀（不是不透明的 id）。"""
+    admin = admin_client.get("/v1/auth/me").json()
+    created = _create_token(admin_client, name="脚本")
+
+    assert admin_client.delete(f"/v1/auth/tokens/{created['info']['id']}").status_code == 204
+
+    rows = conn.execute(
+        "SELECT actor_id, action, target, detail_json FROM audit ORDER BY created_at, rowid"
+    ).fetchall()
+
+    assert [row["action"] for row in rows] == ["token.created", "token.revoked"]
+    assert all(row["actor_id"] == admin["id"] for row in rows)
+    assert all(row["target"] == created["info"]["prefix"] for row in rows)
+    assert rows[0]["detail_json"] == '{"name": "脚本", "expires_in_days": 30}'
+
+
 def test_unknown_token_is_401(admin_client: TestClient) -> None:
     assert admin_client.get("/v1/auth/me", headers=_bearer("mcl_forged")).status_code == 401
 

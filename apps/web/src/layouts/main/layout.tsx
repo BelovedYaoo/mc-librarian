@@ -44,6 +44,7 @@ export function MainLayout({ children }: MainLayoutProps) {
       ? [
           { label: '任务', to: paths.jobs },
           { label: '用户', to: paths.users },
+          { label: '审计', to: paths.audit },
         ]
       : []),
   ];

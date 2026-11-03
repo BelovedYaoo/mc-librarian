@@ -581,7 +581,7 @@ paths:
     get:
       tags: [admin]
       summary: 任务日志
-      description: "支持 `Accept: text/event-stream` 增量跟随；默认返回分页文本。"
+      description: "按 `?after=<id>` 增量拉取：只返回 id 大于 `after` 的日志。"
       operationId: getJobLogs
       parameters:
         - $ref: "#/components/parameters/JobId"
@@ -623,6 +623,26 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: 任务已结束，无法取消 }
+
+  /v1/admin/jobs/{jobId}/retry:
+    post:
+      tags: [admin]
+      summary: 重试任务
+      description: |
+        只对 `failed` / `canceled` 有效：保留 checkpoint，把同一任务重新置为 `queued`，
+        从下一个未完成的阶段续跑。其他状态返回 `409`。
+      operationId: retryJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "202":
+          description: 已重新排队
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: 任务不在可重试的终态（仅 failed/canceled） }
 
   /v1/admin/settings:
     get:
@@ -1085,7 +1105,8 @@ components:
             source_dir:
               type: string
               description: |
-                源码根目录；相对路径按数据根解析。`index` / `reindex` 必填。
+                源码根目录；相对路径按数据根解析。**当前所有 kind 都必填**：
+                `parse` 阶段无条件扫描源码目录（`summarize` 的真实流水线见 #13）。
                 #4 只统计 `.java` 与 `data/` 的文件数与 token 估算。
             with_summaries: { type: boolean, default: true }
             force: { type: boolean, default: false }

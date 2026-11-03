@@ -19,6 +19,7 @@ const UsersPage = lazy(() => import('src/pages/users'));
 const InvitePage = lazy(() => import('src/pages/invite'));
 const VersionsPage = lazy(() => import('src/pages/versions'));
 const JobsPage = lazy(() => import('src/pages/jobs'));
+const AuditPage = lazy(() => import('src/pages/audit'));
 const Page404 = lazy(() => import('src/pages/error/404'));
 
 export const routesSection: RouteObject[] = [
@@ -120,6 +121,20 @@ export const routesSection: RouteObject[] = [
         <Suspense fallback={<SplashScreen />}>
           <MainLayout>
             <UsersPage />
+          </MainLayout>
+        </Suspense>
+      </RequireAdmin>
+    ),
+  },
+
+  // 审计：仅 admin
+  {
+    path: paths.audit,
+    element: (
+      <RequireAdmin>
+        <Suspense fallback={<SplashScreen />}>
+          <MainLayout>
+            <AuditPage />
           </MainLayout>
         </Suspense>
       </RequireAdmin>

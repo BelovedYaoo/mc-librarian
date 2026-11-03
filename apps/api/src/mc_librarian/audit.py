@@ -20,6 +20,10 @@ ACTION_USER_DISABLED: Final = "user.disabled"
 ACTION_USER_ENABLED: Final = "user.enabled"
 ACTION_INVITE_CREATED: Final = "invite.created"
 ACTION_INVITE_ACCEPTED: Final = "invite.accepted"
+ACTION_TOKEN_CREATED: Final = "token.created"
+ACTION_TOKEN_REVOKED: Final = "token.revoked"
+ACTION_JOB_CREATED: Final = "job.created"
+ACTION_VERSION_REGISTERED: Final = "version.registered"
 
 # `actor` 对外用用户名（更好读），库里存 actor_id；用户不存在时退回 id。
 _SELECT = """

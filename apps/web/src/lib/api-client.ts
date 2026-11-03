@@ -57,6 +57,9 @@ export type AcceptInviteRequest =
 /** 版本注册表里的一行（`GET /v1/versions`）。 */
 export type VersionInfo = components['schemas']['VersionInfo'];
 
+/** 审计流水里的一行：谁在什么时候对什么做了什么（`GET /v1/admin/audit`）。 */
+export type AuditEntry = components['schemas']['AuditEntry'];
+
 /** 索引任务；`stage` / `progress` 由 JobRunner 推进。 */
 export type Job = components['schemas']['Job'];
 
@@ -309,4 +312,22 @@ export async function getJobLogs(
 /** 取消任务；queued 立即转 canceled，running 在当前阶段边界停止。 */
 export function cancelJob(jobId: string): Promise<Job> {
   return request<Job>(`/v1/admin/jobs/${jobId}/cancel`, { method: 'POST' });
+}
+
+/** 重试失败/已取消的任务：后端保留 checkpoint，从下一个未完成阶段续跑。 */
+export function retryJob(jobId: string): Promise<Job> {
+  return request<Job>(`/v1/admin/jobs/${jobId}/retry`, { method: 'POST' });
+}
+
+/** 审计流水（仅 admin）；`actor` 给定时按用户名精确筛选。 */
+export async function listAudit(
+  params: { actor?: string; limit?: number } = {},
+  signal?: AbortSignal
+): Promise<AuditEntry[]> {
+  const body = await request<{ entries?: AuditEntry[] }>(
+    `/v1/admin/audit${buildQuery(params)}`,
+    { signal }
+  );
+
+  return body.entries ?? [];
 }

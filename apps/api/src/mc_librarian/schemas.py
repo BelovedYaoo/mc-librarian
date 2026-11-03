@@ -160,6 +160,8 @@ class AuditEntry(BaseModel):
 
 class AuditList(BaseModel):
     entries: list[AuditEntry]
+
+
 class JobOptions(BaseModel):
     """创建任务时的 `options`；`source_dir` 见 docs/openapi.yaml 的 `JobCreate`。"""
 

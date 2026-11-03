@@ -1,6 +1,6 @@
 # MC Librarian API · v0.2
 
-> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（26 条路径 / 31 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
+> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（27 条路径 / 32 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
 
 ## 1. 定位
 
@@ -32,9 +32,9 @@
 | read | `GET /v1/outline`、`GET /v1/read` | user |
 | answer | `POST /v1/ask`（SSE） | user |
 | auth | `POST /v1/auth/login`、`POST /v1/auth/logout`、`GET /v1/auth/me`、`GET /v1/auth/tokens`、`POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}`、`GET /v1/invites/{token}`、`POST /v1/invites/{token}/accept` | 公开 / 本人 |
-| admin | `POST /v1/admin/versions`、`GET /v1/admin/users`、`POST /v1/admin/users`、`PATCH /v1/admin/users/{userId}`、`GET /v1/admin/jobs`、`POST /v1/admin/jobs`、`GET /v1/admin/jobs/{jobId}`、`GET /v1/admin/jobs/{jobId}/logs`、`POST /v1/admin/jobs/{jobId}/cancel`、`GET /v1/admin/settings`、`PUT /v1/admin/settings`、`GET /v1/admin/usage`、`GET /v1/admin/audit` | admin |
+| admin | `POST /v1/admin/versions`、`GET /v1/admin/users`、`POST /v1/admin/users`、`PATCH /v1/admin/users/{userId}`、`GET /v1/admin/jobs`、`POST /v1/admin/jobs`、`GET /v1/admin/jobs/{jobId}`、`GET /v1/admin/jobs/{jobId}/logs`、`POST /v1/admin/jobs/{jobId}/cancel`、`POST /v1/admin/jobs/{jobId}/retry`、`GET /v1/admin/settings`、`PUT /v1/admin/settings`、`GET /v1/admin/usage`、`GET /v1/admin/audit` | admin |
 
-合计 26 条路径 / 31 个操作，与 `openapi.yaml` 一一对应。
+合计 27 条路径 / 32 个操作，与 `openapi.yaml` 一一对应。
 
 ## 4. 检索接口
 
@@ -96,8 +96,8 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 - **角色**：`admin` / `user`，可提升可降级；**最后一个启用的 admin 不允许降级或停用**（`409`）。
   禁用账号会同时删除其全部会话，旧 cookie 立刻失效。
 - **PAT**：每人可签发多个，单独吊销，展示 `last_used_at` 与前缀。
-- **审计**：角色变更、禁用、创建用户、邀请创建/接受、PAT 签发/吊销、设置修改、任务创建全部落 `audit` 表
-  （`GET /v1/admin/audit` 可按 `actor` 用户名筛选）。
+- **审计**：角色变更、禁用、创建用户、邀请创建/接受、PAT 签发/吊销、版本注册、任务创建、设置修改全部落 `audit` 表
+  （`GET /v1/admin/audit` 可按 `actor` 用户名筛选；前端 `/audit` 页按同一口径展示）。
 
 密码用 **argon2id** 哈希存库（argon2-cffi 默认参数），接口与日志里都不会出现明文。
 
@@ -109,8 +109,9 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET/POST /v1/admin/users`、`PATCH /v1/admin/users/{id}` | 建号（返回一次性邀请链接）、升降角色、启停；最后一个启用的 admin 受保护 |
 | `POST /v1/admin/jobs` | 创建索引任务，立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
 | `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize，`progress` 0–1 |
-| `GET /v1/admin/jobs/{id}/logs` | 分页日志；`Accept: text/event-stream` 可增量跟随 |
+| `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
+| `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
 | `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly |
 | `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
 | `GET /v1/admin/audit` | 审计日志 |
@@ -134,5 +135,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.1.0 | 初稿：search / symbol / references / outline / read / ask |
 | 2026-11-03 | 0.2.0 | 加账号体系、PAT、admin（users/jobs/settings/usage/audit）、ask 改 SSE、`latest` 移除 |
 | 2026-11-03 | 0.2.0 | issue #3：契约补 `GET/POST /v1/setup`、`Session` 相关错误响应（`Unauthorized`/`Forbidden`/`SetupCompleted`）；实现 setup 与 login/logout/me，控制面 SQLite 落地 `users`/`sessions` + `schema_version`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
-| 2026-11-03 | 0.2.0 | issue #9：契约补 `GET /v1/invites/{token}`、`POST /v1/invites/{token}/accept`，并把 `createUser` 的 `invite_url` 标为必填、给 `patchUser` 补 `404`；实现 users/audit/invites 与迁移 v2（`invites`/`audit` 两表）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
-| 2026-11-03 | 0.2.0 | issue #4：契约补 `JobCreate.options.source_dir`、`/v1/admin/jobs*` 与 `/v1/admin/versions` 的 403/404/409/422；迁移 v2 落地 `jobs`/`job_logs`/`versions`，进程内 `JobRunner`（并发 1、阶段 checkpoint、阶段边界取消）随 lifespan 启动，`parse` 阶段统计文件数与 token 估算（字符 ÷ 3.5），版本注册与 `GET /v1/versions`；前端加 `/versions`、`/jobs` 页与侧边导航。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | issue #10：契约补 `GET/POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}`；实现 PAT 签发/列表/吊销与 `mcl_` 前缀 Bearer 鉴权，迁移 v2 落地 `pats` 表。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | issue #9：契约补 `GET /v1/invites/{token}`、`POST /v1/invites/{token}/accept`，并把 `createUser` 的 `invite_url` 标为必填、给 `patchUser` 补 `404`；实现 users/audit/invites 与迁移 v3（`invites`/`audit` 两表）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | issue #4：契约补 `JobCreate.options.source_dir`、`/v1/admin/jobs*` 与 `/v1/admin/versions` 的 403/404/409/422；迁移 v4 落地 `jobs`/`job_logs`/`versions`，进程内 `JobRunner`（并发 1、阶段 checkpoint、阶段边界取消）随 lifespan 启动，`parse` 阶段统计文件数与 token 估算（字符 ÷ 3.5），版本注册与 `GET /v1/versions`；前端加 `/versions`、`/jobs` 页与侧边导航。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | 复审修复：契约补 `POST /v1/admin/jobs/{jobId}/retry`、删掉 `getJobLogs` 的 SSE 描述、`source_dir` 改为所有 kind 必填；实现重试续跑与启动时重排遗留 `running`，`_succeed` 不再虚报 `obfuscated`/`has_summaries`，PAT 签发/吊销、任务创建、版本注册补审计，前端加 `/audit` 页。属 v0.2 设计内的增量补齐，`info.version` 不变 |

@@ -92,14 +92,22 @@ def create(
     return raw_token, created
 
 
-def revoke(conn: sqlite3.Connection, user_id: str, token_id: str) -> bool:
-    """吊销自己的令牌；不存在、非本人、已吊销都返回 False（调用方据此回 404）。"""
-    cursor = conn.execute(
-        "UPDATE pats SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
-        (utc_now(), token_id, user_id),
-    )
+def revoke(conn: sqlite3.Connection, user_id: str, token_id: str) -> sqlite3.Row | None:
+    """吊销自己的令牌并返回被吊销的行；不存在、非本人、已吊销都返回 None（调用方据此回 404）。
 
-    return cursor.rowcount > 0
+    返回整行是为了让调用方能拿 `prefix` 记审计：`target` 用可辨认的前缀而不是不透明的 id。
+    """
+    row: sqlite3.Row | None = conn.execute(
+        f"SELECT {_COLUMNS} FROM pats WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+        (token_id, user_id),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    conn.execute("UPDATE pats SET revoked_at = ? WHERE id = ?", (utc_now(), token_id))
+
+    return row
 
 
 def resolve(conn: sqlite3.Connection, raw_token: str) -> User | None:

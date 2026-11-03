@@ -17,7 +17,7 @@ import Typography from '@mui/material/Typography';
 
 import { useJobLogs, useJobs } from 'src/hooks';
 
-import { ApiError, cancelJob } from 'src/lib/api-client';
+import { ApiError, cancelJob, retryJob } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
 
@@ -48,7 +48,7 @@ export function JobsView() {
   const { jobs, error, refresh } = useJobs();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState(false);
+  const [busyAction, setBusyAction] = useState<'cancel' | 'retry' | null>(null);
 
   const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0] ?? null;
   const { lines, error: logsError } = useJobLogs(selected?.id ?? null);
@@ -56,7 +56,7 @@ export function JobsView() {
   const handleCancel = async () => {
     if (!selected) return;
 
-    setCancelling(true);
+    setBusyAction('cancel');
     setActionError(null);
 
     try {
@@ -65,7 +65,23 @@ export function JobsView() {
     } catch (cause) {
       setActionError(cause instanceof ApiError ? cause.message : String(cause));
     } finally {
-      setCancelling(false);
+      setBusyAction(null);
+    }
+  };
+
+  const handleRetry = async () => {
+    if (!selected) return;
+
+    setBusyAction('retry');
+    setActionError(null);
+
+    try {
+      await retryJob(selected.id);
+      refresh();
+    } catch (cause) {
+      setActionError(cause instanceof ApiError ? cause.message : String(cause));
+    } finally {
+      setBusyAction(null);
     }
   };
 
@@ -120,9 +136,10 @@ export function JobsView() {
             <>
               <JobDetail
                 job={selected}
-                cancelling={cancelling}
+                busyAction={busyAction}
                 actionError={actionError}
                 onCancel={handleCancel}
+                onRetry={handleRetry}
               />
               <LogPanel lines={lines} error={logsError} />
             </>
@@ -145,14 +162,17 @@ export function JobsView() {
 
 type JobDetailProps = {
   job: Job;
-  cancelling: boolean;
+  busyAction: 'cancel' | 'retry' | null;
   actionError: string | null;
   onCancel: () => void;
+  onRetry: () => void;
 };
 
-function JobDetail({ job, cancelling, actionError, onCancel }: JobDetailProps) {
+function JobDetail({ job, busyAction, actionError, onCancel, onRetry }: JobDetailProps) {
   const meta = STATUS_META[job.status];
   const cancellable = job.status === 'queued' || job.status === 'running';
+  // 只有 failed/canceled 能重试：后端保留 checkpoint，从下一个未完成阶段续跑。
+  const retryable = job.status === 'failed' || job.status === 'canceled';
 
   return (
     <Card variant="outlined">
@@ -164,12 +184,21 @@ function JobDetail({ job, cancelling, actionError, onCancel }: JobDetailProps) {
 
           <Button
             size="small"
+            variant="outlined"
+            disabled={!retryable || busyAction !== null}
+            onClick={onRetry}
+          >
+            {busyAction === 'retry' ? '重试中…' : '重试'}
+          </Button>
+
+          <Button
+            size="small"
             color="error"
             variant="outlined"
-            disabled={!cancellable || cancelling}
+            disabled={!cancellable || busyAction !== null}
             onClick={onCancel}
           >
-            {cancelling ? '取消中…' : '取消任务'}
+            {busyAction === 'cancel' ? '取消中…' : '取消任务'}
           </Button>
         </Stack>
 

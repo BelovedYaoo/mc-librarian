@@ -63,6 +63,8 @@ def _non_null(schema: dict[str, Any]) -> dict[str, Any]:
                     return resolved
 
     return schema
+
+
 def _response_schema(
     spec: dict[str, Any], path: str, method: str = "get", status: str = "200"
 ) -> dict[str, Any]:
@@ -417,6 +419,7 @@ def test_job_paths_are_implemented() -> None:
         "/v1/admin/jobs/{jobId}",
         "/v1/admin/jobs/{jobId}/logs",
         "/v1/admin/jobs/{jobId}/cancel",
+        "/v1/admin/jobs/{jobId}/retry",
     } <= runtime_paths
 
 
@@ -430,6 +433,7 @@ def test_job_paths_are_implemented() -> None:
         ("/v1/admin/jobs/{jobId}", "get", "getJob"),
         ("/v1/admin/jobs/{jobId}/logs", "get", "getJobLogs"),
         ("/v1/admin/jobs/{jobId}/cancel", "post", "cancelJob"),
+        ("/v1/admin/jobs/{jobId}/retry", "post", "retryJob"),
     ],
 )
 def test_job_operation_ids_match(path: str, method: str, operation_id: str) -> None:
@@ -448,6 +452,7 @@ def test_admin_operations_declare_forbidden() -> None:
         ("/v1/admin/jobs/{jobId}", "get"),
         ("/v1/admin/jobs/{jobId}/logs", "get"),
         ("/v1/admin/jobs/{jobId}/cancel", "post"),
+        ("/v1/admin/jobs/{jobId}/retry", "post"),
     ):
         for spec in (_runtime(), _contract()):
             assert "403" in _operation(spec, path, method)["responses"]

@@ -18,6 +18,8 @@ from mc_librarian.schemas import Job, JobLog, LogLevel, VersionInfo
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
 # 终态；进入后 cancel 不再有意义。
 TERMINAL_STATUSES: tuple[str, ...] = ("succeeded", "failed", "canceled")
+# 可以重试的终态：保留 checkpoint 重新入队，从下一个未完成阶段续跑。
+RETRYABLE_STATUSES: tuple[str, ...] = ("failed", "canceled")
 
 _JOB_COLUMNS = (
     "id, kind, version, status, stage, progress, message, error,"
@@ -195,6 +197,49 @@ def is_cancel_requested(conn: sqlite3.Connection, job_id: str) -> bool:
     ).fetchone()
 
     return row is not None and bool(row["cancel_requested"])
+
+
+def requeue(conn: sqlite3.Connection, job_id: str) -> Job:
+    """把终态任务重新放回队列，返回重排后的任务。
+
+    `checkpoint` 原样保留，runner 认领后跳过已完成的阶段；`cancel_requested` 一并清零，
+    否则 `claim_next`（只认 `cancel_requested = 0`）永远不会再认领它；`started_at` 也清空，
+    让下一次认领写入新的开始时间。
+    """
+    conn.execute(
+        "UPDATE jobs SET status = 'queued', cancel_requested = 0, error = NULL,"
+        " started_at = NULL, finished_at = NULL, message = ? WHERE id = ?",
+        ("已重新排队，从上次中断处续跑", job_id),
+    )
+
+    requeued = find(conn, job_id)
+
+    assert requeued is not None, "重排过的任务必须存在"
+
+    return requeued
+
+
+def requeue_running(conn: sqlite3.Connection) -> list[str]:
+    """把进程崩溃/重启时遗留的 `running` 任务收回队列，返回被重排的 job id。
+
+    runner 并发 1 且只在进程内，`running` 只可能来自上一次进程生命周期；而 `claim_next`
+    只认 `queued`，所以不收回来这些任务永远不会再跑。`started_at` 与 `cancel_requested`
+    是「当前这次执行」的瞬态状态，拥有它的进程已经死了，一并清掉（用户可再次请求取消）。
+    """
+    rows = conn.execute(
+        "SELECT id FROM jobs WHERE status = 'running' ORDER BY created_at, id"
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    conn.execute(
+        "UPDATE jobs SET status = 'queued', started_at = NULL, cancel_requested = 0,"
+        " message = ? WHERE status = 'running'",
+        ("服务重启，任务重新排队",),
+    )
+
+    return [str(row["id"]) for row in rows]
 
 
 def mark_stage(
