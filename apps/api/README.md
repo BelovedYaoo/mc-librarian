@@ -77,13 +77,14 @@ cd apps/api
 ```bash
 cd apps/api
 # 26.x（Mojang 已不混淆，直接反编译）
+# `--out` 是相对**当前目录**解析的普通路径参数（不是数据根）：在 apps/api 下要写 ../../
 MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
-  .venv/Scripts/python -m mc_librarian fetch --version 26.3 --out ../mc-librarian-data/src/26.3
+  .venv/Scripts/python -m mc_librarian fetch --version 26.3 --out ../../mc-librarian-data/src/26.3
 
 # ≤ 1.21.11（先下载官方 mappings 并 remap，再反编译）
 MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
 MC_LIBRARIAN_SPECIALSOURCE_JAR=/path/SpecialSource-1.11.5-shaded.jar \
-  .venv/Scripts/python -m mc_librarian fetch --version 1.20.1 --out ../mc-librarian-data/src/1.20.1
+  .venv/Scripts/python -m mc_librarian fetch --version 1.20.1 --out ../../mc-librarian-data/src/1.20.1
 ```
 
 安装后也可用 `mc-librarian fetch --version <v> --out <dir>`（同一个入口）。

@@ -85,7 +85,8 @@ disallow_untyped_defs = false
 module = "psutil"
 ignore_missing_imports = true
 
-# jieba 也不带类型标注；本仓只用 `cut` 与 `setLogLevel`。
+# jieba 也不带类型标注；本仓用 `cut`（预分词）、`setLogLevel`（抑制导入日志）与
+# `initialize`/`dt.FREQ`（启动预热时读词典大小）。
 [[tool.mypy.overrides]]
 module = "jieba"
 ignore_missing_imports = true

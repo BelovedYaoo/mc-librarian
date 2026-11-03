@@ -34,6 +34,7 @@ from mc_librarian.indexing.build import build_index
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.indexing.summarize import ClassDigest, SummaryRow
 from mc_librarian.main import create_app
+from mc_librarian.retrieval import channels
 
 FIXTURE_SOURCE = Path(__file__).parent / "fixtures" / "source"
 VERSION = "26.3"
@@ -242,6 +243,69 @@ def test_valid_summary_passes_the_format_gate() -> None:
     text = "刷怪上限：每区块生成预算\n机制：按 mob cap 与玩家距离调度\n关键成员：spawnInterval"
 
     assert summarize.validate_summary(text, fqn="net.minecraft.world.Mob") is None
+
+
+@pytest.mark.parametrize("head", ["管理玩家背包", "刷怪上限与预算", "管理玩家背包物品"])
+def test_short_but_valid_head_passes_the_gate(head: str) -> None:
+    """简洁但合格的第 1 行（6/7/8 字符）不被格式闸门拒掉：拒好摘要的闸门比没有更糟。"""
+    text = f"{head}\n机制：按每刻预算调度\n关键成员：spawnInterval"
+
+    assert summarize.validate_summary(text, fqn="net.minecraft.world.Mob") is None
+
+
+def test_head_below_the_floor_is_still_rejected() -> None:
+    """闸门放宽到 4 字符，但「刷怪上」这类过短的复述仍然挡掉。"""
+    text = "刷怪上\n机制：按每刻预算调度\n关键成员：spawnInterval"
+    problem = summarize.validate_summary(text, fqn="net.minecraft.world.Mob")
+
+    assert problem is not None and "第 1 行太短" in problem
+
+
+def test_wrapped_member_list_is_merged_into_line_three(
+    settings: Settings, fake_llm: Any, indexed: Path
+) -> None:
+    """第 3 行成员列表折行成第 4 行：接受并把第 4 行并回第 3 行，而不是整条判失败。"""
+    fake_llm.overrides = {
+        "net.minecraft.world.Mob": (
+            "刷怪上限：每区块生成预算\n"
+            "机制：按 mob cap 与玩家距离调度\n"
+            "关键成员：spawnInterval,\n"
+            "getName"
+        )
+    }
+
+    stats = run_summarize(settings, indexed)
+
+    assert stats.failed == 0, stats.failures
+
+    lines = read_summaries(indexed)["net.minecraft.world.Mob"].splitlines()
+
+    assert len(lines) == 3
+    assert lines[2].startswith("关键成员：")
+    assert "getName" in lines[2]
+
+
+def test_overlong_head_is_truncated_per_line_and_still_three_lines(
+    settings: Settings, fake_llm: Any, indexed: Path
+) -> None:
+    """超长第 1 行：逐行截断后再过闸门，入库仍是 3 行（整体截断会把第 2/3 行一起切掉）。"""
+    long_head = "刷怪" * (summarize.SUMMARY_MAX_CHARS // 2 + 100)
+    fake_llm.overrides = {
+        "net.minecraft.world.Mob": (
+            f"{long_head}\n机制：按 mob cap 与玩家距离调度\n关键成员：spawnInterval"
+        )
+    }
+
+    stats = run_summarize(settings, indexed)
+
+    assert stats.failed == 0, stats.failures
+
+    lines = read_summaries(indexed)["net.minecraft.world.Mob"].splitlines()
+
+    assert len(lines) == 3
+    assert len(lines[0]) <= summarize.SUMMARY_MAX_CHARS
+    assert lines[1].startswith("机制：")
+    assert lines[2].startswith("关键成员：")
 
 
 def test_summaries_fts_stores_jieba_segmented_text(
@@ -703,3 +767,84 @@ def test_insert_summary_deletes_the_fts_row_by_rowid(settings: Settings, indexed
     # `summaries.id` 与 FTS 行的 `rowid` 对齐：按 rowid 删才删得准。
     assert len(rows) == 1
     assert rows[0][0] == rows[0][1]
+
+
+def test_misaligned_fts_is_rebuilt_from_summaries_before_writing(
+    settings: Settings, fake_llm: Any, indexed: Path
+) -> None:
+    """旧库的 FTS rowid 与 `summaries.id` 错位时，写摘要前按 `summaries` 整表重建（验收）。
+
+    修复前的库：FTS 行的 rowid 由 FTS5 计数器自增、删除按 fqn，某个类被重写过就错位。此时
+    按 rowid 删旧行会删掉**另一个类**的 FTS 行，那个类从摘要通道静默消失（`summaries` 行还在）。
+    """
+    digests = {item.fqn: item for item in summarize.read_class_digests(indexed)}
+    stale_fqn = "net.minecraft.world.Container"  # 它的 FTS 行被挪去撞下一个 summaries.id
+    pending_fqn = "net.minecraft.world.World"
+
+    # 先写出「除了 pending 那个类之外」的摘要（content_hash 与索引一致，重跑时命中复用）。
+    summarize.write_summaries(
+        indexed,
+        [
+            SummaryRow(
+                class_id=item.class_id,
+                fqn=item.fqn,
+                text_zh=(
+                    f"刷怪与区块生成：{item.fqn.rsplit('.', 1)[-1]} 负责生成与掉落\n"
+                    "机制：按每刻预算与区块范围调度\n"
+                    f"关键成员：{item.fqn.rsplit('.', 1)[-1]}"
+                ),
+                content_hash=item.content_hash,
+            )
+            for item in digests.values()
+            if item.fqn != pending_fqn
+        ],
+    )
+
+    # 模拟修复前的库：Container 被重写过，FTS 行的 rowid 跑到下一个 summaries.id（= World 的 id）。
+    connection = sqlite3.connect(indexed)
+    try:
+        next_id = int(connection.execute("SELECT MAX(id) + 1 FROM summaries").fetchone()[0])
+        connection.execute("DELETE FROM summaries_fts WHERE fqn = ?", (stale_fqn,))
+        connection.execute(
+            "INSERT INTO summaries_fts (rowid, fqn, text_zh) VALUES (?, ?, ?)",
+            (next_id, stale_fqn, summarize.segment("错位的旧分词")),
+        )
+        connection.commit()
+        misaligned = connection.execute(
+            "SELECT COUNT(*) FROM summaries s JOIN summaries_fts f ON f.fqn = s.fqn"
+            " WHERE f.rowid <> s.id"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert misaligned == 1, "构造的旧库应当错位"
+
+    stats = run_summarize(settings, indexed)
+
+    assert stats.generated == 1, stats.failures  # 只有缺摘要的 World 重新生成
+
+    connection = sqlite3.connect(indexed)
+    connection.row_factory = sqlite3.Row
+
+    try:
+        aligned, total = connection.execute(
+            "SELECT (SELECT COUNT(*) FROM summaries s JOIN summaries_fts f"
+            "         ON f.fqn = s.fqn AND f.rowid = s.id),"
+            " (SELECT COUNT(*) FROM summaries)"
+        ).fetchone()
+        fts_fqns = {str(row[0]) for row in connection.execute("SELECT fqn FROM summaries_fts")}
+        summary_fqns = {str(row[0]) for row in connection.execute("SELECT fqn FROM summaries")}
+
+        # (a) 重建：每条摘要的 FTS 行都钉回自己的 id。
+        assert (int(aligned), int(total)) == (6, 6)
+        # (c) 没有类的 FTS 行被误删（两边行集一致，也没有孤儿行）。
+        assert fts_fqns == summary_fqns == set(digests)
+
+        # (b) 每个类的摘要都能被摘要通道命中。
+        for fqn in sorted(summary_fqns):
+            hits = channels.summary_candidates(
+                connection, fqn.rsplit(".", 1)[-1], path_prefix=None
+            )
+            assert any(hit.symbol == fqn for hit in hits), f"{fqn} 命不中摘要通道"
+    finally:
+        connection.close()

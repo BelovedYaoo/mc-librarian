@@ -11,6 +11,9 @@
    的三行格式闸门（规格 §1）：不合格的按单类失败处理，不进库（`parse_batch_response`）；
 5. 入库前用 `jieba` 把 `text_zh` 切成空格分隔的词写进 `summaries_fts`（FTS5，`unicode61`）。
    FTS 行的 `rowid` 钉成 `summaries.id`：重写时按 `rowid` 删旧行，避开 FTS5 上的全表扫。
+   这个前提由 `write_summaries` 在写之前校验：旧库（rowid 由 FTS5 计数器自增、删除按 fqn）
+   一旦错位，按 `rowid` 删会删掉**另一个类**的 FTS 行，那个类从摘要通道静默消失——
+   发现错位就按 `summaries` 整表重建 FTS 索引，而不是要求旧库重跑 `--force`。
 
 **为什么预分词**：`trigram` 对两字词（「刷怪」）不友好，而 `unicode61` 又不切中文，两者单独用
 都会漏掉两字词；所以入库前 jieba 切好、查询时对 query 做同样切分。
@@ -52,8 +55,9 @@ SUMMARY_LINE_COUNT: Final = 3
 # 第 2/3 行的固定前缀（规格 §1）；不是这两个前缀就是没按格式写。
 MECHANIC_PREFIX: Final = "机制"
 MEMBERS_PREFIX: Final = "关键成员"
-# 第 1 行（职责）的最短长度：比这短的多半是「Mob」这类复述类名的垃圾。
-SUMMARY_MIN_HEAD_CHARS: Final = 8
+# 第 1 行（职责）的最短长度：比这短的多半是「Mob」这类复述类名的垃圾。定得宽松（4 字符）
+# ——「管理玩家背包」这种简洁但合格的第 1 行不该被格式闸门拒掉（拒好摘要的闸门比没有更糟）。
+SUMMARY_MIN_HEAD_CHARS: Final = 4
 # 摘要必须用中文写：去掉「机制」「关键成员」两个固定标签后仍要有汉字，否则就是把类名 / 代码
 # 复述一遍（标签本身是中文，不先摘掉的话这项检查永远为真）。
 CJK_CHAR: Final = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -433,16 +437,32 @@ def build_prompt(digests: Sequence[ClassDigest]) -> str:
 _CODE_FENCE: Final = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 
 
+def normalize_summary(text: str) -> str:
+    """把模型响应规整成固定 3 行：逐行截断后，把第 4 行起的折行并回第 3 行。
+
+    `SUMMARY_MAX_CHARS` 是**逐行**上限：对整段文本一次性截断会把第 2/3 行一起切掉，入库后
+    只剩 1 行、绕过「固定 3 行」的闸门。第 4 行起视为第 3 行成员列表的折行，空格拼接。
+    """
+    lines = [line.strip()[:SUMMARY_MAX_CHARS] for line in text.strip().splitlines()]
+
+    if len(lines) > SUMMARY_LINE_COUNT:
+        tail = " ".join(line for line in lines[SUMMARY_LINE_COUNT - 1 :] if line)
+        lines = [*lines[: SUMMARY_LINE_COUNT - 1], tail]
+
+    return "\n".join(lines)
+
+
 def validate_summary(text: str, *, fqn: str) -> str | None:
     """校验一条摘要是否满足规格 §1 的三行格式；合格返回 `None`，不合格返回原因。
 
+    传入的应当是 `normalize_summary` 规整过的文本（首尾无空行、逐行截断、折行已并回第 3 行）。
     只挡最明显的垃圾（行数 / 第 2、3 行前缀 / 是不是中文 / 第 1 行是不是在复述类名），
     不做语义判断：「有没有游戏机制词」无法可靠校验，那是 prompt 的责任。
     """
     lines = [line.strip() for line in text.strip().splitlines()]
 
-    if len(lines) != SUMMARY_LINE_COUNT:
-        return f"必须是 {SUMMARY_LINE_COUNT} 行，实际 {len(lines)} 行"
+    if len(lines) < SUMMARY_LINE_COUNT:
+        return f"至少 {SUMMARY_LINE_COUNT} 行，实际 {len(lines)} 行"
 
     if not lines[1].startswith(MECHANIC_PREFIX):
         return f"第 2 行必须以「{MECHANIC_PREFIX}」开头"
@@ -495,13 +515,16 @@ def parse_batch_response(
             failures[digest.fqn] = "响应缺少该类的摘要"
             continue
 
-        problem = validate_summary(value, fqn=digest.fqn)
+        # 先逐行截断（`normalize_summary`）再校验：反过来的话超长第 1 行会连第 2/3 行一起
+        # 被切掉，入库后只剩 1 行，绕过「固定 3 行」的闸门。
+        normalized = normalize_summary(value)
+        problem = validate_summary(normalized, fqn=digest.fqn)
 
         if problem is not None:
             failures[digest.fqn] = f"摘要格式不合格：{problem}"
             continue
 
-        summaries[digest.fqn] = value.strip()[:SUMMARY_MAX_CHARS]
+        summaries[digest.fqn] = normalized
 
     return summaries, failures
 
@@ -666,6 +689,8 @@ async def _run_batches(
 def write_summaries(db_path: Path, rows: Sequence[SummaryRow]) -> None:
     """把摘要写入索引库：`summaries`（普通表）+ `summaries_fts`（jieba 预分词的 FTS5）。
 
+    写之前先校验 FTS 行与 `summaries` 对齐（`_insert_summary` 按 `rowid` 删旧行依赖这个前提）：
+    修复前的旧库不满足它，错位时按 `rowid` 删会删掉另一个类的 FTS 行，所以先整表重建。
     单事务提交：失败时整批回滚，不留「一半新一半旧」的摘要。
     """
     connection = sqlite3.connect(db_path)
@@ -673,6 +698,12 @@ def write_summaries(db_path: Path, rows: Sequence[SummaryRow]) -> None:
     try:
         for statement in SUMMARIES_DDL:
             connection.execute(statement)
+
+        if _summaries_fts_is_misaligned(connection):
+            rebuilt = rebuild_summaries_fts(connection)
+            logger.warning(
+                "summaries_fts 与 summaries 错位，已按 summaries 整表重建（%d 行）", rebuilt
+            )
 
         for row in rows:
             _insert_summary(
@@ -688,6 +719,41 @@ def write_summaries(db_path: Path, rows: Sequence[SummaryRow]) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def _summaries_fts_is_misaligned(connection: sqlite3.Connection) -> bool:
+    """`summaries_fts` 是否与 `summaries` 错位（rowid 不等于 id，或两边行集不一致）。
+
+    `_insert_summary` 按 `rowid` 删旧行，前提是 FTS 行的 rowid 钉成了 `summaries.id`。修复前
+    产出的索引库不满足这个前提（rowid 由 FTS5 计数器自增、删除按 fqn）：某个类被重写过就会
+    错位，此时按 rowid 删会删掉**另一个类**的 FTS 行，那个类从摘要通道静默消失。
+    """
+    mismatched = connection.execute(
+        "SELECT COUNT(*) FROM summaries s JOIN summaries_fts f ON f.fqn = s.fqn"
+        " WHERE f.rowid <> s.id"
+    ).fetchone()
+
+    if mismatched is not None and int(mismatched[0]) > 0:
+        return True
+
+    # 任一侧多出来的行同样算错位：只对得上 rowid 不够，两边行集必须一致。
+    return _count(connection, "summaries") != _count(connection, "summaries_fts")
+
+
+def rebuild_summaries_fts(connection: sqlite3.Connection) -> int:
+    """按 `summaries` 表整表重建 FTS 索引（重新 jieba 分词），返回重建的行数。
+
+    清空 FTS 表再按 `summaries.id` 逐行钉 rowid：重建后 `_insert_summary` 的「按 rowid 删」
+    才重新成立，也不会误删其它类的行。
+    """
+    rows = connection.execute("SELECT id, fqn, text_zh FROM summaries").fetchall()
+    connection.execute("DELETE FROM summaries_fts")
+    connection.executemany(
+        "INSERT INTO summaries_fts (rowid, fqn, text_zh) VALUES (?, ?, ?)",
+        [(int(row[0]), str(row[1]), segment(str(row[2]))) for row in rows],
+    )
+
+    return len(rows)
 
 
 def export_summaries(db_path: Path) -> list[StoredSummary]:
@@ -783,6 +849,7 @@ def _insert_summary(
 
     FTS 行的 `rowid` 显式钉成 `summaries.id`（`RETURNING id` 拿到），删旧行时就能按 `rowid`
     精确定位：`DELETE ... WHERE fqn = ?` 在 FTS5 上是全表扫，5,000 个类时是 O(n²)。
+    这个前提不是自明的：旧库可能已经错位，`write_summaries` 在写之前会校验并在必要时整表重建。
     """
     row = connection.execute(
         "INSERT INTO summaries"
