@@ -660,3 +660,95 @@ def test_file_slice_schema_matches() -> None:
             "content",
             "truncated",
         }
+
+
+# ----------------------------------------------------------------------
+# issue #6：混合检索（`POST /v1/search`）
+# ----------------------------------------------------------------------
+
+
+def test_search_path_is_implemented() -> None:
+    """issue #6 把 `/v1/search` 从契约落到了实现。"""
+    runtime = _operation(_runtime(), "/v1/search", "post")
+    contract = _operation(_contract(), "/v1/search", "post")
+
+    assert runtime["operationId"] == contract["operationId"] == "search"
+    assert runtime["tags"] == contract["tags"] == ["retrieve"]
+    # 不覆盖 security：继承全局 cookieAuth / bearerAuth。
+    assert "security" not in runtime
+
+
+def test_search_request_schema_matches() -> None:
+    runtime = _request_schema(_runtime(), "/v1/search", "post")
+    contract = _request_schema(_contract(), "/v1/search", "post")
+
+    assert runtime["required"] == contract["required"] == ["query", "version"]
+    assert set(runtime["properties"]) == set(contract["properties"]) == {
+        "query",
+        "version",
+        "path_prefix",
+        "kind",
+        "detail",
+        "limit",
+        "max_tokens",
+    }
+    assert runtime["properties"]["detail"]["enum"] == ["locate", "snippet"]
+    assert contract["properties"]["detail"]["enum"] == ["locate", "snippet"]
+    assert runtime["properties"]["limit"]["default"] == 10
+    assert contract["properties"]["limit"]["default"] == 10
+    assert runtime["properties"]["max_tokens"]["default"] == 4000
+    assert contract["properties"]["max_tokens"]["default"] == 4000
+
+
+def test_search_response_schema_matches() -> None:
+    runtime = _response_schema(_runtime(), "/v1/search", "post")
+    contract = _response_schema(_contract(), "/v1/search", "post")
+
+    assert runtime["required"] == contract["required"] == [
+        "query",
+        "version",
+        "hits",
+        "total",
+        "took_ms",
+    ]
+    assert set(runtime["properties"]) == set(contract["properties"])
+
+    for spec in (_runtime(), _contract()):
+        hit = _deref(
+            spec, _response_schema(spec, "/v1/search", "post")["properties"]["hits"]["items"]
+        )
+
+        assert hit["required"] == ["id", "type", "version", "path", "lines", "score", "why"]
+        assert set(hit["properties"]) == {
+            "id",
+            "type",
+            "version",
+            "path",
+            "symbol",
+            "lines",
+            "score",
+            "why",
+            "summary",
+            "snippet",
+            "tokens",
+        }
+        assert hit["properties"]["why"]["items"]["enum"] == [
+            "summary",
+            "symbol",
+            "literal",
+            "reference",
+        ]
+
+
+def test_search_error_responses_are_declared() -> None:
+    """未认证 / 版本未注册 / 请求体不合法都是 problem+json（规格 §8）。"""
+    for spec in (_runtime(), _contract()):
+        responses = _operation(spec, "/v1/search", "post")["responses"]
+
+        assert {"401", "404", "422"} <= set(responses)
+
+    contract = _contract()["paths"]["/v1/search"]["post"]["responses"]
+
+    assert contract["401"]["$ref"].endswith("/Unauthorized")
+    assert contract["404"]["$ref"].endswith("/NotFound")
+    assert contract["422"]["$ref"].endswith("/BadRequest")

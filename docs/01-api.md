@@ -51,6 +51,17 @@
 
 `detail=locate` 只返回 `path + lines`，用于「先定位、后精读」的两段式调用，比直接给片段省 5–10 倍 token。
 
+**四路候选在服务端用 RRF 融合**：三路的分数量纲不可比（FTS5 的 bm25、符号匹配级别、ripgrep 无分数），
+所以不做分数加权，而是 `score(d) = Σ 1/(60 + rank_c(d))`，每路各取前 50 条候选，再按本次最高分
+归一化到 `[0, 1]`。同一实体被多路召回时累加，因此 `why` 会有多个值（顺序固定
+`summary → symbol → literal → reference`）。`total` 是**融合前的候选总数**，不因 `limit` / `max_tokens`
+截断而变。`max_tokens` 按 score 降序累加 `tokens`，超出预算即丢弃当前及之后的条目，但**至少保留第一条**。
+`path_prefix` 在候选阶段过滤（三路各自带 path 条件），而不是融合之后。
+
+字面量通道是 ripgrep 子进程（`--json --max-count 50 --max-columns 200 --max-filesize 2M --no-ignore`，
+超时 5 秒）；超时或不可用时该路返回空并写 `warn`，不影响另外几路。引用通道在 query 命中某个符号名时
+反查 `refs` 表；摘要通道本票只留接口（`summaries` 表由 #7 建，不存在时返回空、不报错）。
+
 ### 4.2 `GET /v1/symbol`
 
 `fuzzy=true` 时按「简单名 → 后缀匹配 → 编辑距离」三级降级。返回签名、父类、接口、注解、类摘要、成员列表。
@@ -166,3 +177,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | 复审修复（#21 收尾）：任务产出的版本行补写 `db_path`（产出的 `db/<version>.sqlite`，确定性路径）、`obfuscated`（checkpoint 里 `download` 阶段的值）与 `source_size_bytes`（`parse` 阶段的值）——五段任务成功后 `/v1/symbol` 等直接可用，不再需要手工注册，`/v1/versions` 与检索端点不再自相矛盾；新增 `MC_LIBRARIAN_INDEX_ENABLED`（默认 `true`）闸门，关闭时 `POST /v1/admin/jobs` 回 403，`GET /v1/admin/settings` 落地为**只读**端点（`settings.index.enabled` 从运行时配置派生，未实现的块整块省略，`PUT` 与 `settings` 表随 #11）；契约补 `Settings.index.enabled` 与 `/v1/admin/settings` 的 403/描述；前端版本页「源码目录」改为可选（留空 = 从官方 jar 跑五段）并在关闭索引时隐藏「新建索引」入口。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（#21 最后一轮）：`docs/00-overview.md` §4 的部署流程改掉不存在的 `mc-librarian index` 子命令（改为 `fetch` 取源码树 → 本地跑五段任务 → 上传 `db/<version>.sqlite` → `POST /v1/admin/versions` 注册）；`JobCreate.options` 新增可选 `obfuscated`（显式声明优先，未声明时 parse-only 缺省按「已 remap」记录）；`POST /v1/admin/versions` 的 `source_size_bytes` 改为源码树字节数（源码根不存在则保留原值，首次注册写 0）；`retry` 在闸门关闭时也回 403，runner 认领前清掉遗留 `queued` 任务并写清原因；启动时一次性回填历史遗留的 `db_path`（NULL 行且索引文件存在）；`Settings.index.java_xmx` 契约默认值改为实现的真实值 `4G`；版本页补「注册索引」入口。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（#21 关闭前最后一轮）：`JobRunner._loop` 的异常兜底自身不再抛——`_fail` 失败只记 error 日志，单次失败不会让 asyncio 任务静默死亡、任务队列永久停摆；`_finish` 事务体去掉 `assert`（`python -O` 下会失效）并把 checkpoint 取值改成缺键/类型不对退回 0 的安全形式（保留单一事务，终态 + 版本登记 + 审计仍原子）；`start()` 的 `_recover_interrupted` 包异常，DB busy 不再阻断启动；文档订正 `POST /v1/admin/versions` 的 `source_size_bytes`（源码根不存在时保留原值，首次注册写 0）；契约补 `JobCreate.options.obfuscated` 显式传 `null` 返回 422。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | issue #6：`POST /v1/search` 真正落地——四路召回（symbol / literal / reference，summary 留接口）用 RRF（k=60，每路前 50）融合、按最高分归一化；`literal` 走 ripgrep 子进程（固定参数 + 5 秒超时，不可用/超时降级为空并写 `warn`），`reference` 反查 `refs` 表，`summary` 表不存在时返回空；`why` 去重且顺序固定，`detail=locate` 不带 `snippet`/`summary`，`max_tokens` 按 score 降序截断但至少保留第一条，`path_prefix` 在候选阶段过滤，`suggestions` 按「排除 query 词 + 索引库出现次数升序」取前 5；契约补 `/v1/search` 的 401/404/422 与 `total` 语义；前端 `/browse` 升级为检索调试台（`why` 按通道着色、展开 `snippet`、建议可点击）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
