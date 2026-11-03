@@ -194,8 +194,11 @@ export interface paths {
         put?: never;
         /**
          * 中文问答（服务端检索循环）
-         * @description 默认返回 `text/event-stream`：`step` → `delta`* → `citation`* → `done`。
-         *     请求头 `Accept: application/json` 时退化为一次性返回完整 `AskResponse`。
+         * @description 服务端把检索服务层包成 5 个工具（search / symbol / references / outline / read），
+         *     跑「检索 → 读取 → 作答」循环：默认返回 `text/event-stream`：`step` → `delta`* →
+         *     `citation`* → `done`。请求头 `Accept: application/json` 时退化为一次性返回完整
+         *     `AskResponse`。模型超时 / 不可用 / 返回非法响应时降级为「已召回的代码位置」，HTTP 仍是
+         *     200。
          */
         post: operations["ask"];
         delete?: never;
@@ -726,9 +729,11 @@ export interface components {
             /** @constant */
             type: "step";
             tool: string;
-            args: {
+            args?: {
                 [key: string]: unknown;
             };
+            ok?: boolean;
+            hits?: number;
         } | {
             /** @constant */
             type: "delta";
@@ -743,6 +748,7 @@ export interface components {
             /** @constant */
             type: "done";
             usage: components["schemas"]["Usage"];
+            reason: components["schemas"]["AskReason"];
         } | {
             /** @constant */
             type: "error";
@@ -750,19 +756,28 @@ export interface components {
         };
         AskResponse: {
             answer: string;
-            citations: {
-                path?: string;
-                lines?: number[];
-                symbol?: string;
-            }[];
-            steps?: {
-                tool?: string;
-                args?: {
-                    [key: string]: unknown;
-                };
-            }[];
-            usage?: components["schemas"]["Usage"];
+            citations: components["schemas"]["Citation"][];
+            steps: components["schemas"]["AskStep"][];
+            usage: components["schemas"]["Usage"];
+            reason: components["schemas"]["AskReason"];
         };
+        AskStep: {
+            tool: string;
+            args?: {
+                [key: string]: unknown;
+            };
+        };
+        Citation: {
+            path: string;
+            lines: number[];
+            symbol?: string;
+        };
+        /**
+         * @description `done` 的收尾原因：`stop` = 模型不再调用工具、正常作答；`max_steps` = 达到检索步数上限后
+         *     强制收尾；`degraded` = 模型超时/不可用/返回非法响应，用已召回的检索结果降级作答。
+         * @enum {string}
+         */
+        AskReason: "stop" | "max_steps" | "degraded";
         Usage: {
             prompt_tokens?: number;
             completion_tokens?: number;
@@ -1287,7 +1302,10 @@ export interface operations {
             };
         };
         responses: {
-            /** @description OK */
+            /**
+             * @description OK：默认 `text/event-stream`（`step` → `delta`* → `citation`* → `done`）；
+             *     请求头 `Accept: application/json` 时一次性返回完整 `AskResponse`。
+             */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1297,19 +1315,26 @@ export interface operations {
                     "application/json": components["schemas"]["AskResponse"];
                 };
             };
-            /** @description 全局问答已暂停或超出并发 */
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
+            /** @description 问答已被管理员暂停，或并发问答已达上限（`max_concurrent_asks`） */
             429: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
             };
-            /** @description 未配置生成模型 */
+            /** @description 未配置生成模型（缺 `MC_LIBRARIAN_LLM_BASE_URL` / `_MODEL` / `_API_KEY`） */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
             };
         };
     };

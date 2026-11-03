@@ -1,0 +1,389 @@
+"""`/v1/ask` 的服务端循环：工具调用 → 上下文预算 → 收尾（含降级）（issue #8 规格 §2–§5）。
+
+一次问答就是一段异步事件流（`step` / `delta` / `citation` / `done`），HTTP 层把它翻成 SSE 或
+一次性 `AskResponse`。三种收尾都有明确交代：
+
+- 模型不再调用工具 → `done`（`reason=stop`）；
+- 达到 `max_steps` → 不再给工具、要求基于已有信息作答，`reason=max_steps`；
+- 模型超时 / 不可用 / 返回非法响应 → 用已召回的检索结果降级，`reason=degraded`（HTTP 仍 200）。
+
+上下文预算（`max_context_tokens`）超出时从最旧的工具结果开始丢弃（保留系统提示与用户问题），
+并在轨迹里记一条 `step` 事件说明丢了哪些。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from collections.abc import AsyncIterator
+from typing import Any, Final
+
+from mc_librarian.answer.client import ChatClient, ChatCompletion, ChatError
+from mc_librarian.answer.tools import SEARCH_TOOL, TOOL_SCHEMAS, ToolBox, ToolOutcome
+from mc_librarian.config import LlmPricing
+from mc_librarian.indexing.text import count_tokens
+from mc_librarian.schemas import AskReason, AskStep, Citation, Usage
+from mc_librarian.usage import estimate_cost_usd
+
+logger = logging.getLogger("mc_librarian.answer")
+
+SYSTEM_PROMPT: Final = (
+    "你是 Minecraft 源码知识库的中文问答助手。基于工具检索到的源码用中文回答，"
+    "不要凭记忆编造类名、方法名或行号。\n"
+    "工作方式：先用 search 定位相关类与方法（detail=locate 省 token），再用 outline 看骨架、"
+    "read 精读关键方法；需要时用 symbol 找符号、references 反查调用点。\n"
+    "回答里提到代码位置时写成 `路径:起始行-结束行` 的形式；检索不到就直说检索不到。"
+)
+
+# 工具轨迹里表示「丢弃了超预算的工具结果」的伪工具名（规格 §3）。
+CONTEXT_BUDGET_TOOL: Final = "context_budget"
+# 降级时 `delta` 输出的说明（规格 §5）。
+DEGRADED_NOTICE: Final = "模型暂不可用，以下是相关代码位置"
+# 达到步数上限时答案开头的说明（规格 §2）。
+MAX_STEPS_NOTICE: Final = "已达检索步数上限，以下基于已获取的信息"
+# 引用去重后的条数上限：一次问答最多给前端这么多可点击位置。
+MAX_CITATIONS: Final = 20
+# 截断到剩余预算时，单个工具结果至少留这么多 token（否则模型看不到任何内容）。
+MIN_RESULT_TOKENS: Final = 200
+
+
+class AskRun:
+    """一次 `/v1/ask` 的循环状态与事件流。`stream()` 是唯一的入口。"""
+
+    def __init__(
+        self,
+        *,
+        client: ChatClient,
+        toolbox: ToolBox,
+        question: str,
+        version: str,
+        max_steps: int,
+        max_answer_tokens: int,
+        max_context_tokens: int,
+        timeout_s: float,
+        llm_timeout_s: float,
+        pricing: LlmPricing,
+    ) -> None:
+        self.client = client
+        self.toolbox = toolbox
+        self.question = question
+        self.version = version
+        self.max_steps = max_steps
+        self.max_answer_tokens = max_answer_tokens
+        self.max_context_tokens = max_context_tokens
+        self.llm_timeout_s = llm_timeout_s
+        self.pricing = pricing
+        self.started = time.monotonic()
+        self.deadline = self.started + timeout_s
+
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.steps: list[AskStep] = []
+        self.citations: list[Citation] = []
+        self.answer = ""
+        self.reason: AskReason = "stop"
+
+    @property
+    def latency_ms(self) -> int:
+        """端到端耗时（含所有工具调用）。"""
+        return int((time.monotonic() - self.started) * 1000)
+
+    @property
+    def usage(self) -> Usage:
+        return Usage(
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+            cost_usd=estimate_cost_usd(
+                self.prompt_tokens, self.completion_tokens, self.pricing
+            ),
+            latency_ms=self.latency_ms,
+        )
+
+    async def stream(self) -> AsyncIterator[dict[str, Any]]:
+        """跑完一次问答，逐个产出事件 payload（`type` 字段区分）。"""
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": self.question},
+        ]
+
+        for _ in range(self.max_steps):
+            if self._expired():
+                async for event in self._degrade("总超时"):
+                    yield event
+
+                return
+
+            try:
+                completion = await self._call(messages, TOOL_SCHEMAS)
+            except (ChatError, TimeoutError, OSError) as error:
+                async for event in self._degrade(f"模型调用失败：{error}"):
+                    yield event
+
+                return
+
+            if not completion.tool_calls:
+                self.answer = completion.content.strip()
+                async for event in self._finish("stop"):
+                    yield event
+
+                return
+
+            messages.append(_assistant_message(completion))
+
+            for call in completion.tool_calls:
+                args, problem = _parse_args(call.arguments)
+                yield {"type": "step", "tool": call.name, "args": args}
+                self.steps.append(AskStep(tool=call.name, args=args))
+
+                if problem is None:
+                    outcome = await asyncio.to_thread(self.toolbox.execute, call.name, args)
+                else:
+                    outcome = ToolOutcome(ok=False, text=problem)
+
+                yield {
+                    "type": "step",
+                    "tool": call.name,
+                    "ok": outcome.ok,
+                    "hits": outcome.hits,
+                }
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": outcome.text,
+                        "_tool": True,
+                        "_label": f"{call.name}#{len(self.steps)}",
+                    }
+                )
+                self._collect(outcome.citations)
+
+                dropped = self._fit_budget(messages)
+
+                if dropped:
+                    yield {
+                        "type": "step",
+                        "tool": CONTEXT_BUDGET_TOOL,
+                        "args": {"dropped": dropped},
+                    }
+
+        async for event in self._forced_finish(messages):
+            yield event
+
+    async def _forced_finish(
+        self, messages: list[dict[str, Any]]
+    ) -> AsyncIterator[dict[str, Any]]:
+        """达到 `max_steps`：不再给模型工具，要求它基于已有信息作答（规格 §2）。"""
+        if self._expired():
+            async for event in self._degrade("总超时"):
+                yield event
+
+            return
+
+        try:
+            completion = await self._call(messages, [])
+        except (ChatError, TimeoutError, OSError) as error:
+            async for event in self._degrade(f"模型调用失败：{error}"):
+                yield event
+
+            return
+
+        # 强制收尾这一次就算模型还想调工具也不执行：拿它的文本作答（可能是空）。
+        body = completion.content.strip()
+        self.answer = f"{MAX_STEPS_NOTICE}。\n{body}".strip()
+        async for event in self._finish("max_steps"):
+            yield event
+
+    async def _degrade(self, detail: str) -> AsyncIterator[dict[str, Any]]:
+        """模型不可用时的降级（规格 §5）：HTTP 仍 200，用已召回的检索结果作答。
+
+        `detail` 只进日志：不把模型返回的内部错误原文回给调用方。
+        """
+        logger.warning("问答降级（%s）：%s", self.version, detail)
+
+        # 第一步就失败：还没召回任何东西，先用用户问题跑一次 search 拿位置。
+        if not self.citations:
+            args: dict[str, Any] = {"query": self.question, "detail": "locate", "limit": 10}
+            yield {"type": "step", "tool": SEARCH_TOOL, "args": args}
+            self.steps.append(AskStep(tool=SEARCH_TOOL, args=args))
+            outcome = await asyncio.to_thread(self.toolbox.execute, SEARCH_TOOL, args)
+            yield {
+                "type": "step",
+                "tool": SEARCH_TOOL,
+                "ok": outcome.ok,
+                "hits": outcome.hits,
+            }
+            self._collect(outcome.citations)
+
+        self.answer = DEGRADED_NOTICE
+        async for event in self._finish("degraded"):
+            yield event
+
+    async def _finish(self, reason: AskReason) -> AsyncIterator[dict[str, Any]]:
+        """统一收尾：`delta`* → `citation`* → `done`。"""
+        self.reason = reason
+
+        for chunk in _delta_chunks(self.answer):
+            yield {"type": "delta", "text": chunk}
+
+        for citation in self.citations:
+            yield {
+                "type": "citation",
+                "path": citation.path,
+                "lines": citation.lines,
+                "symbol": citation.symbol,
+            }
+
+        yield {"type": "done", "usage": self.usage.model_dump(), "reason": reason}
+
+    async def _call(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> ChatCompletion:
+        """调一次模型（阻塞调用丢进线程），并累计用量。"""
+        remaining = max(self.deadline - time.monotonic(), 1.0)
+        completion = await asyncio.to_thread(
+            self.client.complete,
+            messages=_payload_messages(messages),
+            tools=tools,
+            max_tokens=self.max_answer_tokens,
+            timeout=min(self.llm_timeout_s, remaining),
+        )
+        self.prompt_tokens += completion.usage.prompt_tokens
+        self.completion_tokens += completion.usage.completion_tokens
+
+        return completion
+
+    def _expired(self) -> bool:
+        return time.monotonic() > self.deadline
+
+    def _collect(self, citations: tuple[Citation, ...]) -> None:
+        """收集引用：按 (路径, 行区间, 符号) 去重，最多留 `MAX_CITATIONS` 条。"""
+        seen = {(item.path, tuple(item.lines), item.symbol) for item in self.citations}
+
+        for item in citations:
+            key = (item.path, tuple(item.lines), item.symbol)
+
+            if key in seen or len(self.citations) >= MAX_CITATIONS:
+                continue
+
+            seen.add(key)
+            self.citations.append(item)
+
+    def _fit_budget(self, messages: list[dict[str, Any]]) -> list[str]:
+        """把工具结果的总量压进 `max_context_tokens`，返回被丢弃的标签（规格 §3）。"""
+        dropped: list[str] = []
+
+        while _tool_tokens(messages) > self.max_context_tokens and _exchange_count(messages) > 1:
+            start = _first_exchange(messages)
+
+            if start is None:
+                break
+
+            end = start + 1
+
+            while end < len(messages) and messages[end].get("_tool"):
+                end += 1
+
+            dropped.extend(str(item["_label"]) for item in messages[start:end] if "_label" in item)
+            del messages[start:end]
+
+        # 只剩最后一个工具结果仍超预算：按剩余预算把它截断（保留系统提示与用户问题）。
+        if _tool_tokens(messages) > self.max_context_tokens:
+            self._truncate_newest(messages)
+
+        return dropped
+
+    def _truncate_newest(self, messages: list[dict[str, Any]]) -> None:
+        index = next(
+            (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("_tool")), None
+        )
+
+        if index is None:
+            return
+
+        others = sum(
+            count_tokens(str(item.get("content") or ""))
+            for position, item in enumerate(messages)
+            if item.get("_tool") and position != index
+        )
+        budget = max(self.max_context_tokens - others, MIN_RESULT_TOKENS)
+        content = str(messages[index].get("content") or "")
+        messages[index]["content"] = _truncate_to_tokens(content, budget)
+
+
+def _payload_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """去掉内部标记（`_tool` / `_label`）后的消息，才是发给模型的。"""
+    return [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in messages
+    ]
+
+
+def _assistant_message(completion: ChatCompletion) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": completion.content or None,
+        "tool_calls": [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments},
+            }
+            for call in completion.tool_calls
+        ],
+        "_exchange": True,
+    }
+
+
+def _parse_args(arguments: str) -> tuple[dict[str, Any], str | None]:
+    """解析工具调用参数；不是合法 JSON 对象时返回空参数 + 给模型的失败说明。"""
+    try:
+        loaded = json.loads(arguments or "{}")
+    except json.JSONDecodeError as error:
+        return {}, f"工具参数不是合法 JSON：{error}"
+
+    if not isinstance(loaded, dict):
+        return {}, "工具参数不是 JSON 对象"
+
+    return loaded, None
+
+
+def _delta_chunks(text: str) -> list[str]:
+    """答案拆成逐行增量：前端按事件追加渲染，不必等整段答案。"""
+    return text.splitlines(keepends=True)
+
+
+def _tool_tokens(messages: list[dict[str, Any]]) -> int:
+    return sum(
+        count_tokens(str(item.get("content") or "")) for item in messages if item.get("_tool")
+    )
+
+
+def _exchange_count(messages: list[dict[str, Any]]) -> int:
+    return sum(1 for item in messages if item.get("_exchange"))
+
+
+def _first_exchange(messages: list[dict[str, Any]]) -> int | None:
+    return next((i for i, item in enumerate(messages) if item.get("_exchange")), None)
+
+
+def _truncate_to_tokens(text: str, limit: int) -> str:
+    """把文本截到不超过 `limit` 个 token（按字符二分，口径与 `count_tokens` 一致）。"""
+    if limit <= 0:
+        return ""
+
+    if count_tokens(text) <= limit:
+        return text
+
+    low, high = 0, len(text)
+
+    while low < high:
+        middle = (low + high + 1) // 2
+
+        if count_tokens(text[:middle]) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+
+    return text[:low] + "\n…（超出上下文预算，已截断）"

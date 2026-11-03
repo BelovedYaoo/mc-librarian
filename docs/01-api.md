@@ -84,17 +84,28 @@ query 与入库时一样先过 jieba 分词，否则两字词（「刷怪」）�
 ## 5. `/v1/ask`：SSE 事件序列
 
 ```
-event: step      {"tool":"kb_search","args":{"query":"刷怪上限","version":"1.20.1"}}
-event: step      {"tool":"kb_read","args":{"path":"...","start":120,"end":260}}
+event: step      {"tool":"search","args":{"query":"刷怪上限","detail":"locate"}}
+event: step      {"tool":"search","ok":true,"hits":3}
+event: step      {"tool":"read","args":{"path":"...","start":120,"end":260}}
 event: delta     {"text":"1.18 之后…"}
 event: citation  {"path":"net/minecraft/world/entity/MobCategory.java","lines":[12,88],"symbol":"..."}
-event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_usd":0.0021,"latency_ms":9300}}
+event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_usd":0.0021,"latency_ms":9300},"reason":"stop"}
 ```
 
-- `step` 让前端能把「正在检索什么」画出来，也让调用方知道答案的依据路径。
+- **工具集固定 5 个**（`search` / `symbol` / `references` / `outline` / `read`），参数与上面四个检索端点同义；
+  工具实现复用同一个检索服务层（`mc_librarian.retrieval`），不另写一套。`version` 由请求给出，模型改不了。
+- `step` 让前端能把「正在检索什么」画出来，也让调用方知道答案的依据路径；同一个事件类型出现两次
+  （调用前带 `args`，返回后带 `ok`/`hits`）。
 - `citation` 与 `delta` 分离，前端可以把引用做成可点击的代码定位。
+- `reason` 三种取值：`stop`（模型不再调工具）、`max_steps`（达到检索步数上限后强制收尾）、
+  `degraded`（模型超时/不可用/返回非法响应）。
+- **降级不返回 500**：模型不可用时用已召回的检索结果组装回答（第一步就失败则先跑一次
+  `search` 拿位置），HTTP 仍是 `200`，`done.reason` 是 `degraded`。
 - 请求头 `Accept: application/json` 时退化为一次性返回完整 `AskResponse`，方便脚本调用。
-- 全局开关 `settings.ask.enabled=false` 时返回 `429`，用于异常时快速止血。
+- 全局开关 `settings.ask.enabled=false` 时返回 `429`（异常时快速止血）；并发问答达到
+  `settings.security.max_concurrent_asks` 时同样返回 `429`；未配置生成模型返回 `503`。
+- 每次请求写**一行** `usage`（含降级的情况）：`cost_usd` 由 `MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` /
+  `MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M` 算，**未配单价时记 0**（只记 token、不计成本）。
 
 ## 6. 账号体系
 

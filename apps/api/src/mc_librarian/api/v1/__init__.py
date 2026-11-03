@@ -2,8 +2,8 @@
 
 已挂载：meta（health / versions）、auth（setup / login / logout / me / tokens / invites）、
 admin（users / audit / versions 注册 / jobs 任务框架 / settings 只读）、
-retrieve+read（search 混合检索 / symbol / references / outline / read）。
-answer（`/v1/ask`）由后续 ticket 挂载。
+retrieve+read（search 混合检索 / symbol / references / outline / read）、
+answer（`/v1/ask` 问答）。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from . import (
     admin_jobs,
     admin_settings,
     admin_versions,
+    answer,
     auth,
     health,
     invites,
@@ -36,5 +37,6 @@ api_router.include_router(admin_versions.router)
 api_router.include_router(admin_jobs.router)
 api_router.include_router(admin_settings.router)
 api_router.include_router(retrieval.router)
+api_router.include_router(answer.router)
 
 __all__ = ["api_router"]

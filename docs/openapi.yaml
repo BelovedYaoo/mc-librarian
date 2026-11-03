@@ -271,8 +271,11 @@ paths:
       tags: [answer]
       summary: 中文问答（服务端检索循环）
       description: |
-        默认返回 `text/event-stream`：`step` → `delta`* → `citation`* → `done`。
-        请求头 `Accept: application/json` 时退化为一次性返回完整 `AskResponse`。
+        服务端把检索服务层包成 5 个工具（search / symbol / references / outline / read），
+        跑「检索 → 读取 → 作答」循环：默认返回 `text/event-stream`：`step` → `delta`* →
+        `citation`* → `done`。请求头 `Accept: application/json` 时退化为一次性返回完整
+        `AskResponse`。模型超时 / 不可用 / 返回非法响应时降级为「已召回的代码位置」，HTTP 仍是
+        200。
       operationId: ask
       requestBody:
         required: true
@@ -281,16 +284,27 @@ paths:
             schema: { $ref: "#/components/schemas/AskRequest" }
       responses:
         "200":
-          description: OK
+          description: |
+            OK：默认 `text/event-stream`（`step` → `delta`* → `citation`* → `done`）；
+            请求头 `Accept: application/json` 时一次性返回完整 `AskResponse`。
           content:
             text/event-stream:
               schema: { $ref: "#/components/schemas/AskEvent" }
             application/json:
               schema: { $ref: "#/components/schemas/AskResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/BadRequest" }
         "429":
-          description: 全局问答已暂停或超出并发
+          description: 问答已被管理员暂停，或并发问答已达上限（`max_concurrent_asks`）
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         "503":
-          description: 未配置生成模型
+          description: 未配置生成模型（缺 `MC_LIBRARIAN_LLM_BASE_URL` / `_MODEL` / `_API_KEY`）
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
 
   /v1/auth/login:
     post:
@@ -1015,11 +1029,13 @@ components:
     AskEvent:
       oneOf:
         - type: object
-          required: [type, tool, args]
+          required: [type, tool]
           properties:
             type: { type: string, const: step }
             tool: { type: string }
             args: { type: object, additionalProperties: true }
+            ok: { type: boolean }
+            hits: { type: integer }
         - type: object
           required: [type, text]
           properties:
@@ -1033,10 +1049,11 @@ components:
             lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
             symbol: { type: string }
         - type: object
-          required: [type, usage]
+          required: [type, usage, reason]
           properties:
             type: { type: string, const: done }
             usage: { $ref: "#/components/schemas/Usage" }
+            reason: { $ref: "#/components/schemas/AskReason" }
         - type: object
           required: [type, problem]
           properties:
@@ -1045,25 +1062,39 @@ components:
 
     AskResponse:
       type: object
-      required: [answer, citations]
+      required: [answer, citations, steps, usage, reason]
       properties:
         answer: { type: string }
         citations:
           type: array
-          items:
-            type: object
-            properties:
-              path: { type: string }
-              lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
-              symbol: { type: string }
+          items: { $ref: "#/components/schemas/Citation" }
         steps:
           type: array
-          items:
-            type: object
-            properties:
-              tool: { type: string }
-              args: { type: object, additionalProperties: true }
+          items: { $ref: "#/components/schemas/AskStep" }
         usage: { $ref: "#/components/schemas/Usage" }
+        reason: { $ref: "#/components/schemas/AskReason" }
+
+    AskStep:
+      type: object
+      required: [tool]
+      properties:
+        tool: { type: string }
+        args: { type: object, additionalProperties: true }
+
+    Citation:
+      type: object
+      required: [path, lines]
+      properties:
+        path: { type: string }
+        lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+        symbol: { type: string }
+
+    AskReason:
+      type: string
+      enum: [stop, max_steps, degraded]
+      description: |
+        `done` 的收尾原因：`stop` = 模型不再调用工具、正常作答；`max_steps` = 达到检索步数上限后
+        强制收尾；`degraded` = 模型超时/不可用/返回非法响应，用已召回的检索结果降级作答。
 
     Usage:
       type: object

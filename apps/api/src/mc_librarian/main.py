@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
 from mc_librarian import __version__
+from mc_librarian.answer import AskLimiter
 from mc_librarian.api.v1 import api_router
 from mc_librarian.api.v1.admin_versions import read_index_stats
 from mc_librarian.config import Settings, get_settings
@@ -25,6 +26,7 @@ from mc_librarian.indexing.summarize import warmup_segmentation
 from mc_librarian.indexing.text import warmup_token_counting
 from mc_librarian.jobs import JobRunner, store
 from mc_librarian.problems import component_schema, install_exception_handlers
+from mc_librarian.schemas import answer_schemas
 
 logger = logging.getLogger("mc_librarian")
 
@@ -89,6 +91,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     database: Database = app.state.db
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     source = "MC_LIBRARIAN_DATA_DIR" if settings.data_dir_from_env else "默认（仓库之外）"
+
+    # 问答并发闸门随应用创建：槽位数来自部署配置，测试直接拿 app.state 断言（规格 §7）。
+    app.state.ask_limiter = AskLimiter(settings.max_concurrent_asks)
 
     version = database.initialize()
 
@@ -178,6 +183,10 @@ def _build_openapi(app: FastAPI) -> dict[str, Any]:
     components.setdefault("securitySchemes", {}).update(SECURITY_SCHEMES)
     # 错误响应统一引用 `#/components/schemas/Problem`，这里保证它一定在 components 里。
     components.setdefault("schemas", {}).setdefault("Problem", component_schema())
+    # `/v1/ask` 的 200 有两个 content type，schema 只能写成裸 `$ref`；裸 `$ref` 不会自动进
+    # components（同 `Problem`），所以显式补上（含嵌套模型）。
+    for name, definition in answer_schemas().items():
+        components["schemas"].setdefault(name, definition)
     schema["security"] = GLOBAL_SECURITY
 
     app.openapi_schema = schema

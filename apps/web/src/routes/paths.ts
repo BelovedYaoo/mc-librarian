@@ -10,6 +10,7 @@ export const paths = {
   jobs: '/jobs',
   audit: '/audit',
   browse: '/browse',
+  ask: '/ask',
   page404: '/error/404',
 };
 

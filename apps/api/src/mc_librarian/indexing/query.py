@@ -124,9 +124,16 @@ class FileRecord:
     package: str | None
 
 
-def open_readonly(path: Path) -> sqlite3.Connection:
-    """只读打开索引库（规格 §9）。"""
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+def open_readonly(path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """只读打开索引库（规格 §9）。
+
+    `check_same_thread=False` 给 `/v1/ask`：它的工具调用跑在 `asyncio.to_thread` 的工作线程里，
+    而连接是在事件循环线程上建的（同一请求内串行使用，不跨请求共享）。同步端点每次都在
+    同一个线程池线程里建/用/关连接，用默认的 `True` 就够。
+    """
+    connection = sqlite3.connect(
+        f"file:{path}?mode=ro", uri=True, check_same_thread=check_same_thread
+    )
     connection.row_factory = sqlite3.Row
 
     return connection

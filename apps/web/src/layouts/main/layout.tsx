@@ -41,6 +41,7 @@ export function MainLayout({ children }: MainLayoutProps) {
     { label: '概览', to: paths.home, end: true },
     { label: '版本', to: paths.versions },
     { label: '检索', to: paths.browse },
+    { label: '问答', to: paths.ask },
     ...(user?.role === 'admin'
       ? [
           { label: '任务', to: paths.jobs },

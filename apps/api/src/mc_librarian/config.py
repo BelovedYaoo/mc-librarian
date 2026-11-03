@@ -39,6 +39,11 @@ LLM_BASE_URL_ENV: Final = "MC_LIBRARIAN_LLM_BASE_URL"
 LLM_MODEL_ENV: Final = "MC_LIBRARIAN_LLM_MODEL"
 LLM_API_KEY_ENV: Final = "MC_LIBRARIAN_LLM_API_KEY"
 
+# 单价环境变量（每百万 token 的美元价）。未配置时 `cost_usd` 记 0：只记 token、不计成本，
+# 不编一个假单价。
+LLM_INPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M"
+LLM_OUTPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M"
+
 
 def find_repo_root(start: Path | None = None) -> Path | None:
     """从 `start`（默认本文件）向上查找仓库根，找不到返回 None。"""
@@ -123,6 +128,20 @@ class Settings(BaseSettings):
     # 摘要生成的并发批次上限（规格 §3 定死 4，用 asyncio 信号量限制）。
     summary_concurrency: int = Field(default=4, ge=1, le=64)
 
+    # 问答（#8）：服务端「检索 → 读取 → 作答」循环。
+    # `MC_LIBRARIAN_ASK_ENABLED=false` 时 `/v1/ask` 返回 429（异常时快速止血）。
+    ask_enabled: bool = True
+    # 单次问答的总超时（秒）：超时走降级，不冒泡成 500。
+    ask_timeout_s: int = Field(default=120, ge=1, le=3600)
+    # 工具结果累积的上下文预算（token）：超出时从最旧的工具结果开始丢弃（规格 §3）。
+    ask_max_context_tokens: int = Field(default=60000, ge=1000)
+    # 同时在跑的问答数上限（`settings.security.max_concurrent_asks`）：超出返回 429。
+    max_concurrent_asks: int = Field(default=4, ge=1, le=64)
+
+    # 单价（每百万 token 的美元价），只用于 `usage.cost_usd`；未配置时按 0 计。
+    llm_input_price_per_m: float | None = None
+    llm_output_price_per_m: float | None = None
+
     # 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）：关掉后 `POST /v1/admin/jobs` 返回 403。
     # 完整五段（下载 + 反编译 + 全树解析）跑在服务进程内，反编译一个版本要 3–4 GiB；
     # 生产节点内存不够，所以在节点上设 false，索引在本地工作站产出后用
@@ -182,8 +201,16 @@ class LlmConfig:
     api_key: str
 
 
+@dataclass(frozen=True)
+class LlmPricing:
+    """每百万 token 的美元单价；未配置的那一侧是 0（只记 token、不计成本）。"""
+
+    input_per_m: float
+    output_per_m: float
+
+
 class LlmConfigError(RuntimeError):
-    """LLM 未配置；`summarize` 阶段把它翻成可操作的失败，不静默跳过。"""
+    """LLM 未配置；`summarize` 阶段与 `/v1/ask` 把它翻成可操作的失败，不静默跳过。"""
 
 
 def resolve_llm_config(settings: Settings) -> LlmConfig:
@@ -211,4 +238,12 @@ def resolve_llm_config(settings: Settings) -> LlmConfig:
         base_url=str(settings.llm_base_url).rstrip("/"),
         model=str(settings.llm_model),
         api_key=str(settings.llm_api_key),
+    )
+
+
+def resolve_llm_pricing(settings: Settings) -> LlmPricing:
+    """`usage.cost_usd` 用的单价；未配置的那一侧按 0 计，不编假单价。"""
+    return LlmPricing(
+        input_per_m=settings.llm_input_price_per_m or 0.0,
+        output_per_m=settings.llm_output_price_per_m or 0.0,
     )

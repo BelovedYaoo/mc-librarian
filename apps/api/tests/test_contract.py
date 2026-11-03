@@ -752,3 +752,106 @@ def test_search_error_responses_are_declared() -> None:
     assert contract["401"]["$ref"].endswith("/Unauthorized")
     assert contract["404"]["$ref"].endswith("/NotFound")
     assert contract["422"]["$ref"].endswith("/BadRequest")
+
+
+# ----------------------------------------------------------------------
+# issue #8：中文问答（`POST /v1/ask`）
+# ----------------------------------------------------------------------
+
+
+def test_ask_path_is_implemented() -> None:
+    """issue #8 把 `/v1/ask` 从契约落到了实现。"""
+    runtime = _operation(_runtime(), "/v1/ask", "post")
+    contract = _operation(_contract(), "/v1/ask", "post")
+
+    assert runtime["operationId"] == contract["operationId"] == "ask"
+    assert runtime["tags"] == contract["tags"] == ["answer"]
+    # 不覆盖 security：继承全局 cookieAuth / bearerAuth。
+    assert "security" not in runtime
+
+
+def test_ask_declares_both_response_content_types() -> None:
+    """默认 SSE、`Accept: application/json` 一次性返回，两个 content type 都要声明。"""
+    for spec in (_runtime(), _contract()):
+        content = _operation(spec, "/v1/ask", "post")["responses"]["200"]["content"]
+
+        assert set(content) == {"text/event-stream", "application/json"}
+        assert content["text/event-stream"]["schema"]["$ref"].endswith("/AskEvent")
+        assert content["application/json"]["schema"]["$ref"].endswith("/AskResponse")
+
+
+def _error_response(spec: dict[str, Any], status: str) -> dict[str, Any]:
+    """`/v1/ask` 的某个错误响应；契约里是 `$ref`，运行时是内联的 problem+json。"""
+    response: dict[str, Any] = _operation(spec, "/v1/ask", "post")["responses"][status]
+    ref = response.get("$ref")
+
+    if isinstance(ref, str):
+        *_, name = ref.split("/")
+        resolved: dict[str, Any] = spec["components"]["responses"][name]
+        return resolved
+
+    return response
+
+
+def test_ask_error_responses_are_declared() -> None:
+    """未认证 / 版本未注册 / 请求体不合法 / 开关或并发 / 未配置模型都是 problem+json。"""
+    for spec in (_runtime(), _contract()):
+        responses = _operation(spec, "/v1/ask", "post")["responses"]
+
+        assert {"200", "401", "404", "422", "429", "503"} <= set(responses)
+
+        for status in ("401", "404", "422", "429", "503"):
+            assert "application/problem+json" in _error_response(spec, status)["content"]
+
+
+def _ask_event_branch(spec: dict[str, Any], kind: str) -> dict[str, Any]:
+    """`AskEvent` 里 `type == kind` 的那一支（运行时的分支是 `$ref`）。"""
+    schema = spec["components"]["schemas"]["AskEvent"]
+    branches = [_deref(spec, branch) for branch in schema["oneOf"]]
+
+    return next(
+        branch for branch in branches if branch["properties"]["type"]["const"] == kind
+    )
+
+
+def _enum_values(spec: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    """枚举取值；运行时可能内联（pydantic 对 Literal 不建组件），契约里是 `$ref`。"""
+    ref = schema.get("$ref")
+
+    if isinstance(ref, str):
+        *_, name = ref.split("/")
+        schema = spec["components"]["schemas"][name]
+
+    values: list[str] = schema["enum"]
+
+    return values
+
+
+def test_ask_done_event_carries_a_reason() -> None:
+    """`done` 必须带 `reason`（正常 / `max_steps` / 降级），契约与运行时都要有。"""
+    for spec in (_runtime(), _contract()):
+        done = _ask_event_branch(spec, "done")
+
+        assert "reason" in done["required"]
+        assert _enum_values(spec, done["properties"]["reason"]) == [
+            "stop",
+            "max_steps",
+            "degraded",
+        ]
+
+
+def test_ask_step_event_carries_ok_and_hits() -> None:
+    """`step` 有两种形态：调用前带 `args`，返回后带 `ok`/`hits`（规格 §4）。"""
+    for spec in (_runtime(), _contract()):
+        step = _ask_event_branch(spec, "step")
+
+        assert set(step["properties"]) == {"type", "tool", "args", "ok", "hits"}
+        assert step["required"] == ["type", "tool"]
+
+
+def test_ask_request_schema_matches() -> None:
+    runtime = _request_schema(_runtime(), "/v1/ask", "post")
+    contract = _request_schema(_contract(), "/v1/ask", "post")
+
+    assert runtime["required"] == contract["required"] == ["question", "version"]
+    assert set(runtime["properties"]) == set(contract["properties"])

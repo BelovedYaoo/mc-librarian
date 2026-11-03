@@ -15,25 +15,30 @@ from fastapi import APIRouter, Query
 
 from mc_librarian.auth.deps import CurrentUser, DbConn, SettingsDep
 from mc_librarian.config import Settings
-from mc_librarian.indexing import java, query
+from mc_librarian.indexing import query
 from mc_librarian.indexing.layout import source_root
-from mc_librarian.indexing.text import count_tokens, split_lines
+from mc_librarian.indexing.text import split_lines
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
-from mc_librarian.retrieval import search as run_search
+from mc_librarian.retrieval import (
+    RetrievalNotFound,
+    file_outline,
+    read_source,
+    reference_list,
+    slice_lines,
+    symbol_matches,
+)
+from mc_librarian.retrieval import (
+    search as run_search,
+)
 from mc_librarian.schemas import (
     FileSlice,
     Outline,
-    OutlineClass,
-    OutlineMethod,
-    Reference,
     ReferenceResponse,
     SearchRequest,
     SearchResponse,
-    SymbolDetail,
     SymbolKind,
     SymbolMatches,
-    SymbolMember,
 )
 
 router = APIRouter()
@@ -54,7 +59,7 @@ def endpoint_responses() -> dict[int | str, dict[str, Any]]:
     }
 
 
-def _require_index(conn: sqlite3.Connection, settings: Settings, version: str) -> Path:
+def require_index(conn: sqlite3.Connection, settings: Settings, version: str) -> Path:
     """规格 §9：版本未注册 / `db_path` 为空 / 文件不存在一律 404，返回索引文件路径。"""
     registered, db_path = store.index_db_path(conn, version)
 
@@ -70,17 +75,6 @@ def _require_index(conn: sqlite3.Connection, settings: Settings, version: str) -
         raise ProblemException(404, NOT_FOUND_TITLE, f"索引文件不存在：{path}")
 
     return path
-
-
-def _read_source(settings: Settings, version: str, path: str) -> str:
-    """读 `<data_dir>/src/<version>/<path>`；缺失或越出源码根一律 404（规格 §16）。"""
-    root = source_root(settings.data_dir, version).resolve()
-    candidate = (root / path).resolve()
-
-    if not candidate.is_relative_to(root) or not candidate.is_file():
-        raise ProblemException(404, NOT_FOUND_TITLE, f"该版本的源码树缺失（期望路径 {root}）")
-
-    return candidate.read_text(encoding="utf-8", errors="replace")
 
 
 @router.post(
@@ -107,7 +101,7 @@ def search(
     settings: SettingsDep,
     body: SearchRequest,
 ) -> SearchResponse:
-    index = query.open_readonly(_require_index(conn, settings, body.version))
+    index = query.open_readonly(require_index(conn, settings, body.version))
 
     try:
         return run_search(index, settings, body)
@@ -135,15 +129,12 @@ def get_symbol(
     fuzzy: Annotated[bool, Query()] = True,
     kind: Annotated[SymbolKind, Query()] = "any",
 ) -> SymbolMatches:
-    index = query.open_readonly(_require_index(conn, settings, version))
+    index = query.open_readonly(require_index(conn, settings, version))
 
     try:
-        hits = query.find_symbols(index, name, fuzzy=fuzzy, kind=kind)
-        matches = [_to_symbol_detail(index, hit) for hit in hits]
+        return symbol_matches(index, name, fuzzy=fuzzy, kind=kind)
     finally:
         index.close()
-
-    return SymbolMatches(matches=matches)
 
 
 @router.get(
@@ -162,26 +153,12 @@ def get_references(
     symbol: Annotated[str, Query(description="方法名或 `Class#method`")],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> ReferenceResponse:
-    index = query.open_readonly(_require_index(conn, settings, version))
+    index = query.open_readonly(require_index(conn, settings, version))
 
     try:
-        hits = query.find_references(index, symbol, limit=limit)
+        return reference_list(index, version, symbol, limit=limit)
     finally:
         index.close()
-
-    return ReferenceResponse(
-        symbol=symbol,
-        version=version,
-        references=[
-            Reference(
-                path=hit.path,
-                lines=[hit.line, hit.line],
-                enclosing=hit.enclosing,
-                kind=hit.kind,
-            )
-            for hit in hits
-        ],
-    )
 
 
 @router.get(
@@ -199,42 +176,14 @@ def get_outline(
     version: VersionQuery,
     path: PathQuery,
 ) -> Outline:
-    index = query.open_readonly(_require_index(conn, settings, version))
+    index = query.open_readonly(require_index(conn, settings, version))
 
     try:
-        record = query.find_file(index, path)
-
-        if record is None:
-            raise ProblemException(404, NOT_FOUND_TITLE, f"索引里没有文件：{path}")
-
-        classes = query.file_outline(index, record.id)
+        return file_outline(index, settings, version, path)
+    except RetrievalNotFound as error:
+        raise ProblemException(404, NOT_FOUND_TITLE, str(error)) from error
     finally:
         index.close()
-
-    imports = java.parse_imports(_read_source(settings, version, path))
-
-    return Outline(
-        path=path,
-        package=record.package,
-        imports=imports,
-        classes=[
-            OutlineClass(
-                fqn=item.fqn,
-                kind=item.kind,
-                signature=item.signature,
-                lines=[item.start_line, item.end_line],
-                methods=[
-                    OutlineMethod(
-                        name=method.name,
-                        signature=method.signature,
-                        lines=[method.start_line, method.end_line],
-                    )
-                    for method in item.methods
-                ],
-            )
-            for item in classes
-        ],
-    )
 
 
 @router.get(
@@ -256,8 +205,17 @@ def read_file(
     max_tokens: Annotated[int, Query(ge=100, le=32000)] = 4000,
 ) -> FileSlice:
     # 行号校验自己做（规格 §8）：三条越界都要在 detail 里带上文件总行数。
-    _require_index(conn, settings, version)
-    lines = split_lines(_read_source(settings, version, path))
+    require_index(conn, settings, version)
+    text = read_source(settings, version, path)
+
+    if text is None:
+        raise ProblemException(
+            404,
+            NOT_FOUND_TITLE,
+            f"该版本的源码树缺失（期望路径 {source_root(settings.data_dir, version)}）",
+        )
+
+    lines = split_lines(text)
     total_lines = len(lines)
 
     if start < 1 or end < start or end > total_lines:
@@ -265,53 +223,4 @@ def read_file(
             422, BAD_REQUEST_TITLE, f"行号超出范围：文件共 {total_lines} 行"
         )
 
-    selected = lines[start - 1 : end]
-    kept: list[str] = []
-    used = 0
-
-    for line in selected:
-        cost = count_tokens(line + "\n")
-
-        if kept and used + cost > max_tokens:
-            break
-
-        kept.append(line)
-        used += cost
-
-    return FileSlice(
-        path=path,
-        version=version,
-        start=start,
-        end=start + len(kept) - 1,
-        total_lines=total_lines,
-        content="\n".join(kept),
-        truncated=len(kept) < len(selected),
-    )
-
-
-def _to_symbol_detail(connection: sqlite3.Connection, hit: query.SymbolHit) -> SymbolDetail:
-    """符号命中 → `SymbolDetail`；类的命中附带成员列表（方法 + 字段）。"""
-    members: list[SymbolMember] = []
-
-    if hit.kind == "class":
-        members = [
-            SymbolMember(
-                kind=member.kind,
-                name=member.name,
-                signature=member.signature,
-                lines=[member.start_line, member.end_line],
-            )
-            for member in query.class_members(connection, hit.class_id)
-        ]
-
-    return SymbolDetail(
-        fqn=hit.fqn,
-        kind=hit.kind,
-        signature=hit.signature,
-        path=hit.path,
-        lines=[hit.start_line, hit.end_line],
-        superclass=hit.superclass,
-        interfaces=hit.interfaces,
-        annotations=hit.annotations,
-        members=members,
-    )
+    return slice_lines(lines, path, version, start, end, max_tokens)

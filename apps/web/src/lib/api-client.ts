@@ -74,6 +74,26 @@ export type JobCreate = components['schemas']['JobCreate'];
 
 export type JobLog = components['schemas']['JobLog'];
 
+/** 问答请求体（`POST /v1/ask`）；`version` 必选，模型不可改。 */
+export type AskRequest =
+  paths['/v1/ask']['post']['requestBody']['content']['application/json'];
+
+/** 一次性问答响应（`Accept: application/json`）：含 `steps` 与 `citations`。 */
+export type AskResponse = components['schemas']['AskResponse'];
+
+/** SSE 事件（`step` / `delta` / `citation` / `done` / `error`）。 */
+export type AskEvent = components['schemas']['AskEvent'];
+
+export type AskReason = components['schemas']['AskReason'];
+
+export type AskUsage = components['schemas']['Usage'];
+
+/** 一条代码位置引用；点击后内联展开代码。 */
+export type Citation = components['schemas']['Citation'];
+
+/** 工具轨迹里的一步（调了什么、参数）。 */
+export type AskStep = components['schemas']['AskStep'];
+
 /** 符号查找的匹配级别开关（`any` 不过滤）。 */
 export type SymbolKind = components['schemas']['SymbolKind'];
 
@@ -416,4 +436,92 @@ export function readFile(
   signal?: AbortSignal
 ): Promise<FileSlice> {
   return request<FileSlice>(`/v1/read${buildQuery(params)}`, { signal });
+}
+
+// ----------------------------------------------------------------------
+// 问答（`POST /v1/ask`）
+// ----------------------------------------------------------------------
+
+/** 一次性问答（`Accept: application/json`）：工具轨迹、引用与用量一起返回。 */
+export function ask(body: AskRequest, signal?: AbortSignal): Promise<AskResponse> {
+  return request<AskResponse>('/v1/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+/**
+ * 流式问答（默认 `text/event-stream`）：每收到一个事件就回调一次。
+ *
+ * 手写 SSE 解析（与后端一样不引第三方依赖）：按空行切事件块，取 `data:` 行并 `JSON.parse`。
+ * 错误体仍是 RFC 7807，因此非 2xx 走与其余端点同一套 `ApiError`。
+ */
+export async function streamAsk(
+  body: AskRequest,
+  onEvent: (event: AskEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetch(`${CONFIG.serverUrl}/v1/ask`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok) {
+    const error = await toApiError(response);
+
+    if (response.status === 401) notifyUnauthorized();
+
+    throw error;
+  }
+
+  if (!response.body) {
+    throw new ApiError(response.status, '当前浏览器不支持流式读取响应体');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = buffer.indexOf('\n\n');
+
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+
+      const event = parseSseBlock(block);
+
+      if (event) onEvent(event);
+
+      boundary = buffer.indexOf('\n\n');
+    }
+  }
+}
+
+/** 一个 SSE 事件块 → 事件对象；没有 `data` 或不是合法 JSON 时返回 `null`。 */
+function parseSseBlock(block: string): AskEvent | null {
+  const data = block
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n');
+
+  if (data === '') return null;
+
+  try {
+    return JSON.parse(data) as AskEvent;
+  } catch {
+    return null;
+  }
 }
