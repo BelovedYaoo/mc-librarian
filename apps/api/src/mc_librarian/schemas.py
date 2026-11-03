@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 Role = Literal["admin", "user"]
-JobKind = Literal["index", "reindex", "summarize"]
+JobKind = Literal["index"]
 JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
 JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
@@ -147,10 +147,13 @@ class AcceptInviteRequest(BaseModel):
 
 
 class AuditEntry(BaseModel):
-    """契约 `components.schemas.AuditEntry`；`actor` 是用户名（缺失时退回 id）。"""
+    """契约 `components.schemas.AuditEntry`；`actor` 是用户名（缺失时退回 id）。
+
+    系统动作（`version.recorded` 等）没有 actor，`actor` 为 `None`——不是字符串 `"None"`。
+    """
 
     id: str
-    actor: str
+    actor: str | None
     action: str
     target: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
@@ -166,7 +169,6 @@ class JobOptions(BaseModel):
     """创建任务时的 `options`；`source_dir` 见 docs/openapi.yaml 的 `JobCreate`。"""
 
     source_dir: str | None = None
-    with_summaries: bool = True
     force: bool = False
 
 

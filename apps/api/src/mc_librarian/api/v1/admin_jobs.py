@@ -21,7 +21,6 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 NOT_FOUND_TITLE = "资源不存在"
 CONFLICT_TITLE = "冲突"
-BAD_REQUEST_TITLE = "请求不合法"
 
 
 def _require_job(conn: DbConn, job_id: str) -> Job:
@@ -37,7 +36,10 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     "/jobs",
     status_code=202,
     summary="创建索引任务",
-    description="立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。",
+    description=(
+        "立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。"
+        "给了 options.source_dir 从 parse 开始，否则从 download 开始。"
+    ),
     operation_id="createJob",
     responses={
         403: problem_response("需要管理员权限"),
@@ -47,16 +49,6 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
 )
 def create_job(payload: JobCreate, request: Request, conn: DbConn, admin: CurrentAdmin) -> Job:
     options = payload.options or JobOptions()
-
-    # runner 的 parse 阶段无条件要求源目录（summarize 的真实流水线见 #13），所以现在任何
-    # kind 缺少 `source_dir` 都会在 parse 阶段必然失败；在入队前就按 kind + source_dir 拒绝。
-    if not options.source_dir:
-        raise ProblemException(
-            422,
-            BAD_REQUEST_TITLE,
-            f"{payload.kind} 任务必须提供 options.source_dir"
-            "（当前所有任务都会执行 parse 阶段扫描源码目录）",
-        )
 
     with transaction(conn):
         # 判定与入队同一事务：同版本并发提交只有一个能成功。
@@ -146,14 +138,27 @@ def get_job_logs(
         409: problem_response("任务已结束"),
     },
 )
-def cancel_job(jobId: str, conn: DbConn, _admin: CurrentAdmin) -> Job:
-    job = _require_job(conn, jobId)
-
-    if job.status not in store.ACTIVE_STATUSES:
-        raise ProblemException(409, CONFLICT_TITLE, f"任务已结束（{job.status}），无法取消")
-
+def cancel_job(
+    jobId: str, request: Request, conn: DbConn, admin: CurrentAdmin
+) -> Job:
     with transaction(conn):
-        return store.request_cancel(conn, jobId)
+        # 判定与写入同一 `BEGIN IMMEDIATE` 事务，UPDATE 带状态守卫：并发两次 cancel 只有一次生效。
+        job = _require_job(conn, jobId)
+        canceled = store.request_cancel(conn, jobId)
+
+        if canceled is None:
+            raise ProblemException(409, CONFLICT_TITLE, f"任务已结束（{job.status}），无法取消")
+
+        audit.record(
+            conn,
+            actor_id=admin.id,
+            action=audit.ACTION_JOB_CANCELED,
+            target=jobId,
+            detail={"from_status": job.status},
+            ip=client_ip(request),
+        )
+
+        return canceled
 
 
 @router.post(
@@ -171,13 +176,28 @@ def cancel_job(jobId: str, conn: DbConn, _admin: CurrentAdmin) -> Job:
         409: problem_response("任务不在可重试的终态"),
     },
 )
-def retry_job(jobId: str, conn: DbConn, _admin: CurrentAdmin) -> Job:
-    job = _require_job(conn, jobId)
+def retry_job(
+    jobId: str, request: Request, conn: DbConn, admin: CurrentAdmin
+) -> Job:
+    with transaction(conn):
+        # 判定与写入同一 `BEGIN IMMEDIATE` 事务，UPDATE 带状态守卫（只认 failed/canceled）。
+        job = _require_job(conn, jobId)
+        requeued = store.requeue(conn, jobId)
 
-    if job.status not in store.RETRYABLE_STATUSES:
-        raise ProblemException(
-            409, CONFLICT_TITLE, f"任务状态为 {job.status}，只有 failed/canceled 可以重试"
+        if requeued is None:
+            raise ProblemException(
+                409,
+                CONFLICT_TITLE,
+                f"任务状态为 {job.status}，只有 failed/canceled 可以重试",
+            )
+
+        audit.record(
+            conn,
+            actor_id=admin.id,
+            action=audit.ACTION_JOB_RETRIED,
+            target=jobId,
+            detail={"from_status": job.status},
+            ip=client_ip(request),
         )
 
-    with transaction(conn):
-        return store.requeue(conn, jobId)
+        return requeued

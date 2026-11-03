@@ -389,6 +389,7 @@ export interface paths {
         /**
          * 创建索引任务
          * @description 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
+         *     给了 `options.source_dir` 从 `parse` 开始，否则从 `download` 开始（见 `JobCreate`）。
          */
         post: operations["createJob"];
         delete?: never;
@@ -763,7 +764,7 @@ export interface components {
         Job: {
             id: string;
             /** @enum {string} */
-            kind: "index" | "reindex" | "summarize";
+            kind: "index";
             version?: string;
             /** @enum {string} */
             status: "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -783,18 +784,20 @@ export interface components {
         };
         JobCreate: {
             /** @enum {string} */
-            kind: "index" | "reindex" | "summarize";
+            kind: "index";
             /** @example 26.3 */
             version: string;
             options?: {
                 /**
-                 * @description 源码根目录；相对路径按数据根解析。**当前所有 kind 都必填**：
-                 *     `parse` 阶段无条件扫描源码目录（`summarize` 的真实流水线见 #13）。
-                 *     #4 只统计 `.java` 与 `data/` 的文件数与 token 估算。
+                 * @description 源码根目录；相对路径按数据根解析。可选：
+                 *
+                 *     - 给了 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始（设计文档：`download`/`decompile` 跳过）；
+                 *     - 没给 → 阶段序列 `download → decompile → parse → summarize → finalize`。
+                 *
+                 *     #4 里 `download`/`decompile` 是占位实现，标记完成的同时写一条 warn 日志说明「待 #13」；
+                 *     `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */
                 source_dir?: string;
-                /** @default true */
-                with_summaries: boolean;
                 /** @default false */
                 force: boolean;
             };
@@ -869,7 +872,8 @@ export interface components {
         };
         AuditEntry: {
             id: string;
-            actor: string;
+            /** @description 用户名（缺失时退回 actor id）；系统动作（如 `version.recorded`）为 `null`。 */
+            actor: string | null;
             /** @example user.role_changed */
             action: string;
             target?: string;

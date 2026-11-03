@@ -23,7 +23,10 @@ ACTION_INVITE_ACCEPTED: Final = "invite.accepted"
 ACTION_TOKEN_CREATED: Final = "token.created"
 ACTION_TOKEN_REVOKED: Final = "token.revoked"
 ACTION_JOB_CREATED: Final = "job.created"
+ACTION_JOB_CANCELED: Final = "job.canceled"
+ACTION_JOB_RETRIED: Final = "job.retried"
 ACTION_VERSION_REGISTERED: Final = "version.registered"
+ACTION_VERSION_RECORDED: Final = "version.recorded"
 
 # `actor` 对外用用户名（更好读），库里存 actor_id；用户不存在时退回 id。
 _SELECT = """
@@ -82,7 +85,8 @@ def list_entries(
     return [
         AuditEntry(
             id=str(row["id"]),
-            actor=str(row["actor"]),
+            # 系统动作没有 actor：保持 None，不要退化成字符串 "None"。
+            actor=None if row["actor"] is None else str(row["actor"]),
             action=str(row["action"]),
             target=row["target"],
             detail=json.loads(row["detail_json"]) if row["detail_json"] else {},

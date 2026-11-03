@@ -160,7 +160,7 @@ function IndexDrawer({ open, onClose, onCreated }: IndexDrawerProps) {
       await createJob({
         kind: 'index',
         version,
-        options: { source_dir: sourceDir, with_summaries: true, force: false },
+        options: { source_dir: sourceDir, force: false },
       });
 
       onCreated();

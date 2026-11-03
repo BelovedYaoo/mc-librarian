@@ -14,10 +14,6 @@ from typing import Any
 from mc_librarian.db import utc_now
 from mc_librarian.schemas import Job, JobLog, LogLevel, VersionInfo
 
-# 任务是否还在占用队列（未进入终态）。
-ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
-# 终态；进入后 cancel 不再有意义。
-TERMINAL_STATUSES: tuple[str, ...] = ("succeeded", "failed", "canceled")
 # 可以重试的终态：保留 checkpoint 重新入队，从下一个未完成阶段续跑。
 RETRYABLE_STATUSES: tuple[str, ...] = ("failed", "canceled")
 
@@ -169,26 +165,28 @@ def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return find_row(conn, str(row["id"]))
 
 
-def request_cancel(conn: sqlite3.Connection, job_id: str) -> Job:
-    """请求取消：queued 直接转 canceled，running 置标志由 runner 在阶段边界收尾。"""
-    row = find_row(conn, job_id)
+def request_cancel(conn: sqlite3.Connection, job_id: str) -> Job | None:
+    """请求取消：queued 直接转 canceled，running 置标志由 runner 在阶段边界收尾。
 
-    assert row is not None, "调用方应先确认任务存在"
+    UPDATE 带状态守卫并在调用方事务（`BEGIN IMMEDIATE`）里执行，按 rowcount 判定：
+    任务已进入终态时返回 `None`（调用方回 409），不会在「判定与写入」之间被并发改写。
+    """
+    queued = conn.execute(
+        "UPDATE jobs SET status = 'canceled', cancel_requested = 1, finished_at = ?,"
+        " message = ? WHERE id = ? AND status = 'queued'",
+        (utc_now(), "已取消（尚未开始）", job_id),
+    )
 
-    if row["status"] == "queued":
-        conn.execute(
-            "UPDATE jobs SET status = 'canceled', cancel_requested = 1, finished_at = ?,"
-            " message = ? WHERE id = ?",
-            (utc_now(), "已取消（尚未开始）", job_id),
+    if queued.rowcount == 0:
+        running = conn.execute(
+            "UPDATE jobs SET cancel_requested = 1 WHERE id = ? AND status = 'running'",
+            (job_id,),
         )
-    else:
-        conn.execute("UPDATE jobs SET cancel_requested = 1 WHERE id = ?", (job_id,))
 
-    updated = find(conn, job_id)
+        if running.rowcount == 0:
+            return None
 
-    assert updated is not None, "更新过的任务必须存在"
-
-    return updated
+    return find(conn, job_id)
 
 
 def is_cancel_requested(conn: sqlite3.Connection, job_id: str) -> bool:
@@ -199,47 +197,66 @@ def is_cancel_requested(conn: sqlite3.Connection, job_id: str) -> bool:
     return row is not None and bool(row["cancel_requested"])
 
 
-def requeue(conn: sqlite3.Connection, job_id: str) -> Job:
-    """把终态任务重新放回队列，返回重排后的任务。
+def requeue(conn: sqlite3.Connection, job_id: str) -> Job | None:
+    """把 failed/canceled 任务重新放回队列，返回重排后的任务；其他状态返回 `None`。
 
+    UPDATE 带状态守卫并在调用方事务里执行，按 rowcount 判定（TOCTOU 安全）。
     `checkpoint` 原样保留，runner 认领后跳过已完成的阶段；`cancel_requested` 一并清零，
     否则 `claim_next`（只认 `cancel_requested = 0`）永远不会再认领它；`started_at` 也清空，
     让下一次认领写入新的开始时间。
     """
-    conn.execute(
+    placeholders = ", ".join("?" for _ in RETRYABLE_STATUSES)
+    cursor = conn.execute(
         "UPDATE jobs SET status = 'queued', cancel_requested = 0, error = NULL,"
-        " started_at = NULL, finished_at = NULL, message = ? WHERE id = ?",
-        ("已重新排队，从上次中断处续跑", job_id),
+        " started_at = NULL, finished_at = NULL, message = ?"
+        f" WHERE id = ? AND status IN ({placeholders})",
+        ("已重新排队，从上次中断处续跑", job_id, *RETRYABLE_STATUSES),
     )
 
-    requeued = find(conn, job_id)
+    if cursor.rowcount == 0:
+        return None
 
-    assert requeued is not None, "重排过的任务必须存在"
-
-    return requeued
+    return find(conn, job_id)
 
 
-def requeue_running(conn: sqlite3.Connection) -> list[str]:
-    """把进程崩溃/重启时遗留的 `running` 任务收回队列，返回被重排的 job id。
+def requeue_running(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """启动恢复：收回遗留的 `running` 任务，返回 (重新排队的 id, 直接取消的 id)。
 
     runner 并发 1 且只在进程内，`running` 只可能来自上一次进程生命周期；而 `claim_next`
-    只认 `queued`，所以不收回来这些任务永远不会再跑。`started_at` 与 `cancel_requested`
-    是「当前这次执行」的瞬态状态，拥有它的进程已经死了，一并清掉（用户可再次请求取消）。
+    只认 `queued`，所以不收回来这些任务永远不会再跑。**不能丢取消意图**：
+    `cancel_requested=1` 的行说明用户已请求取消，直接置为 `canceled`（而不是重新排队后又
+    跑起来）；其余行才收回 `queued`，`started_at` 是「当前这次执行」的瞬态状态，一并清空。
     """
-    rows = conn.execute(
-        "SELECT id FROM jobs WHERE status = 'running' ORDER BY created_at, id"
-    ).fetchall()
+    requeued = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM jobs WHERE status = 'running' AND cancel_requested = 0"
+            " ORDER BY created_at, id"
+        ).fetchall()
+    ]
+    canceled = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM jobs WHERE status = 'running' AND cancel_requested = 1"
+            " ORDER BY created_at, id"
+        ).fetchall()
+    ]
 
-    if not rows:
-        return []
+    if requeued:
+        conn.execute(
+            "UPDATE jobs SET status = 'queued', started_at = NULL, message = ?"
+            " WHERE status = 'running' AND cancel_requested = 0",
+            ("服务重启，任务重新排队",),
+        )
 
-    conn.execute(
-        "UPDATE jobs SET status = 'queued', started_at = NULL, cancel_requested = 0,"
-        " message = ? WHERE status = 'running'",
-        ("服务重启，任务重新排队",),
-    )
+    if canceled:
+        conn.execute(
+            "UPDATE jobs SET status = 'canceled', finished_at = ?, message = ?"
+            " WHERE status = 'running' AND cancel_requested = 1",
+            (utc_now(), "服务重启：任务在取消请求后终止"),
+        )
 
-    return [str(row["id"]) for row in rows]
+    return requeued, canceled
 
 
 def mark_stage(
@@ -272,20 +289,59 @@ def finish(
     status: str,
     message: str,
     error: str | None = None,
-) -> None:
-    """写入终态。`canceled`/`failed` 保留 `stage` 与 `progress`，让人知道停在哪里。"""
-    if status == "succeeded":
-        conn.execute(
-            "UPDATE jobs SET status = ?, message = ?, error = ?, finished_at = ?, progress = 1"
-            " WHERE id = ?",
-            (status, message, error, utc_now(), job_id),
-        )
-        return
+    expected_status: str | None = None,
+) -> int:
+    """写入终态，返回实际更新的行数。
 
-    conn.execute(
-        "UPDATE jobs SET status = ?, message = ?, error = ?, finished_at = ? WHERE id = ?",
-        (status, message, error, utc_now(), job_id),
+    `canceled`/`failed` 保留 `stage` 与 `progress`，让人知道停在哪里。`expected_status`
+    给定时只有当前状态匹配才写（状态守卫）：兜底失败路径只覆盖 `running`，避免把已经
+    `succeeded` 的任务改回 `failed`。
+    """
+    progress = ", progress = 1" if status == "succeeded" else ""
+    guard = " AND status = ?" if expected_status is not None else ""
+    params: tuple[Any, ...] = (status, message, error, utc_now(), job_id)
+
+    if expected_status is not None:
+        params = (*params, expected_status)
+
+    cursor = conn.execute(
+        f"UPDATE jobs SET status = ?, message = ?, error = ?, finished_at = ?{progress}"
+        f" WHERE id = ?{guard}",
+        params,
     )
+
+    return int(cursor.rowcount)
+
+
+def finish_succeeded_or_canceled(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    succeeded_message: str,
+    canceled_message: str,
+) -> str | None:
+    """任务跑完所有阶段后的终态写入：取消标志与终态在同一条 UPDATE 里判定。
+
+    `cancel_requested=0` → `succeeded`（`progress=1`），否则 → `canceled`；按 rowcount 判定
+    实际写入的终态并返回，`None` 表示任务已不在 `running`（防御性，正常不会发生）。这样
+    finalize 执行期间到达的取消不会被「先查标志再写终态」的两次连接吞掉。
+    """
+    succeeded = conn.execute(
+        "UPDATE jobs SET status = 'succeeded', message = ?, error = NULL, finished_at = ?,"
+        " progress = 1 WHERE id = ? AND status = 'running' AND cancel_requested = 0",
+        (succeeded_message, utc_now(), job_id),
+    )
+
+    if succeeded.rowcount:
+        return "succeeded"
+
+    canceled = conn.execute(
+        "UPDATE jobs SET status = 'canceled', message = ?, finished_at = ?"
+        " WHERE id = ? AND status = 'running' AND cancel_requested = 1",
+        (canceled_message, utc_now(), job_id),
+    )
+
+    return "canceled" if canceled.rowcount else None
 
 
 # ----------------------------------------------------------------------
@@ -337,7 +393,7 @@ def row_to_version(row: sqlite3.Row) -> VersionInfo:
     )
 
 
-def upsert_version(
+def register_version(
     conn: sqlite3.Connection,
     *,
     version: str,
@@ -348,7 +404,7 @@ def upsert_version(
     source_size_bytes: int,
     db_path: str | None,
 ) -> VersionInfo:
-    """登记/覆盖一个版本；`indexed_at` 每次写入都刷新为当前时间。"""
+    """管理员注册：写全量字段（含 `db_path`/`has_summaries`），`indexed_at` 刷新为当前时间。"""
     conn.execute(
         """
         INSERT INTO versions (
@@ -380,6 +436,39 @@ def upsert_version(
     assert registered is not None, "刚登记的版本必须能查回来"
 
     return registered
+
+
+def record_job_version(
+    conn: sqlite3.Connection,
+    *,
+    version: str,
+    files: int,
+    tokens: int,
+) -> VersionInfo:
+    """任务产出写版本行：只更新 `files`/`tokens`/`indexed_at`。
+
+    版本不存在时插入一行，其余字段用「未 remap、无摘要」的保守默认值
+    （`obfuscated=0`、`has_summaries=0`、`source_size_bytes=0`、`db_path=NULL`）。
+    **绝不覆盖**管理员注册的 `db_path` 与 `has_summaries`。
+    """
+    conn.execute(
+        """
+        INSERT INTO versions (
+          version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
+        ) VALUES (?, ?, ?, ?, 0, 0, 0, NULL)
+        ON CONFLICT (version) DO UPDATE SET
+          files = excluded.files,
+          tokens = excluded.tokens,
+          indexed_at = excluded.indexed_at
+        """,
+        (version, files, tokens, utc_now()),
+    )
+
+    recorded = find_version(conn, version)
+
+    assert recorded is not None, "刚写入的版本必须能查回来"
+
+    return recorded
 
 
 def find_version(conn: sqlite3.Connection, version: str) -> VersionInfo | None:

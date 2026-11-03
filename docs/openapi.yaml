@@ -544,7 +544,9 @@ paths:
     post:
       tags: [admin]
       summary: 创建索引任务
-      description: 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
+      description: |
+        立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
+        给了 `options.source_dir` 从 `parse` 开始，否则从 `download` 开始（见 `JobCreate`）。
       operationId: createJob
       requestBody:
         required: true
@@ -1079,7 +1081,7 @@ components:
       required: [id, kind, status, created_at]
       properties:
         id: { type: string }
-        kind: { type: string, enum: [index, reindex, summarize] }
+        kind: { type: string, enum: [index] }
         version: { type: string }
         status: { type: string, enum: [queued, running, succeeded, failed, canceled] }
         stage:
@@ -1097,7 +1099,7 @@ components:
       type: object
       required: [kind, version]
       properties:
-        kind: { type: string, enum: [index, reindex, summarize] }
+        kind: { type: string, enum: [index] }
         version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$", examples: ["26.3"] }
         options:
           type: object
@@ -1105,10 +1107,13 @@ components:
             source_dir:
               type: string
               description: |
-                源码根目录；相对路径按数据根解析。**当前所有 kind 都必填**：
-                `parse` 阶段无条件扫描源码目录（`summarize` 的真实流水线见 #13）。
-                #4 只统计 `.java` 与 `data/` 的文件数与 token 估算。
-            with_summaries: { type: boolean, default: true }
+                源码根目录；相对路径按数据根解析。可选：
+
+                - 给了 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始（设计文档：`download`/`decompile` 跳过）；
+                - 没给 → 阶段序列 `download → decompile → parse → summarize → finalize`。
+
+                #4 里 `download`/`decompile` 是占位实现，标记完成的同时写一条 warn 日志说明「待 #13」；
+                `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
             force: { type: boolean, default: false }
 
     JobLog:
@@ -1180,7 +1185,9 @@ components:
       required: [id, actor, action, created_at]
       properties:
         id: { type: string }
-        actor: { type: string }
+        actor:
+          type: [string, "null"]
+          description: 用户名（缺失时退回 actor id）；系统动作（如 `version.recorded`）为 `null`。
         action: { type: string, example: "user.role_changed" }
         target: { type: string }
         detail: { type: object, additionalProperties: true }

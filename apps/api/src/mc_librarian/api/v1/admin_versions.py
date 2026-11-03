@@ -121,7 +121,7 @@ def register_version(
         raise ProblemException(422, BAD_REQUEST_TITLE, f"索引文件不是合法的 sqlite：{path}")
 
     with transaction(conn):
-        registered = store.upsert_version(
+        registered = store.register_version(
             conn,
             version=payload.version,
             files=stats.files,

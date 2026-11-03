@@ -107,7 +107,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 |---|---|
 | `POST /v1/admin/versions` | 注册已上传的索引文件（节点侧不构建索引） |
 | `GET/POST /v1/admin/users`、`PATCH /v1/admin/users/{id}` | 建号（返回一次性邀请链接）、升降角色、启停；最后一个启用的 admin 受保护 |
-| `POST /v1/admin/jobs` | 创建索引任务，立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
+| `POST /v1/admin/jobs` | 创建索引任务（`kind` 目前仅 `index`），立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
 | `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize，`progress` 0–1 |
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
@@ -115,6 +115,10 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly |
 | `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
 | `GET /v1/admin/audit` | 审计日志 |
+
+**任务只保留 `kind: index`**：`reindex` / `summarize` 待 #7（remap）/ #13（摘要流水线）引入，当前不提供，避免出现「跑成功但什么都没做」的任务。阶段序列按 `options.source_dir` 选择：给了时从 `parse` 开始（`parse → summarize → finalize`，设计文档约定 `download`/`decompile` 跳过），没给时走完整序列（`download → decompile → parse → summarize → finalize`）；#4 里 `download`/`decompile` 是占位实现，标记完成的同时写一条 warn 日志说明「待 #13」。
+
+**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出只更新 `files`/`tokens`/`indexed_at`，**不覆盖**已注册的 `db_path` 与 `has_summaries`。
 
 **用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定。
 
@@ -139,3 +143,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | issue #9：契约补 `GET /v1/invites/{token}`、`POST /v1/invites/{token}/accept`，并把 `createUser` 的 `invite_url` 标为必填、给 `patchUser` 补 `404`；实现 users/audit/invites 与迁移 v3（`invites`/`audit` 两表）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | issue #4：契约补 `JobCreate.options.source_dir`、`/v1/admin/jobs*` 与 `/v1/admin/versions` 的 403/404/409/422；迁移 v4 落地 `jobs`/`job_logs`/`versions`，进程内 `JobRunner`（并发 1、阶段 checkpoint、阶段边界取消）随 lifespan 启动，`parse` 阶段统计文件数与 token 估算（字符 ÷ 3.5），版本注册与 `GET /v1/versions`；前端加 `/versions`、`/jobs` 页与侧边导航。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复：契约补 `POST /v1/admin/jobs/{jobId}/retry`、删掉 `getJobLogs` 的 SSE 描述、`source_dir` 改为所有 kind 必填；实现重试续跑与启动时重排遗留 `running`，`_succeed` 不再虚报 `obfuscated`/`has_summaries`，PAT 签发/吊销、任务创建、版本注册补审计，前端加 `/audit` 页。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | 复审修复（根因）：版本写入拆成管理员注册与任务产出两条路径（任务不再抹掉 `db_path`/`has_summaries`）；`kind` 收窄为 `index`（`reindex`/`summarize` 待 #7/#13），删掉无效的 `with_summaries`；阶段序列按 `options.source_dir` 选择；cancel/retry 与终态写入改为带状态守卫的原子 UPDATE（消除 TOCTOU），启动恢复不丢取消意图，`_fail` 加状态守卫；补 `version.recorded`/`job.canceled`/`job.retried` 审计，`audit` 的 `actor` 对系统动作为 `null`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
