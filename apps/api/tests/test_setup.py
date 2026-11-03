@@ -132,7 +132,7 @@ def test_migration_creates_schema_and_is_idempotent(tmp_path: Path) -> None:
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert {"users", "sessions", "schema_version"} <= tables
+        assert {"users", "sessions", "invites", "audit", "schema_version"} <= tables
         assert schema_version(conn) == LATEST_VERSION
 
         # 再跑一遍（等价于重启进程）：不报错、版本不变、不重复记账。

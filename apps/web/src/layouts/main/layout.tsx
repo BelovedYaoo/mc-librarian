@@ -11,7 +11,7 @@ import { CONFIG } from 'src/global-config';
 
 import { paths } from 'src/routes/paths';
 
-import { HeaderSection, LayoutSection, MainSection } from 'src/layouts/core';
+import { HeaderSection, LayoutSection, MainSection, NavSection } from 'src/layouts/core';
 
 // ----------------------------------------------------------------------
 
@@ -19,7 +19,7 @@ export type MainLayoutProps = {
   children: React.ReactNode;
 };
 
-/** 受保护的后台外壳：顶部展示当前用户名与登出入口。 */
+/** 受保护的后台外壳：左侧导航 + 顶部当前用户与登出入口。 */
 export function MainLayout({ children }: MainLayoutProps) {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
@@ -35,6 +35,12 @@ export function MainLayout({ children }: MainLayoutProps) {
       setSigningOut(false);
     }
   };
+
+  // 「用户」只对 admin 显示——隐藏菜单只是体验，后端每个端点会独立校验。
+  const navItems = [
+    { label: '概览', to: paths.home, end: true },
+    ...(user?.role === 'admin' ? [{ label: '用户', to: paths.users }] : []),
+  ];
 
   return (
     <LayoutSection
@@ -68,9 +74,19 @@ export function MainLayout({ children }: MainLayoutProps) {
       }
     >
       <MainSection>
-        <Container maxWidth="md" sx={{ py: { xs: 5, md: 8 } }}>
-          {children}
-        </Container>
+        <Box
+          sx={{
+            display: 'flex',
+            flex: '1 1 auto',
+            flexDirection: { xs: 'column', md: 'row' },
+          }}
+        >
+          <NavSection items={navItems} />
+
+          <Container maxWidth="md" sx={{ py: { xs: 5, md: 8 }, flex: '1 1 auto', minWidth: 0 }}>
+            {children}
+          </Container>
+        </Box>
       </MainSection>
     </LayoutSection>
   );

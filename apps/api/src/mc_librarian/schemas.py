@@ -8,13 +8,27 @@ FastAPI 会声明成 `type: string, format: date-time`。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 Role = Literal["admin", "user"]
 
-__all__ = ["LoginRequest", "Role", "SetupRequest", "SetupStatus", "User"]
+__all__ = [
+    "AcceptInviteRequest",
+    "AuditEntry",
+    "AuditList",
+    "CreateUserRequest",
+    "CreatedUser",
+    "InviteStatus",
+    "LoginRequest",
+    "PatchUserRequest",
+    "Role",
+    "SetupRequest",
+    "SetupStatus",
+    "User",
+    "UserList",
+]
 
 
 class User(BaseModel):
@@ -43,3 +57,55 @@ class SetupRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str = Field(min_length=8, max_length=128)
+
+
+class CreateUserRequest(BaseModel):
+    """`POST /v1/admin/users`：只给用户名与角色，密码由被邀请人自设。"""
+
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_.-]+$")
+    role: Role = "user"
+
+
+class CreatedUser(BaseModel):
+    """创建用户的结果：用户 + **仅此一次**返回的邀请链接。"""
+
+    user: User
+    invite_url: str
+
+
+class UserList(BaseModel):
+    users: list[User]
+
+
+class PatchUserRequest(BaseModel):
+    """`PATCH /v1/admin/users/{userId}`：字段都可选，只改给了的那几个。"""
+
+    role: Role | None = None
+    enabled: bool | None = None
+
+
+class InviteStatus(BaseModel):
+    """`GET /v1/invites/{token}`：链接是否仍可用，以及它对应的用户名。"""
+
+    valid: bool
+    username: str | None = None
+
+
+class AcceptInviteRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class AuditEntry(BaseModel):
+    """契约 `components.schemas.AuditEntry`；`actor` 是用户名（缺失时退回 id）。"""
+
+    id: str
+    actor: str
+    action: str
+    target: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    ip: str | None = None
+
+
+class AuditList(BaseModel):
+    entries: list[AuditEntry]

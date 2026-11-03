@@ -2,6 +2,7 @@
 export const layoutClasses = {
   root: 'root__layout',
   header: 'layout__header',
+  nav: 'layout__nav',
   main: 'layout__main',
   content: 'layout__content',
 };

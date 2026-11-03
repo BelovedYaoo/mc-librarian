@@ -79,3 +79,10 @@ def delete(conn: sqlite3.Connection, raw_token: str) -> bool:
     cursor = conn.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(raw_token),))
 
     return cursor.rowcount > 0
+
+
+def delete_for_user(conn: sqlite3.Connection, user_id: str) -> int:
+    """删除某用户的全部会话（禁用账号时立即踢下线）；返回删除行数。"""
+    cursor = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+    return cursor.rowcount

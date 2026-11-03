@@ -6,14 +6,16 @@ import { MainLayout } from 'src/layouts/main';
 
 import { SplashScreen } from 'src/components/loading-screen';
 
-import { RequireAuth, RequireGuest, RequireSetup } from 'src/routes/components';
-import { paths } from 'src/routes/paths';
+import { RequireAdmin, RequireAuth, RequireGuest, RequireSetup } from 'src/routes/components';
+import { inviteRoute, paths } from 'src/routes/paths';
 
 // ----------------------------------------------------------------------
 
 const HomePage = lazy(() => import('src/pages/home'));
 const LoginPage = lazy(() => import('src/pages/login'));
 const SetupPage = lazy(() => import('src/pages/setup'));
+const UsersPage = lazy(() => import('src/pages/users'));
+const InvitePage = lazy(() => import('src/pages/invite'));
 const Page404 = lazy(() => import('src/pages/error/404'));
 
 export const routesSection: RouteObject[] = [
@@ -41,6 +43,16 @@ export const routesSection: RouteObject[] = [
     ),
   },
 
+  // 接受邀请：被邀请人还没有账号，必须公开可达（也不该被「已登录」守卫弹走）
+  {
+    path: inviteRoute,
+    element: (
+      <Suspense fallback={<SplashScreen />}>
+        <InvitePage />
+      </Suspense>
+    ),
+  },
+
   // 受保护的后台外壳
   {
     path: paths.home,
@@ -52,6 +64,20 @@ export const routesSection: RouteObject[] = [
           </MainLayout>
         </Suspense>
       </RequireAuth>
+    ),
+  },
+
+  // 用户管理：仅 admin（后端每个端点仍会独立校验）
+  {
+    path: paths.users,
+    element: (
+      <RequireAdmin>
+        <Suspense fallback={<SplashScreen />}>
+          <MainLayout>
+            <UsersPage />
+          </MainLayout>
+        </Suspense>
+      </RequireAdmin>
     ),
   },
 

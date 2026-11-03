@@ -249,3 +249,123 @@ def test_problem_schema_is_present_in_both_specs() -> None:
         assert problem["type"] == "object"
         assert set(problem["properties"]) == {"type", "title", "status", "detail", "instance"}
         assert {"title", "status"} <= set(problem["required"])
+
+
+def test_user_management_paths_are_implemented() -> None:
+    """issue #9 把 users / audit / invites 从契约落到了实现。"""
+    runtime_paths = set(_runtime()["paths"])
+
+    assert {
+        "/v1/admin/users",
+        "/v1/admin/users/{userId}",
+        "/v1/admin/audit",
+        "/v1/invites/{token}",
+        "/v1/invites/{token}/accept",
+    } <= runtime_paths
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "operation_id", "tag"),
+    [
+        ("/v1/admin/users", "get", "listUsers", "admin"),
+        ("/v1/admin/users", "post", "createUser", "admin"),
+        ("/v1/admin/users/{userId}", "patch", "patchUser", "admin"),
+        ("/v1/admin/audit", "get", "listAudit", "admin"),
+        ("/v1/invites/{token}", "get", "getInvite", "auth"),
+        ("/v1/invites/{token}/accept", "post", "acceptInvite", "auth"),
+    ],
+)
+def test_user_management_operation_ids_match(
+    path: str, method: str, operation_id: str, tag: str
+) -> None:
+    runtime = _operation(_runtime(), path, method)
+    contract = _operation(_contract(), path, method)
+
+    assert runtime["operationId"] == contract["operationId"] == operation_id
+    assert runtime["tags"] == contract["tags"] == [tag]
+
+
+def test_invite_operations_are_public() -> None:
+    """被邀请人还没有账号，邀请校验与接受必须无需会话。"""
+    for path, method in (
+        ("/v1/invites/{token}", "get"),
+        ("/v1/invites/{token}/accept", "post"),
+    ):
+        assert _operation(_runtime(), path, method)["security"] == []
+        assert _operation(_contract(), path, method)["security"] == []
+
+
+def test_admin_operations_require_auth() -> None:
+    """管理端点不覆盖 security，因此继承全局 cookieAuth / bearerAuth。"""
+    for path, method in (
+        ("/v1/admin/users", "get"),
+        ("/v1/admin/users", "post"),
+        ("/v1/admin/users/{userId}", "patch"),
+        ("/v1/admin/audit", "get"),
+    ):
+        assert "security" not in _operation(_runtime(), path, method)
+        assert "security" not in _operation(_contract(), path, method)
+
+
+def test_create_user_request_has_no_password() -> None:
+    """管理员不需要也不应该设置别人的密码：创建请求只有用户名与角色。"""
+    runtime = _request_schema(_runtime(), "/v1/admin/users", "post")
+    contract = _request_schema(_contract(), "/v1/admin/users", "post")
+
+    assert set(runtime["properties"]) == set(contract["properties"]) == {"username", "role"}
+    assert runtime["required"] == contract["required"] == ["username"]
+    assert "password" not in runtime["properties"]
+
+
+def test_create_user_response_returns_invite_url() -> None:
+    runtime = _response_schema(_runtime(), "/v1/admin/users", "post", "201")
+    contract = _response_schema(_contract(), "/v1/admin/users", "post", "201")
+
+    assert set(runtime["properties"]) == set(contract["properties"]) == {"user", "invite_url"}
+    assert runtime["required"] == contract["required"] == ["user", "invite_url"]
+
+
+def test_patch_user_declares_conflict_and_not_found() -> None:
+    for spec in (_runtime(), _contract()):
+        responses = _operation(spec, "/v1/admin/users/{userId}", "patch")["responses"]
+
+        assert "404" in responses
+        assert "409" in responses
+
+
+def test_invite_status_schema_matches() -> None:
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/invites/{token}")
+
+        assert schema["required"] == ["valid"]
+        assert set(schema["properties"]) == {"valid", "username"}
+
+
+def test_accept_invite_request_schema_matches() -> None:
+    runtime = _request_schema(_runtime(), "/v1/invites/{token}/accept", "post")
+    contract = _request_schema(_contract(), "/v1/invites/{token}/accept", "post")
+
+    assert runtime["required"] == contract["required"] == ["password"]
+    assert runtime["properties"]["password"]["minLength"] == 8
+    assert contract["properties"]["password"]["minLength"] == 8
+    assert runtime["properties"]["password"]["maxLength"] == 128
+    assert contract["properties"]["password"]["maxLength"] == 128
+
+
+def test_audit_entry_schema_matches() -> None:
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/admin/audit")
+        entry = _deref(spec, schema["properties"]["entries"]["items"])
+
+        assert entry["required"] == ["id", "actor", "action", "created_at"]
+        assert set(entry["properties"]) == {
+            "id",
+            "actor",
+            "action",
+            "target",
+            "detail",
+            "created_at",
+            "ip",
+        }
+        assert entry["properties"]["detail"]["type"] == "object"
+        assert entry["properties"]["detail"]["additionalProperties"] is True
