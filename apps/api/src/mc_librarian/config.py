@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
@@ -28,6 +29,9 @@ SESSION_COOKIE_NAME: Final = "mc_librarian_session"
 # 仓库哨兵：同时存在 `package.json` 与 `apps/api/` 才算仓库根。
 # 刻意不用 `.git`（worktree / 源码快照里可能没有）。
 _REPO_SENTINELS: Final = (Path("package.json"), Path("apps", "api"))
+
+# `-Xmx` 的值：数字 + 单位，避免把任意字符串拼进 java 命令行。
+DECOMPILE_MEMORY_PATTERN: Final = re.compile(r"^\d+[kKmMgG]$")
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -93,6 +97,21 @@ class Settings(BaseSettings):
     session_ttl_hours: int = Field(default=168, ge=1, le=24 * 365)
     # 一次性邀请链接的有效期（小时），与 `settings.security.invite_ttl_hours` 一致。
     invite_ttl_hours: int = Field(default=48, ge=1, le=24 * 365)
+
+    # 下载 / 反编译工具链（D24：镜像内只要 JRE + Vineflower + SpecialSource，不装 Gradle）。
+    # 两个 jar 路径默认空；只有真正跑 download/decompile 阶段才要求配置，parse-only 任务不受影响。
+    java: str = "java"
+    vineflower_jar: Path | None = None
+    specialsource_jar: Path | None = None
+    decompile_memory: str = "4G"
+
+    @field_validator("decompile_memory")
+    @classmethod
+    def _check_decompile_memory(cls, value: str) -> str:
+        if not DECOMPILE_MEMORY_PATTERN.match(value):
+            raise ValueError(f"decompile_memory 必须是形如 4G / 512M 的值，收到：{value}")
+
+        return value
 
     @field_validator("data_dir")
     @classmethod

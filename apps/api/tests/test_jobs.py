@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_librarian.config import Settings
-from mc_librarian.db import LATEST_VERSION, Database, transaction
+from mc_librarian.db import LATEST_VERSION, MIGRATIONS, Database, schema_version, transaction
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
 from mc_librarian.jobs.runner import JobRunner
@@ -174,7 +174,7 @@ def insert_job_row(
 def test_migration_creates_job_tables(tmp_path: Path) -> None:
     database = Database.for_data_dir(tmp_path / "data")
 
-    assert database.initialize() == LATEST_VERSION == 4
+    assert database.initialize() == LATEST_VERSION == 5
 
     with database.connect() as conn:
         tables = {
@@ -185,26 +185,62 @@ def test_migration_creates_job_tables(tmp_path: Path) -> None:
     assert {"jobs", "job_logs", "versions"} <= tables
 
 
-def test_jobs_check_rejects_retired_kind_and_stage(tmp_path: Path) -> None:
-    """`jobs` 的 CHECK 与接口层同域：`reindex` 与 `download` 这类值直接插不进去。"""
+def test_v5_migration_preserves_existing_jobs_and_logs(tmp_path: Path) -> None:
+    """已部署的 v4 库升到 v5：重建 `jobs` 时不能连带清空 `job_logs`（外键 ON DELETE CASCADE）。"""
+    database = Database.for_data_dir(tmp_path / "data")
+
+    with database.connect() as conn:
+        schema_version(conn)  # 建 `schema_version` 表
+
+        for migration in MIGRATIONS[:4]:
+            for statement in migration.statements:
+                conn.execute(statement)
+
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (migration.version, "2026-11-03T00:00:00Z"),
+            )
+
+        insert_job_row(conn, job_id="legacy", kind="index", stage="parse")
+        conn.execute(
+            "INSERT INTO job_logs (job_id, ts, level, message) VALUES (?, ?, 'info', ?)",
+            ("legacy", "2026-11-03T00:00:00Z", "旧日志"),
+        )
+
+    assert database.initialize() == LATEST_VERSION == 5
+
+    with database.connect() as conn:
+        assert conn.execute("SELECT count(*) AS c FROM job_logs").fetchone()["c"] == 1
+
+        row = conn.execute("SELECT stage FROM jobs WHERE id = 'legacy'").fetchone()
+        assert row["stage"] == "parse"
+
+        # 升级后 `download` 可写（v4 的 CHECK 里没有这个取值）。
+        insert_job_row(conn, job_id="fetch", kind="index", stage="download")
+
+
+def test_jobs_check_accepts_five_stages_and_rejects_unknown(tmp_path: Path) -> None:
+    """`jobs` 的 CHECK 与接口层同域：五段阶段可写，域外的值直接插不进去。"""
     database = Database.for_data_dir(tmp_path / "data")
     database.initialize()
 
+    stages = (None, "download", "decompile", "parse", "summarize", "finalize")
+
     with database.connect() as conn:
-        # 合法取值照常可写：`kind='index'`，`stage` 为 NULL（尚未进入阶段）或三段之一。
-        for index, stage in enumerate((None, "parse", "summarize", "finalize")):
+        # 合法取值照常可写：`kind='index'`，`stage` 为 NULL（尚未进入阶段）或五段之一。
+        for index, stage in enumerate(stages):
             insert_job_row(conn, job_id=f"ok-{index}", kind="index", stage=stage)
 
         with pytest.raises(sqlite3.IntegrityError):
             insert_job_row(conn, job_id="bad-kind", kind="reindex", stage=None)
 
         with pytest.raises(sqlite3.IntegrityError):
-            insert_job_row(conn, job_id="bad-stage", kind="index", stage="download")
+            insert_job_row(conn, job_id="bad-stage", kind="index", stage="bogus")
 
         count = conn.execute("SELECT count(*) AS count FROM jobs").fetchone()["count"]
 
     # 被拒绝的两行没有落库。
-    assert count == 4
+    assert count == len(stages)
 
 
 # ----------------------------------------------------------------------

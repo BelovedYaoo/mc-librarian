@@ -3,7 +3,8 @@
 设计（见 `docs/00-overview.md` §4、D13）：
 
 - 进程内单任务串行消费，没有独立 worker；一次只跑一个任务（并发 1）。
-- 阶段序列固定为 `parse → summarize → finalize`（`#4`；`#13` 会在前面补 `download`/`decompile`）。
+- 阶段序列由 `options.source_dir` 决定：给了源目录走 `#4` 的 `parse → summarize → finalize`；
+  没给则先跑 `download → decompile`（`#21` 的下载+反编译流水线，产物是源码树）。
   每完成一个阶段就把阶段名与产物写进 `jobs.checkpoint`；认领任务时跳过已完成的阶段，
   失败后重排即可续跑。
 - `cancel` 只在**阶段边界**生效：阶段内部不中断，跑完当前阶段后检查标志再收尾；终态写入
@@ -12,7 +13,8 @@
   否则它们永远不会再被认领。
 - 阻塞的文件扫描与 sqlite 读写都丢进 `asyncio.to_thread`，不占事件循环。
 
-`#4` 只真正实现 `parse`（统计文件数与 token）；`summarize`/`finalize` 是占位，见 #13。
+`#4` 只真正实现 `parse`（统计文件数与 token）；`summarize`/`finalize` 是占位。`#21` 补上
+`download`/`decompile` 两段，阶段实现在 `mc_librarian.fetch.pipeline`，这里只负责编排与落盘。
 """
 
 from __future__ import annotations
@@ -20,25 +22,35 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
 from mc_librarian import audit
 from mc_librarian.config import Settings
 from mc_librarian.db import Database, transaction
+from mc_librarian.fetch.errors import FetchError
+from mc_librarian.fetch.pipeline import (
+    FetchContext,
+    cache_dir_for,
+    run_fetch_stage,
+    source_dir_for,
+)
+from mc_librarian.fetch.tools import PipelineTools, default_tools
 from mc_librarian.jobs import store
 from mc_librarian.schemas import LogLevel
 
 logger = logging.getLogger("mc_librarian.jobs")
 
-# 阶段顺序即进度分母；`checkpoint.stages` 记已完成的阶段名。
-# `#4` 只支持带 `options.source_dir` 的任务（接口层缺它就 422），所以阶段序列固定这三段；
-# `#13` 落地真实版本流水线时会在前面补 `download`/`decompile`。
-STAGES: Final[tuple[str, ...]] = ("parse", "summarize", "finalize")
-# 收尾阶段，取消时用来描述停在哪。
+# 全部阶段的规范顺序；`stages_for` 按任务参数选子集。
+# `#4` 只支持带 `options.source_dir` 的任务，走 `SOURCE_STAGES`；不带源目录的任务先跑
+# `FETCH_STAGES`（`#21`），`#13` 落地真实版本流水线时再把它们接成完整五段。
+STAGES: Final[tuple[str, ...]] = ("download", "decompile", "parse", "summarize", "finalize")
+SOURCE_STAGES: Final[tuple[str, ...]] = STAGES[2:]
+FETCH_STAGES: Final[tuple[str, ...]] = STAGES[:2]
+# 收尾阶段，取消时用来描述停在哪（五段全跑时）。
 FINAL_STAGE: Final = "finalize"
 
 # token 估算：不引入 tiktoken 依赖，按「字符数 ÷ 3.5」近似 cl100k 词元数（#13 可换真分词）。
@@ -57,11 +69,18 @@ class StageError(RuntimeError):
 
 @dataclass(frozen=True)
 class JobContext:
-    """一个阶段的输入：任务参数 + 数据根 + 日志回调。"""
+    """一个阶段的输入：任务参数 + 数据根 + 日志回调 + 版本/checkpoint/工具链。
+
+    `version` 与 `checkpoint` 供 `download`/`decompile` 两段使用（`parse` 只用 `options`）；
+    `tools` 是下载/remap/反编译的可注入实现，parse-only 任务不需要它。
+    """
 
     options: dict[str, Any]
     data_dir: Path
     log: Callable[[LogLevel, str], None]
+    version: str = ""
+    checkpoint: Mapping[str, Any] = field(default_factory=dict)
+    tools: PipelineTools | None = None
 
     @property
     def source_dir(self) -> Path | None:
@@ -74,6 +93,11 @@ class JobContext:
         path = Path(raw).expanduser()
 
         return path if path.is_absolute() else (self.data_dir / path)
+
+
+def stages_for(options: Mapping[str, Any]) -> tuple[str, ...]:
+    """按任务参数选阶段序列：给了 `source_dir` 走 `#4` 的三段，否则先走 `download/decompile`。"""
+    return SOURCE_STAGES if options.get("source_dir") else FETCH_STAGES
 
 
 def tokens_from_chars(chars: int) -> int:
@@ -107,13 +131,35 @@ def iter_source_files(root: Path) -> Iterator[Path]:
 def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     """执行一个阶段，返回要并入 checkpoint 的产物。
 
-    `#4` 只实现 `parse`（统计文件数与 token 估算）；`summarize`/`finalize` 待 #13 接真正的
-    流水线，这里只标记完成。
+    `parse` 在 `#4` 里实现（统计文件数与 token 估算）；`download`/`decompile` 交给
+    `mc_librarian.fetch.pipeline`；`summarize`/`finalize` 待 #13 接真正的流水线，这里只标记完成。
     """
     if stage == "parse":
         return _parse_stage(context)
 
+    if stage in FETCH_STAGES:
+        return _fetch_stage(stage, context)
+
     return {}
+
+
+def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
+    """`download` / `decompile` 两段：转调 fetch 流水线，失败统一转成 `StageError`。"""
+    if context.tools is None:
+        raise StageError(f"{stage} 阶段缺少工具链（PipelineTools）")
+
+    fetch_context = FetchContext(
+        version=context.version,
+        cache_dir=cache_dir_for(context.data_dir, context.version),
+        source_dir=source_dir_for(context.data_dir, context.version),
+        log=context.log,
+        checkpoint=context.checkpoint,
+    )
+
+    try:
+        return run_fetch_stage(stage, fetch_context, context.tools)
+    except FetchError as error:
+        raise StageError(str(error)) from error
 
 
 def _parse_stage(context: JobContext) -> dict[str, Any]:
@@ -157,10 +203,13 @@ class JobRunner:
         database: Database,
         *,
         poll_interval: float = 0.2,
+        tools: PipelineTools | None = None,
     ) -> None:
         self._settings = settings
         self._database = database
         self._poll_interval = poll_interval
+        # 下载/remap/反编译的工具链；测试注入假实现，生产走 `Settings` 里的 jar 路径。
+        self._tools = tools if tools is not None else default_tools(settings)
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
 
@@ -213,11 +262,12 @@ class JobRunner:
         options = store.options_of(row)
         checkpoint = store.checkpoint_of(row)
         done = {str(item) for item in checkpoint.get("stages", [])}
-        total = len(STAGES)
+        stages = stages_for(options)
+        total = len(stages)
         # 当前停在的阶段（与 `jobs.stage` 列一致）；取消时用它写 `stage` 与 `message`。
         current_stage: str | None = None
 
-        for index, stage in enumerate(STAGES):
+        for index, stage in enumerate(stages):
             if stage in done:
                 current_stage = stage
                 continue
@@ -233,6 +283,9 @@ class JobRunner:
                 options=options,
                 data_dir=self._settings.data_dir,
                 log=lambda level, message: self._log(job_id, level, message),
+                version=version,
+                checkpoint=checkpoint,
+                tools=self._tools,
             )
 
             try:
@@ -323,37 +376,45 @@ class JobRunner:
 
         `succeeded` 时登记版本行：**仅当版本未注册时插入一行**，已注册版本不动；
         真的插入了才写 `version.recorded` 审计。`canceled` 时不碰版本表。这样 finalize
-        执行期间到达的取消不会被吞掉。
+        执行期间到达的取消不会被吞掉。只有跑过 `parse`（索引阶段）的任务才登记：
+        `download/decompile` 两段产出的是源码树，不是可检索索引。
+
+        取消描述用 checkpoint 里最后一个已完成阶段，而不是写死的 `finalize`——
+        `download/decompile` 两段的任务最后一站是 `decompile`。
         """
+        completed = [str(name) for name in checkpoint.get("stages", [])]
+        final_stage = completed[-1] if completed else FINAL_STAGE
+
         with self._database.connect() as conn, transaction(conn):
             status = store.finish_succeeded_or_canceled(
                 conn,
                 job_id,
                 succeeded_message="索引完成",
-                canceled_message=f"已取消（停在 {FINAL_STAGE}）",
+                canceled_message=f"已取消（停在 {final_stage}）",
             )
 
             if status == "succeeded":
-                inserted = store.insert_version_if_absent(
-                    conn,
-                    version=version,
-                    files=int(checkpoint.get("files", 0)),
-                    tokens=int(checkpoint.get("tokens", 0)),
-                )
-
-                if inserted is not None:
-                    audit.record(
+                if "parse" in completed:
+                    inserted = store.insert_version_if_absent(
                         conn,
-                        actor_id=None,
-                        action=audit.ACTION_VERSION_RECORDED,
-                        target=inserted.version,
-                        detail={"files": inserted.files, "tokens": inserted.tokens},
+                        version=version,
+                        files=int(checkpoint.get("files", 0)),
+                        tokens=int(checkpoint.get("tokens", 0)),
                     )
+
+                    if inserted is not None:
+                        audit.record(
+                            conn,
+                            actor_id=None,
+                            action=audit.ACTION_VERSION_RECORDED,
+                            target=inserted.version,
+                            detail={"files": inserted.files, "tokens": inserted.tokens},
+                        )
 
                 store.append_log(conn, job_id, level="info", message="任务完成")
             elif status == "canceled":
                 store.append_log(
-                    conn, job_id, level="warn", message=f"在 {FINAL_STAGE} 阶段边界取消"
+                    conn, job_id, level="warn", message=f"在 {final_stage} 阶段边界取消"
                 )
 
     def _fail(self, job_id: str, error: str) -> None:

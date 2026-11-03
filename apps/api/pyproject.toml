@@ -23,6 +23,10 @@ dev = [
   "types-pyyaml>=6.0.12",
 ]
 
+[project.scripts]
+# `mc-librarian fetch ...` 与 `python -m mc_librarian fetch ...` 是同一个入口。
+mc-librarian = "mc_librarian.__main__:cli"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -34,6 +38,9 @@ packages = ["src/mc_librarian"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
+markers = [
+  "network: 需要联网下载真实 jar / 跑真反编译的端到端测试，默认跳过（--run-network 或 MC_LIBRARIAN_NETWORK=1 启用）",
+]
 
 [tool.ruff]
 line-length = 100

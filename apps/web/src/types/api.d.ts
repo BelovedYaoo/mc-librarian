@@ -389,8 +389,9 @@ export interface paths {
         /**
          * 创建索引任务
          * @description 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
-         *     只接受带 `options.source_dir` 的任务，阶段序列固定 `parse → summarize → finalize`；
-         *     缺 `options.source_dir` 返回 422（`download`/`decompile` 待 #13 引入，见 `JobCreate`）。
+         *     只接受带 `options.source_dir` 的任务，阶段序列 `parse → summarize → finalize`；
+         *     缺 `options.source_dir` 返回 422（不带源目录的 `download`/`decompile` 两段由 #21 实现，
+         *     `#13` 才会放开可选，见 `JobCreate`）。
          */
         post: operations["createJob"];
         delete?: never;
@@ -770,12 +771,12 @@ export interface components {
             /** @enum {string} */
             status: "queued" | "running" | "succeeded" | "failed" | "canceled";
             /**
-             * @description 任务当前阶段。`#4` 固定为 `parse → summarize → finalize`；
-             *     `#13` 会在前面补 `download`/`decompile`（存储层 CHECK 也只有这三段，
-             *     届时新增一条迁移，见 `db.py` 的 v4 注释）。
+             * @description 任务当前阶段。阶段序列由 `options.source_dir` 决定：给了源目录走
+             *     `parse → summarize → finalize`（#4），否则先走 `download → decompile`（#21，产物是源码树）。
+             *     `#13` 会把两者接成完整五段。
              * @enum {string}
              */
-            stage?: "parse" | "summarize" | "finalize";
+            stage?: "download" | "decompile" | "parse" | "summarize" | "finalize";
             /** Format: float */
             progress?: number;
             message?: string;
@@ -798,8 +799,8 @@ export interface components {
                  * @description 源码根目录；相对路径按数据根解析。**必填**：
                  *
                  *     - 有 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始；
-                 *     - 缺 `source_dir` → 422。`download`/`decompile` 属于 #13，`#4` 不实现也不占位，
-                 *       `#13` 落地后才会把它改成可选并补上这两段。
+                 *     - 缺 `source_dir` → 422。不带源目录的 `download`/`decompile` 两段由 #21 实现，
+                 *       `#13` 才会把它改成可选并接成完整五段。
                  *
                  *     `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */

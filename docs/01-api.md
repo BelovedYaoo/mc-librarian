@@ -108,7 +108,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `POST /v1/admin/versions` | 注册已上传的索引文件（节点侧不构建索引） |
 | `GET/POST /v1/admin/users`、`PATCH /v1/admin/users/{id}` | 建号（返回一次性邀请链接）、升降角色、启停；最后一个启用的 admin 受保护 |
 | `POST /v1/admin/jobs` | 创建索引任务（`kind` 目前仅 `index`），立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
-| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ parse/summarize/finalize（`#4`；`#13` 会补 download/decompile），`progress` 0–1 |
+| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize（`#4` 三段，`#21` 补 download/decompile），`progress` 0–1 |
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
@@ -118,14 +118,15 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 **任务只保留 `kind: index`**：`reindex` / `summarize` 待 #7 / #13 引入，当前不提供，避免出现「跑成功但什么都没做」的任务。
 
-**阶段序列由 `options.source_dir` 决定，且 `#4` 只支持带源目录的任务：**
+**阶段序列由 `options.source_dir` 决定：**
 
 | 入参 | 阶段序列 | 说明 |
 |---|---|---|
 | 带 `source_dir` | `parse → summarize → finalize` | `#4` 的真实路径：扫描源码目录、统计文件数与 token 估算 |
-| 不带 `source_dir` | — | `#4` 返回 422 |
+| 不带 `source_dir` | `download → decompile` | `#21` 的下载+反编译流水线：解析版本清单、下载 jar（≤ 1.21.11 先 remap）、反编译出源码树 |
+| 不带 `source_dir`（接口层） | — | 仍返回 422：`#13` 才会放开可选并把两段接成完整五段 |
 
-`download` / `decompile` 属于 #13（真实版本流水线），`#4` 不实现也不占位。`#13` 落地后再把 `source_dir` 改为可选，并为不带源目录的任务补上这两段。这样不存在「阶段永不推进」或「必在 `parse` 失败且重试永久卡死」的路径。
+`download` / `decompile` 两段由 `#21` 实现（`mc-librarian fetch --version <v> --out <dir>` 是它的独立入口），产物（jar 路径、源码树路径、文件数、字节数）写进 `jobs.checkpoint`，续跑时跳过已完成阶段；纯 fetch 任务不登记版本（产出的是源码树，不是可检索索引）。接口层暂时仍要求 `options.source_dir`，所以这两段目前只能由 CLI 或直接建任务触发；`#13` 落地后再把 `source_dir` 改为可选。这样不存在「阶段永不推进」或「必在 `parse` 失败且重试永久卡死」的路径。
 
 **版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
@@ -156,4 +157,5 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | 复审修复：契约补 `POST /v1/admin/jobs/{jobId}/retry`、删掉 `getJobLogs` 的 SSE 描述、`source_dir` 改为所有 kind 必填；实现重试续跑与启动时重排遗留 `running`，`_succeed` 不再虚报 `obfuscated`/`has_summaries`，PAT 签发/吊销、任务创建、版本注册补审计，前端加 `/audit` 页。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（根因）：版本写入拆成管理员注册与任务产出两条路径（任务不再抹掉 `db_path`/`has_summaries`）；`kind` 收窄为 `index`（`reindex`/`summarize` 待 #7/#13），删掉无效的 `with_summaries`；阶段序列按 `options.source_dir` 选择；cancel/retry 与终态写入改为带状态守卫的原子 UPDATE（消除 TOCTOU），启动恢复不丢取消意图，`_fail` 加状态守卫；补 `version.recorded`/`job.canceled`/`job.retried` 审计，`audit` 的 `actor` 对系统动作为 `null`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（#4 收口）：任务只接受带 `options.source_dir` 的任务（缺则 422），阶段序列固定 `parse → summarize → finalize`，删掉 `download`/`decompile` 占位与死代码；任务产出改为「仅当版本未注册时插入一行」，已注册版本任何字段不变；取消的 `stage` 与 `message` 对齐（传当前阶段）、`_fail` 先写终态再按 rowcount 记日志、retry 重排清空旧阶段/进度/说明。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | issue #21：迁移 v5 把 `jobs.stage` 的 CHECK 扩出 `download`/`decompile`，`STAGES` 扩为五段（阶段序列仍由 `options.source_dir` 选择，`parse`/`summarize`/`finalize` 行为不变）；新增 `mc-librarian fetch --version <v> --out <dir>`（Mojang 版本清单解析、下载 jar、≤ 1.21.11 用 SpecialSource 应用官方 mappings、Vineflower 反编译出只含 `.java` 的源码树，阶段产物写 checkpoint 供续跑）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（#4 收尾）：迁移 v4 的 `jobs.kind`/`stage` CHECK 收窄到接口层取值域（`kind` 仅 `index`；`stage` 为 NULL 或 `parse`/`summarize`/`finalize`），读取路径不再可能读到投影外的值而 500；取消时 `stage` 列补写当前阶段（重排会清空它），与 `message` 对齐；契约文档去掉内部函数名与「存储层保留历史值」的过期说法。属 v0.2 设计内的增量补齐，`info.version` 不变 |

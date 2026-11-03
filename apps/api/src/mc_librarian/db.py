@@ -3,8 +3,9 @@
 设计约束（见 `docs/00-overview.md` §5.1）：
 
 - 只用标准库 `sqlite3`，不引入 ORM；
-- 迁移只有「版本表 + 幂等建表」：每个迁移是一个版本号加一组 `CREATE ... IF NOT EXISTS`，
-  启动时把 `schema_version` 里没有的版本按序执行一遍并记账，因此重复启动是安全的；
+- 迁移是「版本表 + 一组语句」：每个迁移是一个版本号加一组 `CREATE ... IF NOT EXISTS`
+  （需要改 CHECK 时按 SQLite 的标准流程重建表，见 v5），启动时把 `schema_version` 里
+  没有的版本按序执行一遍并记账，因此重复启动是安全的；
 - 后续 ticket 加表只需在 `MIGRATIONS` 末尾追加一条，不动已有版本。
 
 时间统一存 UTC 的定宽文本（`YYYY-MM-DDTHH:MM:SSZ`），这样 SQL 里可以直接按字符串比较先后。
@@ -38,14 +39,21 @@ def utc_after(hours: float) -> str:
 
 @dataclass(frozen=True)
 class Migration:
-    """一次 schema 迁移：版本号 + 一组幂等语句。"""
+    """一次 schema 迁移：版本号 + 一组幂等语句。
+
+    `foreign_keys_off` 用于需要重建表的迁移（SQLite 改不了 CHECK）：删旧表时外键若开着，
+    `ON DELETE CASCADE` 会把子表数据一起清掉（`job_logs` 引用 `jobs(id)`），所以重建期间
+    必须先关外键，迁移跑完再打开。
+    """
 
     version: int
     statements: tuple[str, ...]
+    foreign_keys_off: bool = False
 
 
 # v1：账号与会话；v2：个人访问令牌（pats）；v3：邀请与审计（invites/audit）；
-# v4：索引任务框架（jobs/job_logs/versions）。后续 ticket 在末尾继续追加，不改已有版本。
+# v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile。
+# 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
         version=1,
@@ -193,6 +201,55 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             """,
         ),
     ),
+    # v5：`jobs.stage` 的取值域扩出 `download`/`decompile`（issue #21）。
+    # SQLite 不能直接改 CHECK，只能按标准流程重建表：建新表 → 拷数据 → 删旧表 → 改名 → 重建索引。
+    # `job_logs` 通过外键引用 `jobs(id)` 且带 `ON DELETE CASCADE`，删 `jobs` 时外键若开着会
+    # 连带清空 `job_logs`，所以本迁移要求 `migrate()` 在重建期间关闭外键（`foreign_keys_off`）。
+    # 必须新增迁移而不是回头改 v4：#4 的注释已写明，v4 落地时库还没部署，而本票落地时库
+    # 可能已经部署过，只能追加。
+    Migration(
+        version=5,
+        foreign_keys_off=True,
+        statements=(
+            """
+            CREATE TABLE jobs_v5 (
+              id               TEXT PRIMARY KEY,
+              kind             TEXT NOT NULL CHECK (kind IN ('index')),
+              version          TEXT NOT NULL,
+              status           TEXT NOT NULL CHECK (
+                                 status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')
+                               ),
+              stage            TEXT CHECK (stage IS NULL OR stage IN (
+                                 'download', 'decompile', 'parse', 'summarize', 'finalize'
+                               )),
+              progress         REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
+              message          TEXT,
+              error            TEXT,
+              checkpoint       TEXT NOT NULL DEFAULT '{}',
+              options          TEXT NOT NULL DEFAULT '{}',
+              cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+              created_at       TEXT NOT NULL,
+              started_at       TEXT,
+              finished_at      TEXT,
+              created_by       TEXT REFERENCES users (id)
+            )
+            """,
+            """
+            INSERT INTO jobs_v5 (
+              id, kind, version, status, stage, progress, message, error,
+              checkpoint, options, cancel_requested, created_at, started_at, finished_at, created_by
+            )
+            SELECT
+              id, kind, version, status, stage, progress, message, error,
+              checkpoint, options, cancel_requested, created_at, started_at, finished_at, created_by
+            FROM jobs
+            """,
+            "DROP TABLE jobs",
+            "ALTER TABLE jobs_v5 RENAME TO jobs",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs (status, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_version ON jobs (version, status)",
+        ),
+    ),
 )
 
 LATEST_VERSION: Final = MIGRATIONS[-1].version
@@ -257,14 +314,22 @@ def migrate(conn: sqlite3.Connection) -> int:
         if migration.version <= current:
             continue
 
-        with transaction(conn):
-            for statement in migration.statements:
-                conn.execute(statement)
+        # 重建表的迁移要先关外键，否则删旧表会连带清空子表（见 `Migration.foreign_keys_off`）。
+        if migration.foreign_keys_off:
+            conn.execute("PRAGMA foreign_keys=OFF")
 
-            conn.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (migration.version, utc_now()),
-            )
+        try:
+            with transaction(conn):
+                for statement in migration.statements:
+                    conn.execute(statement)
+
+                conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                    (migration.version, utc_now()),
+                )
+        finally:
+            if migration.foreign_keys_off:
+                conn.execute("PRAGMA foreign_keys=ON")
 
     return schema_version(conn)
 
