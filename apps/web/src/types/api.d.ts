@@ -74,7 +74,22 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 混合检索（摘要 / 符号 / 字面量） */
+        /**
+         * 混合检索（摘要 / 符号 / 字面量）
+         * @description 三路召回在服务端融合，调用方不需要知道该用哪条通道：
+         *
+         *     - **symbol** — 索引库的类/方法/字段，复用 `/v1/symbol` 的四级匹配（fqn → simple → 后缀 → 编辑距离）
+         *     - **literal** — ripgrep 子进程扫 `<data_dir>/src/<version>/`，按文件路径 + 行号排序
+         *     - **reference** — query 命中某个符号名时反查 `refs` 表里的引用点
+         *     - **summary** — `summaries` 表（#7 落地；表不存在时该路为空，不报错）
+         *
+         *     融合用 RRF（`1/(60+rank)` 逐路累加，再按本次最高分归一化到 `[0, 1]`），
+         *     每路各取前 50 条候选。`why` 是去重后的来源数组，顺序固定 `summary → symbol →
+         *     literal → reference`，至少含一个值。`detail=locate` 只返回定位信息（不含
+         *     `snippet` 与 `summary`），`snippet` 额外附带源码片段。`max_tokens` 按 score 降序累加
+         *     `tokens` 截断，至少保留第一条。`path_prefix` 在候选阶段过滤（三路各自带 path 条件）。
+         *     任何一路为空都不算错误：无命中时返回 `200` + 空 `hits` / `suggestions`。
+         */
         post: operations["search"];
         delete?: never;
         options?: never;
@@ -606,6 +621,7 @@ export interface components {
             version: string;
             hits: components["schemas"]["Hit"][];
             suggestions?: string[];
+            /** @description 融合前的候选总数（各路候选之和），不因 limit / max_tokens 截断而变 */
             total: number;
             took_ms: number;
         };
@@ -1119,8 +1135,9 @@ export interface operations {
                     "application/json": components["schemas"]["SearchResponse"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
         };
     };
     getSymbol: {

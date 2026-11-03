@@ -1,7 +1,7 @@
-"""检索与阅读端点：`/v1/symbol`、`/v1/references`、`/v1/outline`、`/v1/read`。
+"""检索与阅读端点：`POST /v1/search`、`/v1/symbol`、`/v1/references`、`/v1/outline`、`/v1/read`。
 
-规格见 issue #5 的规格补充 §6–§9 与 §16；契约见 `docs/openapi.yaml`。
-四个端点都只要求登录（`user` 即可）：数据来自该版本的索引库 `db/<version>.sqlite`
+规格见 issue #5 的规格补充 §6–§9 与 §16、issue #6 的规格补充 §1–§11；契约见 `docs/openapi.yaml`。
+端点都只要求登录（`user` 即可）：数据来自该版本的索引库 `db/<version>.sqlite`
 与源码树 `src/<version>/`，两者都在数据根下（`indexing.layout`）。
 """
 
@@ -20,6 +20,7 @@ from mc_librarian.indexing.layout import source_root
 from mc_librarian.indexing.text import split_lines, tokens_from_chars
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
+from mc_librarian.retrieval import search as run_search
 from mc_librarian.schemas import (
     FileSlice,
     Outline,
@@ -27,6 +28,8 @@ from mc_librarian.schemas import (
     OutlineMethod,
     Reference,
     ReferenceResponse,
+    SearchRequest,
+    SearchResponse,
     SymbolDetail,
     SymbolKind,
     SymbolMatches,
@@ -78,6 +81,38 @@ def _read_source(settings: Settings, version: str, path: str) -> str:
         raise ProblemException(404, NOT_FOUND_TITLE, f"该版本的源码树缺失（期望路径 {root}）")
 
     return candidate.read_text(encoding="utf-8", errors="replace")
+
+
+@router.post(
+    "/search",
+    tags=["retrieve"],
+    summary="混合检索（摘要 / 符号 / 字面量）",
+    description=(
+        "三路召回（symbol / literal / reference，摘要通道待 #7）在服务端用 RRF 融合，"
+        "调用方不需要知道该用哪条通道。`detail=locate` 只返回定位信息（省 token），"
+        "`snippet` 额外附带源码片段与摘要；`max_tokens` 按 score 降序截断；"
+        "`path_prefix` 在候选阶段过滤。"
+    ),
+    operation_id="search",
+    response_model_exclude_none=True,
+    responses={
+        401: problem_response("未认证"),
+        404: problem_response("版本未注册或索引文件不存在"),
+        422: problem_response("请求不合法"),
+    },
+)
+def search(
+    conn: DbConn,
+    _user: CurrentUser,
+    settings: SettingsDep,
+    body: SearchRequest,
+) -> SearchResponse:
+    index = query.open_readonly(_require_index(conn, settings, body.version))
+
+    try:
+        return run_search(index, settings, body)
+    finally:
+        index.close()
 
 
 @router.get(

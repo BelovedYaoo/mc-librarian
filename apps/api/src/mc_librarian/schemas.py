@@ -33,6 +33,8 @@ __all__ = [
     "CreateUserRequest",
     "CreatedUser",
     "FileSlice",
+    "Hit",
+    "HitType",
     "IndexSettings",
     "InviteStatus",
     "Job",
@@ -56,6 +58,9 @@ __all__ = [
     "ReferenceResponse",
     "RegisterVersionRequest",
     "Role",
+    "SearchDetail",
+    "SearchRequest",
+    "SearchResponse",
     "Settings",
     "SetupRequest",
     "SetupStatus",
@@ -72,6 +77,7 @@ __all__ = [
     "UserList",
     "VersionInfo",
     "VersionList",
+    "WhyChannel",
 ]
 
 
@@ -366,3 +372,56 @@ class FileSlice(BaseModel):
     total_lines: int | None = None
     content: str
     truncated: bool
+
+
+# ----------------------------------------------------------------------
+# 混合检索（`POST /v1/search`，issue #6）
+# ----------------------------------------------------------------------
+
+SearchDetail = Literal["locate", "snippet"]
+# `file` 是没有任何符号覆盖的位置（如 `package` 行 / `data/` 下的 JSON）。
+HitType = Literal["class", "method", "field", "file"]
+# `why` 的取值域与固定顺序（issue #6 规格 §4）；`summary` 由 #7 落地后才可能出现。
+WhyChannel = Literal["summary", "symbol", "literal", "reference"]
+
+
+class SearchRequest(BaseModel):
+    """契约 `components.schemas.SearchRequest`；`kind` 只作用于 symbol 通道。"""
+
+    query: str = Field(min_length=1, max_length=512)
+    version: str
+    path_prefix: str | None = None
+    kind: SymbolKind = "any"
+    detail: SearchDetail = "snippet"
+    limit: int = Field(default=10, ge=1, le=50)
+    max_tokens: int = Field(default=4000, ge=200, le=32000)
+
+
+class Hit(BaseModel):
+    """契约 `components.schemas.Hit`；`detail=locate` 时不带 `snippet` / `summary`。"""
+
+    id: str
+    type: HitType
+    version: str
+    path: str
+    symbol: str | None = None
+    lines: list[int] = Field(min_length=2, max_length=2)
+    score: float
+    why: list[WhyChannel]
+    summary: str | None = None
+    snippet: str | None = None
+    tokens: int | None = None
+
+
+class SearchResponse(BaseModel):
+    """契约 `components.schemas.SearchResponse`。
+
+    `total` 是融合前的候选总数（各路候选之和），不因 `limit` / `max_tokens` 截断而变。
+    """
+
+    query: str
+    version: str
+    hits: list[Hit]
+    suggestions: list[str] = Field(default_factory=list)
+    total: int
+    took_ms: int

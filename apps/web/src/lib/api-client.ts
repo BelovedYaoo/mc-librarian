@@ -83,6 +83,20 @@ export type SymbolDetail = components['schemas']['SymbolDetail'];
 export type SymbolMatches =
   paths['/v1/symbol']['get']['responses'][200]['content']['application/json'];
 
+/** 混合检索请求体（`POST /v1/search`）。 */
+export type SearchRequest =
+  paths['/v1/search']['post']['requestBody']['content']['application/json'];
+
+/** 混合检索响应体（`POST /v1/search`）：融合后的命中 + 建议。 */
+export type SearchResponse =
+  paths['/v1/search']['post']['responses'][200]['content']['application/json'];
+
+/** 一条融合命中；`why` 是来源通道数组。 */
+export type Hit = components['schemas']['Hit'];
+
+/** 命中来源通道（`summary` 由 #7 落地后才会出现）。 */
+export type HitChannel = Hit['why'][number];
+
 /** 反查引用的响应体（`GET /v1/references`）。 */
 export type ReferenceResponse =
   paths['/v1/references']['get']['responses'][200]['content']['application/json'];
@@ -276,13 +290,13 @@ export function acceptInvite(token: string, body: AcceptInviteRequest): Promise<
 
 /** 拼 `?a=1&b=2`，忽略 `undefined` 与空串；`false` 要发出去（如 `fuzzy=false`）。 */
 function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
-  const search = new URLSearchParams();
+  const searchParams = new URLSearchParams();
 
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') search.set(key, String(value));
+    if (value !== undefined && value !== '') searchParams.set(key, String(value));
   });
 
-  const query = search.toString();
+  const query = searchParams.toString();
 
   return query ? `?${query}` : '';
 }
@@ -373,6 +387,11 @@ export function getSymbol(
   signal?: AbortSignal
 ): Promise<SymbolMatches> {
   return request<SymbolMatches>(`/v1/symbol${buildQuery(params)}`, { signal });
+}
+
+/** 混合检索：三路召回（symbol / literal / reference）在服务端用 RRF 融合。 */
+export function search(body: SearchRequest, signal?: AbortSignal): Promise<SearchResponse> {
+  return postJson<SearchResponse>('/v1/search', body, { signal });
 }
 
 /** 反查引用；`symbol` 是方法名或 `Class#method`。 */

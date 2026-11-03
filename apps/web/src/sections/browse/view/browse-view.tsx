@@ -1,8 +1,11 @@
 import type {
   FileSlice,
+  Hit,
+  HitChannel,
   Outline,
   OutlineClass,
   OutlineMethod,
+  SearchResponse,
   SymbolDetail,
   SymbolKind,
 } from 'src/lib/api-client';
@@ -15,16 +18,14 @@ import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
-import FormControlLabel from '@mui/material/FormControlLabel';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
-import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 
 import { useVersions } from 'src/hooks';
 
-import { ApiError, getOutline, getSymbol, readFile } from 'src/lib/api-client';
+import { ApiError, getOutline, getSymbol, readFile, search } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
 
@@ -35,59 +36,47 @@ const KIND_OPTIONS: { value: SymbolKind; label: string }[] = [
   { value: 'field', label: '字段' },
 ];
 
-/** 与服务端四级降级一一对应（规格 §6）；服务端已按级别排序，这里只负责标注与分组。 */
-const LEVEL_LABELS = ['全限定名精确', '简单名精确', '后缀匹配', '模糊匹配'];
+/** `why` 的通道标签与配色（规格 §4 的固定顺序）。 */
+const CHANNEL_LABELS: Record<HitChannel, string> = {
+  summary: '摘要',
+  symbol: '符号',
+  literal: '字面量',
+  reference: '引用',
+};
 
-type MatchGroup = { level: number; matches: SymbolDetail[] };
+const CHANNEL_COLORS: Record<HitChannel, 'success' | 'primary' | 'warning' | 'secondary'> = {
+  summary: 'success',
+  symbol: 'primary',
+  literal: 'warning',
+  reference: 'secondary',
+};
 
-function simpleName(match: SymbolDetail): string {
-  const parts = match.kind === 'class' ? match.fqn.split('.') : match.fqn.split('#');
-
-  return parts[parts.length - 1] ?? match.fqn;
-}
-
-function matchLevel(match: SymbolDetail, query: string): number {
-  if (match.fqn === query) return 0;
-  if (simpleName(match) === query) return 1;
-  if (match.fqn.endsWith(`.${query}`)) return 2;
-
-  return 3;
-}
-
-function groupByLevel(matches: SymbolDetail[], query: string): MatchGroup[] {
-  const groups: MatchGroup[] = [];
-
-  matches.forEach((match) => {
-    const level = matchLevel(match, query);
-    const last = groups[groups.length - 1];
-
-    if (last && last.level === level) last.matches.push(match);
-    else groups.push({ level, matches: [match] });
-  });
-
-  return groups;
+function errorText(cause: unknown): string {
+  return cause instanceof ApiError ? cause.message : String(cause);
 }
 
 // ----------------------------------------------------------------------
 
-/** 检索调试台（基础版）：符号搜索 → 匹配列表 → 骨架 → 源码片段。 */
+/** 检索调试台：混合检索 → 融合结果（why / score / lines）→ 展开片段 → 骨架与源码。 */
 export function BrowseView() {
   const { state: versionsState } = useVersions();
 
   const [version, setVersion] = useState('');
-  const [name, setName] = useState('');
-  const [kind, setKind] = useState<SymbolKind>('any');
-  const [fuzzy, setFuzzy] = useState(true);
-
   const [query, setQuery] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [matches, setMatches] = useState<SymbolDetail[]>([]);
-  const [searched, setSearched] = useState(false);
+  const [pathPrefix, setPathPrefix] = useState('');
+  const [kind, setKind] = useState<SymbolKind>('any');
+  const [detail, setDetail] = useState<'snippet' | 'locate'>('snippet');
+  const [limit, setLimit] = useState(10);
+  const [maxTokens, setMaxTokens] = useState(4000);
 
-  const [selected, setSelected] = useState<SymbolDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<SearchResponse | null>(null);
+
+  const [selected, setSelected] = useState<Hit | null>(null);
+  const [symbolDetail, setSymbolDetail] = useState<SymbolDetail | null>(null);
   const [outline, setOutline] = useState<Outline | null>(null);
-  const [outlineError, setOutlineError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   const [slice, setSlice] = useState<FileSlice | null>(null);
   const [sliceError, setSliceError] = useState<string | null>(null);
@@ -103,44 +92,75 @@ export function BrowseView() {
 
   const resetDetail = () => {
     setSelected(null);
+    setSymbolDetail(null);
     setOutline(null);
-    setOutlineError(null);
+    setDetailError(null);
     setSlice(null);
     setSliceError(null);
   };
 
-  const handleSearch = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setSearching(true);
-    setSearchError(null);
+  const runSearch = async (text: string) => {
+    if (!version || text.trim() === '') return;
+
+    setLoading(true);
+    setError(null);
+    setResults(null);
     resetDetail();
 
     try {
-      const body = await getSymbol({ version, name, fuzzy, kind });
+      const body = await search({
+        query: text,
+        version,
+        kind,
+        detail,
+        limit,
+        max_tokens: maxTokens,
+        path_prefix: pathPrefix.trim() === '' ? undefined : pathPrefix.trim(),
+      });
 
-      setMatches(body.matches);
-      setQuery(name);
-      setSearched(true);
+      setResults(body);
+      setQuery(text);
     } catch (cause) {
-      setSearchError(cause instanceof ApiError ? cause.message : String(cause));
-      setMatches([]);
-      setSearched(false);
+      setError(errorText(cause));
     } finally {
-      setSearching(false);
+      setLoading(false);
     }
   };
 
-  const handleSelect = async (match: SymbolDetail) => {
-    setSelected(match);
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    void runSearch(query);
+  };
+
+  /** 建议可点击：追加到当前 query 作为新查询（规格 §11）。 */
+  const handleSuggestion = (suggestion: string) => {
+    const next = query.trim() === '' ? suggestion : `${query.trim()} ${suggestion}`;
+
+    void runSearch(next);
+  };
+
+  const handleSelect = async (hit: Hit) => {
+    setSelected(hit);
+    setSymbolDetail(null);
     setOutline(null);
-    setOutlineError(null);
+    setDetailError(null);
     setSlice(null);
     setSliceError(null);
 
+    if (hit.symbol) {
+      try {
+        const body = await getSymbol({ version, name: hit.symbol, fuzzy: false });
+
+        setSymbolDetail(body.matches[0] ?? null);
+      } catch (cause) {
+        setDetailError(errorText(cause));
+      }
+    }
+
     try {
-      setOutline(await getOutline({ version, path: match.path }));
+      setOutline(await getOutline({ version, path: hit.path }));
     } catch (cause) {
-      setOutlineError(cause instanceof ApiError ? cause.message : String(cause));
+      setDetailError(errorText(cause));
     }
   };
 
@@ -151,17 +171,17 @@ export function BrowseView() {
     try {
       setSlice(await readFile({ version, path, start, end }));
     } catch (cause) {
-      setSliceError(cause instanceof ApiError ? cause.message : String(cause));
+      setSliceError(errorText(cause));
     }
   };
 
   return (
     <Stack spacing={3}>
-      <Typography variant="h4">检索</Typography>
+      <Typography variant="h4">检索调试台</Typography>
 
       <Card variant="outlined">
         <CardContent>
-          <Box component="form" onSubmit={handleSearch}>
+          <Box component="form" onSubmit={handleSubmit}>
             <Stack spacing={2}>
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
                 <TextField
@@ -180,18 +200,30 @@ export function BrowseView() {
                 </TextField>
 
                 <TextField
-                  label="符号名"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="MobCategory 或 net.minecraft.world.entity.MobCategory"
-                  helperText="支持全限定名、简单名、后缀与模糊匹配"
-                  required
+                  label="查询"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="刷怪上限 / MobCategory / spawnInterval"
+                  helperText="三路召回（符号 / 字面量 / 引用）在服务端融合"
                   fullWidth
                 />
+              </Stack>
+
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                <TextField
+                  select
+                  label="详情"
+                  value={detail}
+                  onChange={(event) => setDetail(event.target.value as 'snippet' | 'locate')}
+                  sx={{ minWidth: 140 }}
+                >
+                  <MenuItem value="snippet">片段（snippet）</MenuItem>
+                  <MenuItem value="locate">仅定位（locate）</MenuItem>
+                </TextField>
 
                 <TextField
                   select
-                  label="类型"
+                  label="符号类型"
                   value={kind}
                   onChange={(event) => setKind(event.target.value as SymbolKind)}
                   sx={{ minWidth: 120 }}
@@ -202,24 +234,41 @@ export function BrowseView() {
                     </MenuItem>
                   ))}
                 </TextField>
-              </Stack>
 
-              <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
-                <FormControlLabel
-                  control={
-                    <Switch checked={fuzzy} onChange={(event) => setFuzzy(event.target.checked)} />
-                  }
-                  label="模糊匹配"
+                <TextField
+                  label="路径前缀"
+                  value={pathPrefix}
+                  onChange={(event) => setPathPrefix(event.target.value)}
+                  placeholder="net/minecraft/world"
+                  sx={{ flex: '1 1 auto' }}
                 />
 
+                <TextField
+                  label="条数上限"
+                  type="number"
+                  value={limit}
+                  onChange={(event) => setLimit(Number(event.target.value))}
+                  sx={{ width: 120 }}
+                />
+
+                <TextField
+                  label="token 预算"
+                  type="number"
+                  value={maxTokens}
+                  onChange={(event) => setMaxTokens(Number(event.target.value))}
+                  sx={{ width: 140 }}
+                />
+              </Stack>
+
+              <Stack direction="row" spacing={2}>
                 <Box sx={{ flex: '1 1 auto' }} />
 
                 <Button
                   type="submit"
                   variant="contained"
-                  disabled={searching || !version || name === ''}
+                  disabled={loading || !version || query.trim() === ''}
                 >
-                  {searching ? '搜索中…' : '搜索'}
+                  {loading ? '检索中…' : '检索'}
                 </Button>
               </Stack>
             </Stack>
@@ -233,40 +282,58 @@ export function BrowseView() {
         </Alert>
       )}
 
-      {searchError && <Alert severity="error">搜索失败：{searchError}</Alert>}
+      {error && <Alert severity="error">检索失败：{error}</Alert>}
 
-      {searched && matches.length === 0 && <Alert severity="warning">没有匹配的符号。</Alert>}
+      {results && results.hits.length === 0 && (
+        <Alert severity="warning">没有命中（total 0）。换一个 query 或放宽路径前缀。</Alert>
+      )}
 
-      {matches.length > 0 && (
+      {results && results.hits.length > 0 && (
         <Card variant="outlined">
           <CardContent>
-            <Typography variant="h6" sx={{ mb: 2 }}>
-              匹配（{matches.length}）
+            <Typography variant="h6" sx={{ mb: 1 }}>
+              命中（{results.hits.length} / total {results.total}）
             </Typography>
 
-            <Stack spacing={2} divider={<Divider flexItem />}>
-              {groupByLevel(matches, query).map((group) => (
-                <Stack key={group.level} spacing={1}>
-                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                    {LEVEL_LABELS[group.level]}
-                  </Typography>
+            <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+              耗时 {results.took_ms} ms · detail={detail}
+            </Typography>
 
-                  {group.matches.map((match) => (
-                    <MatchRow
-                      key={match.fqn}
-                      match={match}
-                      selected={selected?.fqn === match.fqn}
-                      onSelect={() => handleSelect(match)}
-                    />
-                  ))}
-                </Stack>
+            {(results.suggestions?.length ?? 0) > 0 && (
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 2, flexWrap: 'wrap' }}>
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  建议
+                </Typography>
+
+                {(results.suggestions ?? []).map((suggestion) => (
+                  <Chip
+                    key={suggestion}
+                    size="small"
+                    variant="outlined"
+                    label={suggestion}
+                    onClick={() => handleSuggestion(suggestion)}
+                  />
+                ))}
+              </Stack>
+            )}
+
+            <Stack spacing={2} divider={<Divider flexItem />}>
+              {results.hits.map((hit) => (
+                <HitRow
+                  key={`${hit.id}:${hit.lines.join('-')}`}
+                  hit={hit}
+                  selected={selected === hit}
+                  onSelect={() => void handleSelect(hit)}
+                />
               ))}
             </Stack>
           </CardContent>
         </Card>
       )}
 
-      {outlineError && <Alert severity="error">读取骨架失败：{outlineError}</Alert>}
+      {detailError && <Alert severity="error">读取详情失败：{detailError}</Alert>}
+
+      {symbolDetail && selected && <SymbolDetailBlock detail={symbolDetail} />}
 
       {outline && selected && (
         <Card variant="outlined">
@@ -303,36 +370,121 @@ export function BrowseView() {
 
 // ----------------------------------------------------------------------
 
-type MatchRowProps = {
-  match: SymbolDetail;
+function HitRow({
+  hit,
+  selected,
+  onSelect,
+}: {
+  hit: Hit;
   selected: boolean;
   onSelect: () => void;
-};
+}) {
+  const [expanded, setExpanded] = useState(false);
 
-function MatchRow({ match, selected, onSelect }: MatchRowProps) {
   return (
-    <Stack
-      direction="row"
-      spacing={1.5}
-      sx={{
-        alignItems: 'center',
-        cursor: 'pointer',
-        borderRadius: 1,
-        px: 1,
-        py: 0.5,
-        backgroundColor: selected ? 'action.selected' : undefined,
-        '&:hover': { backgroundColor: 'action.hover' },
-      }}
-      onClick={onSelect}
-    >
-      <Chip size="small" label={match.kind} />
-      <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: '1 1 auto' }}>
-        {match.fqn}
-      </Typography>
-      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-        {match.path}:{match.lines.join('-')}
-      </Typography>
+    <Stack spacing={1}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+        {hit.why.map((channel) => (
+          <Chip
+            key={channel}
+            size="small"
+            color={CHANNEL_COLORS[channel]}
+            label={CHANNEL_LABELS[channel]}
+          />
+        ))}
+
+        <Chip size="small" variant="outlined" label={hit.type} />
+
+        <Typography
+          variant="body2"
+          sx={{
+            fontFamily: 'monospace',
+            flex: '1 1 auto',
+            cursor: 'pointer',
+            '&:hover': { textDecoration: 'underline' },
+          }}
+          onClick={onSelect}
+        >
+          {hit.symbol ?? hit.path}
+        </Typography>
+
+        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+          {hit.path}:{hit.lines.join('-')}
+        </Typography>
+
+        <Chip size="small" variant="outlined" label={`score ${hit.score.toFixed(3)}`} />
+
+        {hit.snippet && (
+          <Button size="small" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? '收起片段' : '展开片段'}
+          </Button>
+        )}
+      </Stack>
+
+      {selected && (
+        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+          已选中 · tokens {hit.tokens ?? 0}
+        </Typography>
+      )}
+
+      {expanded && hit.snippet && (
+        <Box
+          component="pre"
+          sx={{
+            fontFamily: 'monospace',
+            fontSize: 13,
+            lineHeight: 1.6,
+            overflowX: 'auto',
+            bgcolor: 'action.hover',
+            borderRadius: 1,
+            p: 2,
+            m: 0,
+          }}
+        >
+          {hit.snippet}
+        </Box>
+      )}
     </Stack>
+  );
+}
+
+function SymbolDetailBlock({ detail }: { detail: SymbolDetail }) {
+  return (
+    <Card variant="outlined">
+      <CardContent>
+        <Typography variant="h6" sx={{ fontFamily: 'monospace' }}>
+          {detail.signature ?? detail.fqn}
+        </Typography>
+
+        <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+          {detail.kind} · {detail.path}:{detail.lines.join('-')}
+          {detail.superclass ? ` · extends ${detail.superclass}` : ''}
+          {detail.interfaces && detail.interfaces.length > 0
+            ? ` · implements ${detail.interfaces.join(', ')}`
+            : ''}
+        </Typography>
+
+        {(detail.annotations?.length ?? 0) > 0 && (
+          <Stack direction="row" spacing={1} sx={{ mb: 2, flexWrap: 'wrap' }}>
+            {(detail.annotations ?? []).map((annotation) => (
+              <Chip key={annotation} size="small" variant="outlined" label={`@${annotation}`} />
+            ))}
+          </Stack>
+        )}
+
+        <Stack spacing={0.5}>
+          {(detail.members ?? []).map((member) => (
+            <Typography
+              key={`${member.kind}-${member.name}-${member.lines?.join('-')}`}
+              variant="body2"
+              sx={{ fontFamily: 'monospace' }}
+            >
+              {member.kind === 'method' ? 'method' : 'field'} · {member.signature ?? member.name}
+            </Typography>
+          ))}
+        </Stack>
+      </CardContent>
+    </Card>
   );
 }
 
