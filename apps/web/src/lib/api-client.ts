@@ -54,6 +54,20 @@ export type InviteStatus =
 export type AcceptInviteRequest =
   paths['/v1/invites/{token}/accept']['post']['requestBody']['content']['application/json'];
 
+/** 版本注册表里的一行（`GET /v1/versions`）。 */
+export type VersionInfo = components['schemas']['VersionInfo'];
+
+/** 索引任务；`stage` / `progress` 由 JobRunner 推进。 */
+export type Job = components['schemas']['Job'];
+
+export type JobStatus = Job['status'];
+
+export type JobStage = NonNullable<Job['stage']>;
+
+export type JobCreate = components['schemas']['JobCreate'];
+
+export type JobLog = components['schemas']['JobLog'];
+
 /** RFC 7807 错误体，直接取契约的 `Problem`，不从某一条响应里反推。 */
 export type Problem = components['schemas']['Problem'];
 
@@ -225,4 +239,74 @@ export function acceptInvite(token: string, body: AcceptInviteRequest): Promise<
   return postJson<User>(`/v1/invites/${encodeURIComponent(token)}/accept`, body, {
     skipUnauthorizedHandler: true,
   });
+}
+
+// ----------------------------------------------------------------------
+// 版本与索引任务（admin）
+// ----------------------------------------------------------------------
+
+/** 拼 `?a=1&b=2`，忽略 `undefined` 与空串。 */
+function buildQuery(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') search.set(key, String(value));
+  });
+
+  const query = search.toString();
+
+  return query ? `?${query}` : '';
+}
+
+/** 已索引版本列表（登录后可读）。 */
+export async function listVersions(signal?: AbortSignal): Promise<VersionInfo[]> {
+  const body = await request<{ versions?: VersionInfo[] }>('/v1/versions', { signal });
+
+  return body.versions ?? [];
+}
+
+/** 注册已上传的 `db/<version>.sqlite`（管理员）。 */
+export function registerVersion(body: {
+  version: string;
+  obfuscated?: boolean;
+}): Promise<VersionInfo> {
+  return postJson<VersionInfo>('/v1/admin/versions', body);
+}
+
+/** 任务列表；`status` 不传则不过滤。 */
+export async function listJobs(
+  params: { status?: JobStatus; limit?: number } = {},
+  signal?: AbortSignal
+): Promise<Job[]> {
+  const body = await request<{ jobs?: Job[] }>(`/v1/admin/jobs${buildQuery(params)}`, { signal });
+
+  return body.jobs ?? [];
+}
+
+/** 入队一个索引任务，后端立即返回 `202`。 */
+export function createJob(body: JobCreate): Promise<Job> {
+  return postJson<Job>('/v1/admin/jobs', body);
+}
+
+export function getJob(jobId: string, signal?: AbortSignal): Promise<Job> {
+  return request<Job>(`/v1/admin/jobs/${jobId}`, { signal });
+}
+
+/** 按 `after` 增量拉取日志，供日志面板轮询。 */
+export async function getJobLogs(
+  jobId: string,
+  params: { after?: number; limit?: number } = {},
+  signal?: AbortSignal
+): Promise<JobLog[]> {
+  const body = await request<{ lines?: JobLog[] }>(
+    `/v1/admin/jobs/${jobId}/logs${buildQuery(params)}`,
+    { signal }
+  );
+
+  return body.lines ?? [];
+}
+
+/** 取消任务；queued 立即转 canceled，running 在当前阶段边界停止。 */
+export function cancelJob(jobId: string): Promise<Job> {
+  return request<Job>(`/v1/admin/jobs/${jobId}/cancel`, { method: 'POST' });
 }

@@ -36,10 +36,16 @@ export function MainLayout({ children }: MainLayoutProps) {
     }
   };
 
-  // 「用户」只对 admin 显示——隐藏菜单只是体验，后端每个端点会独立校验。
+  // admin-only 的条目只对管理员显示——隐藏菜单只是体验，后端每个端点会独立校验。
   const navItems = [
     { label: '概览', to: paths.home, end: true },
-    ...(user?.role === 'admin' ? [{ label: '用户', to: paths.users }] : []),
+    { label: '版本', to: paths.versions },
+    ...(user?.role === 'admin'
+      ? [
+          { label: '任务', to: paths.jobs },
+          { label: '用户', to: paths.users },
+        ]
+      : []),
   ];
 
   return (

@@ -6,6 +6,8 @@ export const paths = {
   setup: '/setup',
   settings: '/settings',
   users: '/users',
+  versions: '/versions',
+  jobs: '/jobs',
   page404: '/error/404',
 };
 

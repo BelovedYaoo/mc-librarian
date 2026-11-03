@@ -17,6 +17,8 @@ const LoginPage = lazy(() => import('src/pages/login'));
 const SetupPage = lazy(() => import('src/pages/setup'));
 const UsersPage = lazy(() => import('src/pages/users'));
 const InvitePage = lazy(() => import('src/pages/invite'));
+const VersionsPage = lazy(() => import('src/pages/versions'));
+const JobsPage = lazy(() => import('src/pages/jobs'));
 const Page404 = lazy(() => import('src/pages/error/404'));
 
 export const routesSection: RouteObject[] = [
@@ -65,6 +67,34 @@ export const routesSection: RouteObject[] = [
           </MainLayout>
         </Suspense>
       </RequireAuth>
+    ),
+  },
+
+  // 版本管理：所有登录用户可看列表，新建索引入口只对 admin 显示
+  {
+    path: paths.versions,
+    element: (
+      <RequireAuth>
+        <Suspense fallback={<SplashScreen />}>
+          <MainLayout>
+            <VersionsPage />
+          </MainLayout>
+        </Suspense>
+      </RequireAuth>
+    ),
+  },
+
+  // 任务队列：/v1/admin/jobs* 需要 admin
+  {
+    path: paths.jobs,
+    element: (
+      <RequireAdmin>
+        <Suspense fallback={<SplashScreen />}>
+          <MainLayout>
+            <JobsPage />
+          </MainLayout>
+        </Suspense>
+      </RequireAdmin>
     ),
   },
 

@@ -26,6 +26,21 @@ export function RequireAuth({ children }: GuardProps) {
   return <>{children}</>;
 }
 
+/** 管理页守卫：非 admin 回首页（后端仍会对每个 `/v1/admin/*` 独立回 403）。 */
+export function RequireAdmin({ children }: GuardProps) {
+  const { status, user, setupRequired } = useAuth();
+
+  if (status === 'loading') return <SplashScreen />;
+
+  if (setupRequired) return <Navigate to={paths.setup} replace />;
+
+  if (!user) return <Navigate to={paths.login} replace />;
+
+  if (user.role !== 'admin') return <Navigate to={paths.home} replace />;
+
+  return <>{children}</>;
+}
+
 /** 已登录就别再看登录页；还没初始化则先去 setup。 */
 export function RequireGuest({ children }: GuardProps) {
   const { status, user, setupRequired } = useAuth();
@@ -46,24 +61,6 @@ export function RequireSetup({ children }: GuardProps) {
   if (status === 'loading') return <SplashScreen />;
 
   if (!setupRequired) return <Navigate to={user ? paths.home : paths.login} replace />;
-
-  return <>{children}</>;
-}
-
-/**
- * 仅管理员可达（例如 `/users`）：非 admin 回首页。
- * 只是体验层——真正的判定在每个 `/v1/admin/*` 端点里。
- */
-export function RequireAdmin({ children }: GuardProps) {
-  const { status, user, setupRequired } = useAuth();
-
-  if (status === 'loading') return <SplashScreen />;
-
-  if (setupRequired) return <Navigate to={paths.setup} replace />;
-
-  if (!user) return <Navigate to={paths.login} replace />;
-
-  if (user.role !== 'admin') return <Navigate to={paths.home} replace />;
 
   return <>{children}</>;
 }

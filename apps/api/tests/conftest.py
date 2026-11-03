@@ -10,12 +10,15 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from mc_librarian.auth import passwords
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
-from mc_librarian.db import CONTROL_DB_NAME
+from mc_librarian.db import CONTROL_DB_NAME, utc_now
 from mc_librarian.main import create_app
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin-password-1"
+USER_USERNAME = "worker"
+USER_PASSWORD = "worker-password-1"
 
 
 @pytest.fixture
@@ -67,6 +70,38 @@ def other_client(settings: Settings) -> Iterator[TestClient]:
     """
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def user_client(client: TestClient, conn: sqlite3.Connection) -> TestClient:
+    """已登录的普通用户（role=user）：用来验证 `/v1/admin/*` 的 403。
+
+    #9 落地用户管理接口前，直接往 `users` 表插一行再走正常登录。
+    """
+    created = client.post(
+        "/v1/setup",
+        json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+    )
+
+    assert created.status_code == 201, created.text
+
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, role, enabled, created_at)"
+        " VALUES (?, ?, ?, 'user', 1, ?)",
+        ("user-1", USER_USERNAME, passwords.hash_password(USER_PASSWORD), utc_now()),
+    )
+    conn.commit()
+    client.cookies.clear()
+
+    logged_in = client.post(
+        "/v1/auth/login",
+        json={"username": USER_USERNAME, "password": USER_PASSWORD},
+    )
+
+    assert logged_in.status_code == 200, logged_in.text
+    assert logged_in.json()["role"] == "user"
+
+    return client
 
 
 def session_cookie(client: TestClient) -> str:
