@@ -30,6 +30,13 @@ MISSING_SOURCE_DIR_DETAIL = (
     "summarize→finalize 五段），要么给一个非空的源码目录"
 )
 
+# 契约里 `options.obfuscated` 是 `type: boolean`（非 nullable）：显式 null 是笔误，
+# 省略字段才是「不声明」（由 `jobs.runner.resolve_obfuscated` 推断）。
+NULL_OBFUSCATED_DETAIL = (
+    "options.obfuscated 不能显式传 null：省略该字段表示不声明（由服务端按 checkpoint 推断），"
+    "要显式声明请传 true 或 false"
+)
+
 # `MC_LIBRARIAN_INDEX_ENABLED=false` 时本实例不构建索引（节点内存不够跑反编译）。
 INDEX_DISABLED_DETAIL = (
     "本实例已关闭索引构建（MC_LIBRARIAN_INDEX_ENABLED=false），"
@@ -81,6 +88,14 @@ def create_job(
         # 校验与入队同一事务。`options` 可省略（走五段）；给了但 `source_dir` 为空则 422。
         if options is not None and not options.source_dir:
             raise ProblemException(422, BAD_REQUEST_TITLE, MISSING_SOURCE_DIR_DETAIL)
+
+        # 显式 `obfuscated: null` 与「省略该字段」不同：前者是笔误（契约里非 nullable），回 422。
+        if (
+            options is not None
+            and "obfuscated" in options.model_fields_set
+            and options.obfuscated is None
+        ):
+            raise ProblemException(422, BAD_REQUEST_TITLE, NULL_OBFUSCATED_DETAIL)
 
         force = options.force if options is not None else False
 
@@ -212,13 +227,15 @@ def cancel_job(
 def retry_job(
     jobId: str, request: Request, conn: DbConn, admin: CurrentAdmin, settings: SettingsDep
 ) -> Job:
-    # 闸门关闭时重排会让 runner 跑反编译，与「本实例不构建索引」的承诺不符，同样回 403。
-    if not settings.index_enabled:
-        raise ProblemException(403, FORBIDDEN_TITLE, INDEX_DISABLED_DETAIL)
-
     with transaction(conn):
-        # 判定与写入同一 `BEGIN IMMEDIATE` 事务，UPDATE 带状态守卫（只认 failed/canceled）。
+        # 先分辨任务是否存在（不存在回 404），再判闸门：否则闸门关闭时对不存在的 id 也会回 403。
         job = _require_job(conn, jobId)
+
+        # 闸门关闭时重排会让 runner 跑反编译，与「本实例不构建索引」的承诺不符，同样回 403。
+        if not settings.index_enabled:
+            raise ProblemException(403, FORBIDDEN_TITLE, INDEX_DISABLED_DETAIL)
+
+        # 判定与写入同一 `BEGIN IMMEDIATE` 事务，UPDATE 带状态守卫（只认 failed/canceled）。
         requeued = store.requeue(conn, jobId)
 
         if requeued is None:

@@ -282,6 +282,22 @@ def test_create_job_rejects_empty_source_dir(admin_client: TestClient) -> None:
         assert "source_dir" in response.json()["detail"]
 
 
+def test_create_job_rejects_explicit_null_obfuscated(admin_client: TestClient) -> None:
+    """显式传 `obfuscated: null` 是笔误（契约里是 boolean，非 nullable）：422；省略才是省略。"""
+    response = admin_client.post(
+        "/v1/admin/jobs",
+        json={
+            "kind": "index",
+            "version": "26.3",
+            "options": {"source_dir": "/tmp/whatever", "obfuscated": None},
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert "obfuscated" in response.json()["detail"]
+
+
 def test_get_settings_returns_only_implemented_blocks(
     admin_client: TestClient, settings: Settings
 ) -> None:
@@ -919,6 +935,67 @@ def test_finish_message_reflects_actual_stages(settings: Settings) -> None:
     assert version is None
 
 
+def test_missing_index_file_fails_job_instead_of_stuck_running(
+    settings: Settings, source_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`parse` 写出索引后文件在收尾前消失：任务落到 `failed`，不能永久停在 `running`。"""
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    real_parse = runner_module._parse_stage
+
+    def parse_then_delete(context: runner_module.JobContext) -> dict[str, Any]:
+        result = real_parse(context)
+        index_path(context.data_dir, context.version).unlink()
+        return result
+
+    monkeypatch.setattr(runner_module, "_parse_stage", parse_then_delete)
+
+    with database.connect() as conn, transaction(conn):
+        job = store.create(
+            conn,
+            kind="index",
+            version="26.3",
+            options={"source_dir": str(source_dir)},
+            created_by=None,
+        )
+
+    runner = JobRunner(settings, database, poll_interval=0.01)
+
+    async def run_until_terminal() -> None:
+        await runner.start()
+
+        try:
+            deadline = time.monotonic() + WAIT_TIMEOUT_S
+
+            while time.monotonic() < deadline:
+                with database.connect() as conn:
+                    current = store.find(conn, job.id)
+
+                if current is not None and current.status in TERMINAL:
+                    return
+
+                await asyncio.sleep(0.02)
+
+            raise AssertionError("索引文件缺失的任务未在超时内结束")
+        finally:
+            await runner.stop()
+
+    asyncio.run(run_until_terminal())
+
+    with database.connect() as conn:
+        finished = store.find(conn, job.id)
+        version = store.find_version(conn, "26.3")
+        logs = store.list_logs(conn, job.id)
+
+    assert finished is not None
+    assert finished.status == "failed"
+    assert finished.error is not None and "索引文件缺失" in finished.error
+    # 索引不存在就不登记版本：不能给出一个指向空路径的注册行。
+    assert version is None
+    assert any("索引文件缺失" in line.message for line in logs)
+
+
 def test_create_job_records_audit(
     admin_client: TestClient, source_dir: Path, conn: sqlite3.Connection
 ) -> None:
@@ -1096,6 +1173,11 @@ def test_register_version_rejects_non_sqlite(admin_client: TestClient, settings:
 
     assert response.status_code == 422
 
+    # 0 字节文件能被 SQLite 当空库打开，但没有 `files` 表，同样不是有效索引。
+    path.write_bytes(b"")
+
+    assert admin_client.post("/v1/admin/versions", json={"version": "26.3"}).status_code == 422
+
 
 # ----------------------------------------------------------------------
 # 权限
@@ -1151,6 +1233,22 @@ def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
 
         # 任务仍是 failed，没有被重排。
         assert client.get(f"/v1/admin/jobs/{job.id}").json()["status"] == "failed"
+
+
+def test_retry_unknown_job_is_404_even_when_index_disabled(tmp_path: Path) -> None:
+    """闸门关闭时也要先分辨任务是否存在：不存在的 id 回 404，而不是一律 403。"""
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/setup", json={"username": "admin", "password": "admin-password-1"}
+        )
+        assert created.status_code == 201, created.text
+
+        response = client.post("/v1/admin/jobs/nope/retry")
+
+        assert response.status_code == 404, response.text
+        assert response.headers["content-type"].startswith("application/problem+json")
 
 
 def test_runner_fails_queued_jobs_when_index_disabled(tmp_path: Path) -> None:
@@ -1227,6 +1325,65 @@ def test_startup_backfills_legacy_version_db_path(tmp_path: Path) -> None:
     assert rows["9.9"] is None
 
 
+def test_startup_backfill_skips_invalid_index_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """空文件不是有效索引：回填跳过并记 warn，不把检索的 404 变成 500。"""
+    settings = Settings(data_dir=tmp_path / "data")
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    empty = index_path(settings.data_dir, "1.20.1")
+    empty.parent.mkdir(parents=True, exist_ok=True)
+    empty.write_bytes(b"")
+
+    with database.connect() as conn, transaction(conn):
+        conn.execute(
+            "INSERT INTO versions (version, files, tokens, indexed_at, obfuscated,"
+            " has_summaries, source_size_bytes, db_path)"
+            " VALUES ('1.20.1', 1, 4096, ?, 1, 0, 0, NULL)",
+            (utc_now(),),
+        )
+
+    with caplog.at_level("WARNING", logger="mc_librarian"), TestClient(create_app(settings)):
+        pass
+
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT db_path FROM versions WHERE version = '1.20.1'"
+        ).fetchone()
+
+    # 无效文件不写 db_path：历史行保持 NULL，端点继续回 404（而不是 500）。
+    assert row["db_path"] is None
+    assert any(
+        record.levelname == "WARNING" and "1.20.1" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_startup_survives_backfill_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """回填抛异常（如 control 库 busy）不能拖垮启动：只记 error 日志，服务照常起来。"""
+    settings = Settings(data_dir=tmp_path / "data")
+
+    def boom(*args: object, **kwargs: object) -> list[str]:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr("mc_librarian.main.backfill_version_db_paths", boom)
+
+    with (
+        caplog.at_level("ERROR", logger="mc_librarian"),
+        TestClient(create_app(settings)) as client,
+    ):
+        assert client.get("/v1/health").status_code == 200
+
+    assert any(
+        record.levelname == "ERROR" and "回填" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 # ----------------------------------------------------------------------
 # `obfuscated` 的取值与 `source_size_bytes` 的语义（#21 最后一轮复审）
 # ----------------------------------------------------------------------
@@ -1288,3 +1445,10 @@ def test_register_version_source_size_bytes_uses_source_tree(
     assert registered.status_code == 201, registered.text
     assert registered.json()["source_size_bytes"] == java_bytes + data_bytes
     assert registered.json()["source_size_bytes"] > 0
+
+    # 二次注册时源码树已不在数据根：保留上次算出的非零值，不清零。
+    shutil.rmtree(placed)
+    preserved = admin_client.post("/v1/admin/versions", json={"version": "26.3"})
+
+    assert preserved.status_code == 201, preserved.text
+    assert preserved.json()["source_size_bytes"] == java_bytes + data_bytes

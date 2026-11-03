@@ -439,22 +439,27 @@ def register_version(
     tokens: int,
     obfuscated: bool,
     has_summaries: bool,
-    source_size_bytes: int,
+    source_size_bytes: int | None,
     db_path: str | None,
 ) -> VersionInfo:
-    """管理员注册：写全量字段（含 `db_path`/`has_summaries`），`indexed_at` 刷新为当前时间。"""
+    """管理员注册：写全量字段（含 `db_path`/`has_summaries`），`indexed_at` 刷新为当前时间。
+
+    `source_size_bytes` 为 `None` 表示源码树不在数据根（注册时只上传了 `db/`）：upsert **不
+    参与更新**，保留已注册行里的原值；首次注册写 0。传具体值时才覆盖，避免二次注册把之前
+    算出的非零值清零。
+    """
     conn.execute(
         """
         INSERT INTO versions (
           version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?)
         ON CONFLICT (version) DO UPDATE SET
           files = excluded.files,
           tokens = excluded.tokens,
           indexed_at = excluded.indexed_at,
           obfuscated = excluded.obfuscated,
           has_summaries = excluded.has_summaries,
-          source_size_bytes = excluded.source_size_bytes,
+          source_size_bytes = COALESCE(?, source_size_bytes),
           db_path = excluded.db_path
         """,
         (
@@ -466,6 +471,7 @@ def register_version(
             1 if has_summaries else 0,
             source_size_bytes,
             db_path,
+            source_size_bytes,
         ),
     )
 

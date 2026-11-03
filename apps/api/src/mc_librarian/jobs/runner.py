@@ -407,10 +407,21 @@ class JobRunner:
 
         终态描述按 checkpoint 里实际完成的阶段生成：跑了 `parse` 才说「索引完成」，
         否则只说源码树就绪。取消描述用最后一个已完成阶段，而不是写死的 `finalize`。
+
+        跑过 `parse` 但索引库在收尾前消失（被外部删除/清理）时，走正常失败路径写
+        `failed` + 「索引文件缺失：<路径>」；**不能**在写事务里抛异常回滚——那会把任务永久
+        留在 `running`（`claim_next` 只认 `queued`，本进程内再也不会重跑）。
         """
         completed = [str(name) for name in checkpoint.get("stages", [])]
         final_stage = completed[-1] if completed else FINAL_STAGE
         indexed = "parse" in completed
+
+        if indexed:
+            index_file = index_path(self._settings.data_dir, version)
+
+            if not index_file.is_file():
+                self._fail(job_id, f"索引文件缺失：{index_file}")
+                return
 
         with self._database.connect() as conn, transaction(conn):
             status = store.finish_succeeded_or_canceled(
@@ -422,10 +433,6 @@ class JobRunner:
 
             if status == "succeeded":
                 if indexed:
-                    # `parse` 成功即写出索引库；这里的路径是确定性的，存在性可以断言。
-                    index_file = index_path(self._settings.data_dir, version)
-                    assert index_file.is_file(), f"parse 完成后索引库必须存在：{index_file}"
-
                     inserted = store.insert_version_if_absent(
                         conn,
                         version=version,

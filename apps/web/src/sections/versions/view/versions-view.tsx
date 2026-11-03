@@ -15,6 +15,7 @@ import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
 import Drawer from '@mui/material/Drawer';
 import FormControlLabel from '@mui/material/FormControlLabel';
+import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
@@ -253,12 +254,19 @@ type IndexDrawerProps = {
   onCreated: () => void;
 };
 
+/** `options.obfuscated` 的三态：不声明（省略字段）/ 已 remap / 未 remap。 */
+type ObfuscatedChoice = 'unset' | 'remapped' | 'not-remapped';
+
 function IndexDrawer({ open, onClose, onCreated }: IndexDrawerProps) {
   const navigate = useNavigate();
   const [version, setVersion] = useState('');
   const [sourceDir, setSourceDir] = useState('');
+  const [obfuscated, setObfuscated] = useState<ObfuscatedChoice>('unset');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // `options.obfuscated` 只在给了 `source_dir`（parse-only）时能声明：接口层规定「给了 options
+  // 就必须给 source_dir」，所以源码目录留空时该选择不生效。
+  const hasSourceDir = sourceDir !== '';
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -268,8 +276,17 @@ function IndexDrawer({ open, onClose, onCreated }: IndexDrawerProps) {
     try {
       // 留空即省略 `options`：后端从官方 jar 跑完整五段；给 `options` 但 `source_dir` 为空会 422。
       await createJob(
-        sourceDir
-          ? { kind: 'index', version, options: { source_dir: sourceDir, force: false } }
+        hasSourceDir
+          ? {
+              kind: 'index',
+              version,
+              options: {
+                source_dir: sourceDir,
+                // 不声明时省略该字段：由服务端按 checkpoint 推断（parse-only 缺省按「已 remap」）。
+                ...(obfuscated === 'unset' ? {} : { obfuscated: obfuscated === 'remapped' }),
+                force: false,
+              },
+            }
           : { kind: 'index', version }
       );
 
@@ -308,6 +325,24 @@ function IndexDrawer({ open, onClose, onCreated }: IndexDrawerProps) {
             helperText="留空 = 从官方 jar 跑完整五段（下载 → 反编译 → 解析 → 索引）；填写 = 跳过下载反编译，直接从该目录解析"
             fullWidth
           />
+
+          <TextField
+            select
+            label="源码是否经官方映射重映射（remap）"
+            value={obfuscated}
+            onChange={(event) => setObfuscated(event.target.value as ObfuscatedChoice)}
+            disabled={!hasSourceDir}
+            helperText={
+              hasSourceDir
+                ? '不声明 = 由服务端推断（parse-only 缺省按「已 remap」记录）；26.x 这类不混淆的版本选「未 remap」'
+                : '仅当填写源码目录（parse-only 任务）时可声明；完整五段任务由 download 阶段自动判定'
+            }
+            fullWidth
+          >
+            <MenuItem value="unset">不声明</MenuItem>
+            <MenuItem value="remapped">已 remap</MenuItem>
+            <MenuItem value="not-remapped">未 remap</MenuItem>
+          </TextField>
 
           {error && <Alert severity="error">{error}</Alert>}
 

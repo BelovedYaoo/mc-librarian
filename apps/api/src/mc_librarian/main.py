@@ -17,6 +17,7 @@ from fastapi.openapi.utils import get_openapi
 
 from mc_librarian import __version__
 from mc_librarian.api.v1 import api_router
+from mc_librarian.api.v1.admin_versions import read_index_stats
 from mc_librarian.config import Settings, get_settings
 from mc_librarian.db import Database, transaction
 from mc_librarian.indexing.layout import index_path
@@ -93,7 +94,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("control db: %s（schema v%d）", database.path, version)
 
     # 一次性回填历史遗留的 `db_path`（NULL 行）：只在启动时跑，不建定时任务。
-    backfilled = backfill_version_db_paths(database, settings.data_dir)
+    # 回填失败（如 control 库 busy）不能拖垮启动：只记 error 日志，服务照常起来。
+    try:
+        backfilled = backfill_version_db_paths(database, settings.data_dir)
+    except Exception:
+        backfilled = []
+        logger.exception("回填历史版本的 db_path 失败，已跳过（不影响启动）")
 
     if backfilled:
         logger.info(
@@ -115,7 +121,10 @@ def backfill_version_db_paths(database: Database, data_dir: Path) -> list[str]:
     """启动时一次性回填历史遗留的 `db_path`，返回被补写的版本号。
 
     本次修复前注册/产出的版本行 `db_path` 为 NULL，即使 `db/<version>.sqlite` 存在也永远
-    404。只补 `db_path IS NULL` 且索引文件存在的行；已有值的行不动，重复启动幂等。
+    404。只补 `db_path IS NULL` 且索引文件**有效**的行；已有值的行不动，重复启动幂等。
+
+    有效性复用注册路径的 `read_index_stats`：空文件/截断文件不是合法索引，回填它们只会
+    把检索端点的 404 换成 500，所以跳过并记 warn。
     """
     filled: list[str] = []
 
@@ -124,6 +133,10 @@ def backfill_version_db_paths(database: Database, data_dir: Path) -> list[str]:
             path = index_path(data_dir, version)
 
             if not path.is_file():
+                continue
+
+            if read_index_stats(path) is None:
+                logger.warning("跳过回填 db_path：索引文件无效（版本 %s）：%s", version, path)
                 continue
 
             store.set_db_path(conn, version, str(path))

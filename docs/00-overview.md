@@ -61,6 +61,12 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 1. **索引文件只读**。服务以 `?mode=ro` 打开 `<version>.sqlite`；所有写入只发生在 `control.sqlite` 与 JobRunner 的临时工作区。
 2. **检索逻辑只有一份**。`/v1/*`、MCP 适配器、`/v1/ask` 的工具调用都走同一个 `retrieval` 服务层。
 
+**启动副作用：一次性回填 `versions.db_path`。** 历史行（本修复前注册/产出的版本）`db_path` 为 NULL，
+即使 `db/<version>.sqlite` 已在数据根里，检索端点也会一直 404。应用启动时（lifespan 内、`JobRunner` 起来之前）
+同步跑一次回填：只补 `db_path IS NULL` 且对应索引文件**存在且有效**（能读出 `files` 表统计）的行；
+已有值的行不动，因此重启幂等。无效文件（空文件/截断文件）跳过并记 `warn`，不把 404 变成 500；
+回填失败（如 control 库 busy）只记 `error`，不影响启动。回填只在启动时执行一次，不建定时任务。
+
 ### 4.1 部署拓扑
 
 | 项 | 值 |
@@ -96,7 +102,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
 | `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；省略 `options` 的任务从官方 jar 跑完整五段，给了 `source_dir` 则从 `parse` 起） |
 | `job_logs` | id, job_id, ts, level, message |
-| `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行） |
+| `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行；注册时数据根里没有 `src/<version>/` 则 `source_size_bytes` 保留原值，首次注册写 0） |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
 | `audit` | id, actor_id, action, target, detail_json, ip, created_at |
 | `settings` | key, value_json, encrypted |
