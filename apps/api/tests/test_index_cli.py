@@ -18,7 +18,7 @@ from mc_librarian.config import Settings
 from mc_librarian.db import Database
 from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.manifest import VersionDownloads
-from mc_librarian.fetch.pipeline import cache_dir_for
+from mc_librarian.fetch.pipeline import MAPPINGS_NAME, cache_dir_for
 from mc_librarian.fetch.tools import PipelineTools
 from mc_librarian.indexing import cli as index_cli
 from mc_librarian.indexing import memory
@@ -477,3 +477,104 @@ def test_repeat_run_prints_source_tree_and_index_reuse(
 
     assert REUSE_SOURCE_TREE_MESSAGE in repeated
     assert REUSE_INDEX_MESSAGE in repeated
+
+
+# ----------------------------------------------------------------------
+# 映射缺失（#14 规格补充 §3）
+# ----------------------------------------------------------------------
+
+REMAPPED_VERSION = "1.20.1"
+
+
+class RemapVersionManifest:
+    """1.20.1 这类 ≤ 1.21.11 的版本：有官方 mappings，需要 remap。"""
+
+    def resolve(self, version: str) -> VersionDownloads:
+        return VersionDownloads(
+            version=version,
+            client_url=f"https://cdn.example/{version}/client.jar",
+            client_mappings_url=f"https://cdn.example/{version}/client_mappings.txt",
+        )
+
+
+class CacheDownloader:
+    """把下载物写成文件（内容无所谓：remap 与反编译都是假的）。"""
+
+    def download(self, url: str, dest: Path) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f"payload:{url}".encode())
+
+        return dest
+
+
+class CacheRemapper:
+    def remap(self, jar: Path, mappings: Path, dest: Path) -> Path:
+        dest.write_bytes(jar.read_bytes() + b"\nremapped")
+
+        return dest
+
+
+class MobDecompiler:
+    """产出一个可解析的类，够 `parse` 跑通。"""
+
+    def decompile(self, jar: Path, dest: Path) -> Path:
+        package = dest / "net" / "minecraft"
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "Mob.java").write_text(
+            "package net.minecraft;\n\npublic class Mob {}\n", encoding="utf-8"
+        )
+
+        return dest
+
+
+class OfflineDownloader:
+    """断网：mappings 取不回来（#14 §3 的场景）。"""
+
+    def download(self, url: str, dest: Path) -> Path:
+        raise FetchError(f"下载失败：{url}（<urlopen error 网络不可达>）")
+
+
+def test_missing_mappings_fails_loudly_instead_of_indexing_obfuscated_source(
+    configure_cli: None,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#14 §3：删掉 `cache/1.20.1/client_mappings.txt` 后重跑 → 非 0 退出 + 明确报错。
+
+    先完整跑一次（产出缓存与索引），再删掉 mappings 断网重跑：退出码非 0，错误信息里有
+    mappings 与版本号，而且**没有静默降级**——反编译一次都没跑（`UnusedDecompiler` 会抛），
+    索引字节与第一次完全一致（否则就是拿混淆 jar 反编译出来的 `a.java`）。
+    """
+    online = PipelineTools(
+        manifest=RemapVersionManifest(),
+        downloader=CacheDownloader(),
+        remapper=CacheRemapper(),
+        decompiler=MobDecompiler(),
+    )
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: online)
+
+    assert index_cli.main(["--version", REMAPPED_VERSION]) == 0
+    index = index_path(settings.data_dir, REMAPPED_VERSION)
+    first = hashlib.sha256(index.read_bytes()).hexdigest()
+
+    mappings = cache_dir_for(settings.data_dir, REMAPPED_VERSION) / MAPPINGS_NAME
+    assert mappings.is_file()
+    mappings.unlink()
+    capsys.readouterr()
+
+    offline = PipelineTools(
+        manifest=RemapVersionManifest(),
+        downloader=OfflineDownloader(),
+        remapper=UnusedRemapper(),
+        decompiler=UnusedDecompiler(),
+    )
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: offline)
+
+    code = index_cli.main(["--version", REMAPPED_VERSION])
+
+    assert code == 1
+    stderr = capsys.readouterr().err
+    assert "mappings" in stderr
+    assert REMAPPED_VERSION in stderr
+    assert hashlib.sha256(index.read_bytes()).hexdigest() == first

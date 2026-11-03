@@ -110,7 +110,18 @@ def download_stage(context: FetchContext, tools: PipelineTools) -> dict[str, Any
             context.log("info", f"download：复用已有 mappings {mappings_path}")
         else:
             assert downloads.client_mappings_url is not None, "needs_remap 为真时必有地址"
-            tools.downloader.download(downloads.client_mappings_url, mappings_path)
+
+            try:
+                tools.downloader.download(downloads.client_mappings_url, mappings_path)
+            except FetchError as error:
+                # 官方 mappings 取不到就到此为止：继续走下去只会拿混淆 jar 反编译，
+                # 产出一棵 `a.java` / `ab.java` 的树（#14 §3）。错误里点明版本与 mappings，
+                # 让「缓存被删/断网」这类原因一眼可见。
+                raise FetchError(
+                    f"download：版本 {context.version} 需要官方 mappings 才能 remap，"
+                    f"但 {mappings_path} 缺失且重新获取失败（{error}）"
+                ) from error
+
             context.log("info", f"download：mappings {mappings_path.stat().st_size} 字节")
 
         remapped_jar = cache / REMAPPED_JAR_NAME
@@ -134,6 +145,17 @@ def download_stage(context: FetchContext, tools: PipelineTools) -> dict[str, Any
         "remapped_jar_path": None if remapped_jar is None else str(remapped_jar),
         "obfuscated": downloads.needs_remap,
     }
+
+
+def mappings_path_of(checkpoint: Mapping[str, Any]) -> Path | None:
+    """checkpoint 里记录的官方 mappings 路径；没记录（该版本无需 remap）时返回 `None`。
+
+    给「`download` 阶段的产物是否还完整」这类判断用：标记里记着用过 mappings、文件却不在，
+    就不是一份完整的缓存（见 `JobRunner.reuse_download_stats`）。
+    """
+    raw = checkpoint.get("mappings_path")
+
+    return Path(raw) if isinstance(raw, str) and raw else None
 
 
 def decompile_stage(context: FetchContext, tools: PipelineTools) -> dict[str, Any]:

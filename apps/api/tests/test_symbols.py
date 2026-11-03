@@ -512,6 +512,69 @@ def test_retrieval_404_when_index_file_is_gone(
     assert "索引文件不存在" in response.json()["detail"]
 
 
+# 映射版本（≤ 1.21.11）用 remap 后的包路径，与 26.x 的布局不同，正好用来区分两份索引。
+REMAPPED_VERSION = "1.20.1"
+REMAPPED_MOB_PATH = "net/minecraft/world/entity/Mob.java"
+REMAPPED_MOB_JAVA = (
+    "package net.minecraft.world.entity;\n\npublic class Mob {\n  public void tick() {}\n}\n"
+)
+
+
+def prepare_remapped_version(
+    settings: Settings, conn: sqlite3.Connection, version: str = REMAPPED_VERSION
+) -> Path:
+    """就位一棵「已 remap」的源码树（`net/minecraft/world/entity/Mob.java`）并建索引注册。"""
+    root = write_source_tree(
+        source_root(settings.data_dir, version), {REMAPPED_MOB_PATH: REMAPPED_MOB_JAVA}
+    )
+    index = index_path(settings.data_dir, version)
+    result = build_index(root, index, log=silent)
+    store.register_version(
+        conn,
+        version=version,
+        files=result.files,
+        tokens=result.tokens,
+        obfuscated=True,
+        has_summaries=False,
+        source_size_bytes=index.stat().st_size,
+        db_path=str(index),
+    )
+    conn.commit()
+
+    return root
+
+
+def test_two_versions_coexist_and_answer_from_their_own_index(
+    admin_client: TestClient, settings: Settings, conn: sqlite3.Connection
+) -> None:
+    """#14 §4：1.20.1 与 26.3 的索引同时注册后各自可查，不串版本。
+
+    两个版本的 fixture 刻意不同布局：1.20.1 用 remap 后的包路径，26.3 用仓库 fixture 的
+    `net/minecraft/world/`，所以「查到的是哪份索引」由 `fqn`/`path` 直接证明。
+    `/v1/symbol` 的响应体里没有 `version` 字段（契约只有 `matches`），版本号由 `/v1/search`
+    的 `version` 字段断言。
+    """
+    prepare_remapped_version(settings, conn)
+    prepare_version_direct(settings, conn)
+
+    expected = (
+        (REMAPPED_VERSION, REMAPPED_MOB_PATH, "net.minecraft.world.entity.Mob"),
+        (VERSION, MOB_PATH, "net.minecraft.world.Mob"),
+    )
+
+    for version, path, fqn in expected:
+        response = admin_client.get("/v1/symbol", params={"version": version, "name": "Mob"})
+
+        assert response.status_code == 200, response.text
+        match = next(item for item in response.json()["matches"] if item["fqn"] == fqn)
+        assert match["path"] == path
+
+        searched = admin_client.post("/v1/search", json={"query": "Mob", "version": version})
+
+        assert searched.status_code == 200, searched.text
+        assert searched.json()["version"] == version
+
+
 # ----------------------------------------------------------------------
 # `/v1/symbol`
 # ----------------------------------------------------------------------
