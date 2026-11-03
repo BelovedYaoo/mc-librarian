@@ -1090,7 +1090,8 @@ components:
           enum: [parse, summarize, finalize]
           description: |
             任务当前阶段。`#4` 固定为 `parse → summarize → finalize`；
-            `#13` 会在前面补 `download`/`decompile`（存储层 CHECK 已保留这两个历史值）。
+            `#13` 会在前面补 `download`/`decompile`（存储层 CHECK 也只有这三段，
+            届时新增一条迁移，见 `db.py` 的 v4 注释）。
         progress: { type: number, format: float, minimum: 0, maximum: 1 }
         message: { type: string }
         error: { type: string }

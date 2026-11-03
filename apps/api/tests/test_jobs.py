@@ -131,6 +131,46 @@ def recording_stage(
 # ----------------------------------------------------------------------
 
 
+def hold_cancel_check(
+    monkeypatch: pytest.MonkeyPatch, job_id: str
+) -> tuple[threading.Event, threading.Event]:
+    """把指定任务的取消检查卡住：runner 已认领，但还没进入本次执行的任何阶段。
+
+    返回 (reached, release)。`reached` 置位后测试再发 cancel 请求，就能稳定复现
+    「重排后立即取消」这个原本只持续几毫秒的窗口。
+    """
+    reached = threading.Event()
+    release = threading.Event()
+    real = JobRunner._is_cancel_requested
+
+    def wrapped(self: JobRunner, current: str) -> bool:
+        if current == job_id:
+            reached.set()
+            release.wait(timeout=WAIT_TIMEOUT_S)
+
+        return real(self, current)
+
+    monkeypatch.setattr(JobRunner, "_is_cancel_requested", wrapped)
+
+    return reached, release
+
+
+# ----------------------------------------------------------------------
+# 迁移
+# ----------------------------------------------------------------------
+
+
+def insert_job_row(
+    conn: sqlite3.Connection, *, job_id: str, kind: str, stage: str | None
+) -> None:
+    """绕开接口层直接往 `jobs` 插一行，专门用来验证存储层的 CHECK。"""
+    conn.execute(
+        "INSERT INTO jobs (id, kind, version, status, stage, created_at)"
+        " VALUES (?, ?, '26.3', 'queued', ?, '2026-11-03T00:00:00Z')",
+        (job_id, kind, stage),
+    )
+
+
 def test_migration_creates_job_tables(tmp_path: Path) -> None:
     database = Database.for_data_dir(tmp_path / "data")
 
@@ -143,6 +183,28 @@ def test_migration_creates_job_tables(tmp_path: Path) -> None:
         }
 
     assert {"jobs", "job_logs", "versions"} <= tables
+
+
+def test_jobs_check_rejects_retired_kind_and_stage(tmp_path: Path) -> None:
+    """`jobs` 的 CHECK 与接口层同域：`reindex` 与 `download` 这类值直接插不进去。"""
+    database = Database.for_data_dir(tmp_path / "data")
+    database.initialize()
+
+    with database.connect() as conn:
+        # 合法取值照常可写：`kind='index'`，`stage` 为 NULL（尚未进入阶段）或三段之一。
+        for index, stage in enumerate((None, "parse", "summarize", "finalize")):
+            insert_job_row(conn, job_id=f"ok-{index}", kind="index", stage=stage)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_job_row(conn, job_id="bad-kind", kind="reindex", stage=None)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_job_row(conn, job_id="bad-stage", kind="index", stage="download")
+
+        count = conn.execute("SELECT count(*) AS count FROM jobs").fetchone()["count"]
+
+    # 被拒绝的两行没有落库。
+    assert count == 4
 
 
 # ----------------------------------------------------------------------
@@ -382,6 +444,39 @@ def test_cancel_running_job_stops_at_stage_boundary(
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
     assert any(line["level"] == "warn" for line in logs)
+
+
+def test_cancel_right_after_retry_keeps_stage_consistent(
+    admin_client: TestClient, source_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重排清空 `stage` 后立即取消：`stage` 列要补回当前阶段，与 `message` 对得上。"""
+    started, release = blocking_stage(monkeypatch, "parse")
+
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+    assert started.wait(timeout=WAIT_TIMEOUT_S)
+
+    assert admin_client.post(f"/v1/admin/jobs/{job_id}/cancel").status_code == 202
+    release.set()
+    assert wait_for_terminal(admin_client, job_id)["status"] == "canceled"
+
+    # 重排把 `stage` 清成 NULL，checkpoint 里仍留着已完成的 parse。
+    reached, gate_release = hold_cancel_check(monkeypatch, job_id)
+
+    assert admin_client.post(f"/v1/admin/jobs/{job_id}/retry").status_code == 202
+    assert reached.wait(timeout=WAIT_TIMEOUT_S), "runner 应该已认领重排后的任务"
+
+    claimed = admin_client.get(f"/v1/admin/jobs/{job_id}").json()
+    assert claimed["status"] == "running"
+    assert claimed["stage"] is None
+
+    assert admin_client.post(f"/v1/admin/jobs/{job_id}/cancel").status_code == 202
+    gate_release.set()
+
+    job = wait_for_terminal(admin_client, job_id)
+
+    assert job["status"] == "canceled"
+    assert job["stage"] == "parse"
+    assert "parse" in (job["message"] or "")
 
 
 def test_cancel_during_finalize_is_not_succeeded(

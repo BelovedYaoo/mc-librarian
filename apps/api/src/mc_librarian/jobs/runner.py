@@ -379,7 +379,9 @@ class JobRunner:
         """在阶段边界取消。
 
         `stage` 是任务**当前停在**的阶段（与 `jobs.stage` 列一致），不是即将开始的下一段，
-        这样 `message` 与 `stage` 不会互相矛盾。先带守卫写终态，写进去了才记日志。
+        这样 `message` 与 `stage` 不会互相矛盾。重排会清空 `stage`，所以一并把它补写成
+        `stage`（列已是 NULL 时才写），否则重排后立即取消会留下「`message` 说停在 parse、
+        `stage` 列是 NULL」。先带守卫写终态，写进去了才记日志。
         """
         if stage is None:
             message = "已取消（尚未开始阶段）"
@@ -395,6 +397,7 @@ class JobRunner:
                 status="canceled",
                 message=message,
                 expected_status="running",
+                stage=stage,
             )
 
             if updated:

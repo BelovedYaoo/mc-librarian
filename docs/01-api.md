@@ -129,7 +129,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 **版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
-**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出走 `insert_version_if_absent`，仅在版本未注册时插入一行保守默认值，已注册版本一个字段都不动。
+**版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行保守默认值（未 remap、无摘要），已注册版本一个字段都不动。
 
 **用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定。
 
@@ -156,3 +156,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | 复审修复：契约补 `POST /v1/admin/jobs/{jobId}/retry`、删掉 `getJobLogs` 的 SSE 描述、`source_dir` 改为所有 kind 必填；实现重试续跑与启动时重排遗留 `running`，`_succeed` 不再虚报 `obfuscated`/`has_summaries`，PAT 签发/吊销、任务创建、版本注册补审计，前端加 `/audit` 页。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（根因）：版本写入拆成管理员注册与任务产出两条路径（任务不再抹掉 `db_path`/`has_summaries`）；`kind` 收窄为 `index`（`reindex`/`summarize` 待 #7/#13），删掉无效的 `with_summaries`；阶段序列按 `options.source_dir` 选择；cancel/retry 与终态写入改为带状态守卫的原子 UPDATE（消除 TOCTOU），启动恢复不丢取消意图，`_fail` 加状态守卫；补 `version.recorded`/`job.canceled`/`job.retried` 审计，`audit` 的 `actor` 对系统动作为 `null`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（#4 收口）：任务只接受带 `options.source_dir` 的任务（缺则 422），阶段序列固定 `parse → summarize → finalize`，删掉 `download`/`decompile` 占位与死代码；任务产出改为「仅当版本未注册时插入一行」，已注册版本任何字段不变；取消的 `stage` 与 `message` 对齐（传当前阶段）、`_fail` 先写终态再按 rowcount 记日志、retry 重排清空旧阶段/进度/说明。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | 复审修复（#4 收尾）：迁移 v4 的 `jobs.kind`/`stage` CHECK 收窄到接口层取值域（`kind` 仅 `index`；`stage` 为 NULL 或 `parse`/`summarize`/`finalize`），读取路径不再可能读到投影外的值而 500；取消时 `stage` 列补写当前阶段（重排会清空它），与 `message` 对齐；契约文档去掉内部函数名与「存储层保留历史值」的过期说法。属 v0.2 设计内的增量补齐，`info.version` 不变 |

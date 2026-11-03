@@ -294,25 +294,34 @@ def finish(
     message: str,
     error: str | None = None,
     expected_status: str | None = None,
+    stage: str | None = None,
 ) -> int:
     """写入终态，返回实际更新的行数。
 
-    `canceled`/`failed` 保留 `stage` 与 `progress`，让人知道停在哪里。`expected_status`
-    给定时只有当前状态匹配才写（状态守卫）：兜底失败路径只覆盖 `running`，避免把已经
-    `succeeded` 的任务改回 `failed`。
+    `canceled`/`failed` 保留 `stage` 与 `progress`，让人知道停在哪里。`stage` 给定时只在
+    `stage` 列还是 NULL 时补写（`COALESCE`）：重排会清空 `stage`，此时若在本次执行的首个
+    阶段之前取消，`message` 里的阶段名会与列里的 NULL 对不上。`expected_status` 给定时
+    只有当前状态匹配才写（状态守卫）：兜底失败路径只覆盖 `running`，避免把已经 `succeeded`
+    的任务改回 `failed`。
     """
-    progress = ", progress = 1" if status == "succeeded" else ""
-    guard = " AND status = ?" if expected_status is not None else ""
-    params: tuple[Any, ...] = (status, message, error, utc_now(), job_id)
+    assignments = ["status = ?", "message = ?", "error = ?", "finished_at = ?"]
+    params: list[Any] = [status, message, error, utc_now()]
+
+    if status == "succeeded":
+        assignments.append("progress = 1")
+
+    if stage is not None:
+        assignments.append("stage = COALESCE(stage, ?)")
+        params.append(stage)
+
+    where = "id = ?"
+    params.append(job_id)
 
     if expected_status is not None:
-        params = (*params, expected_status)
+        where += " AND status = ?"
+        params.append(expected_status)
 
-    cursor = conn.execute(
-        f"UPDATE jobs SET status = ?, message = ?, error = ?, finished_at = ?{progress}"
-        f" WHERE id = ?{guard}",
-        params,
-    )
+    cursor = conn.execute(f"UPDATE jobs SET {', '.join(assignments)} WHERE {where}", params)
 
     return int(cursor.rowcount)
 
