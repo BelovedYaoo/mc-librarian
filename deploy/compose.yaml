@@ -1,0 +1,74 @@
+# mc-librarian 的部署编排（D15）：api + web 两个容器，TLS 由边缘节点的 gateway-nginx 终止。
+#
+# 本地验证（非默认端口，避免与并行车道/本机服务冲突）：
+#   docker network create deploy-net          # 首次；生产节点上已存在
+#   MC_LIBRARIAN_ENV=dev MC_LIBRARIAN_COOKIE_SECURE=false \
+#   MC_LIBRARIAN_DATA_DIR=../mc-librarian-data \
+#     docker compose -f deploy/compose.yaml up -d --build
+#
+# 生产（节点 47.122.113.116）：默认值即生产口径，直接
+#   docker compose -f deploy/compose.yaml up -d
+# 完整步骤（含节点侧的人工动作）见 deploy/README.md。
+name: mc-librarian
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    image: mc-librarian-api:local
+    restart: unless-stopped
+    environment:
+      # 数据根在容器内固定 /data，宿主路径由下面的挂载决定。
+      MC_LIBRARIAN_DATA_DIR: /data
+      MC_LIBRARIAN_HOST: 0.0.0.0
+      MC_LIBRARIAN_PORT: "8787"
+      # 生产口径：`production` 下 cookie 没开 Secure 会启动即失败（config.py 的护栏）。
+      # 本地验证要显式降回 dev，否则容器起不来。
+      MC_LIBRARIAN_ENV: ${MC_LIBRARIAN_ENV:-production}
+      MC_LIBRARIAN_COOKIE_SECURE: ${MC_LIBRARIAN_COOKIE_SECURE:-true}
+      # 节点只有 3.5 GiB 内存，索引在本地工作站产出后上传，不在节点上构建。
+      MC_LIBRARIAN_INDEX_ENABLED: ${MC_LIBRARIAN_INDEX_ENABLED:-false}
+    volumes:
+      # 数据根：control.sqlite / db / src / cache（docs/00-overview.md §5）。
+      - ${MC_LIBRARIAN_DATA_DIR:-../../mc-librarian-data}:/data
+    ports:
+      # 只绑回环：对外入口是网关，这里留给本地验证与节点上排障。
+      - "127.0.0.1:${MC_LIBRARIAN_API_PORT:-18787}:8787"
+    healthcheck:
+      # 用镜像自带的 python 探活，不额外依赖 curl 之类的小工具。
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8787/v1/health", timeout=5)',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - internal
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    image: mc-librarian-web:local
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MC_LIBRARIAN_WEB_PORT:-15173}:80"
+    networks:
+      # deploy-net 是与网关共享的外部网络：gateway-nginx 按容器名反代到这里。
+      - deploy-net
+      - internal
+
+networks:
+  # api 只在这个内部网络里对 web 暴露；网关不直连 api。
+  internal:
+  deploy-net:
+    external: true

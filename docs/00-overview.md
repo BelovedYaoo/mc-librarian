@@ -23,13 +23,13 @@ mc-librarian/
 ├─ packages/               （计划中）
 │  ├─ api-client/          （计划中）由 docs/openapi.yaml 生成
 │  └─ ui/                  （计划中）精简版 react-core（删权限 manifest 与私有依赖）
-├─ deploy/                 （计划中）Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
+├─ deploy/                 Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
 ├─ docs/
 ├─ package.json            bun workspaces
 └─ pyproject.toml          （计划中）uv workspace
 ```
 
-计划中的部分尚未落地：**当前仓库只有 `apps/api` + `apps/web` + `scripts`**。
+计划中的部分尚未落地：**当前仓库只有 `apps/api` + `apps/web` + `scripts` + `deploy`**。
 
 ## 4. 运行时
 

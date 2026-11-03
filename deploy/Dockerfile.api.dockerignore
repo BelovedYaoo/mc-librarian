@@ -1,0 +1,15 @@
+# `deploy/Dockerfile.api` 专用的构建上下文过滤器（BuildKit 优先取 `<Dockerfile>.dockerignore`）。
+# 构建上下文是仓库根，这里只挡掉不该进上下文的东西；Dockerfile 实际 COPY 的只有 apps/api。
+.git
+.gitattributes
+.gitignore
+mc-librarian-data
+node_modules
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/dist
+.scratch

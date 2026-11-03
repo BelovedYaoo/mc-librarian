@@ -1,0 +1,22 @@
+# web 容器里只跑 HTTP：TLS 与证书在边缘节点的 gateway-nginx 上终止（D15/D18）。
+{
+	admin off
+	auto_https off
+}
+
+:80 {
+	encode zstd gzip
+
+	# 前端只认 `/api` 前缀（apps/web/vite.config.ts 的 dev/preview 代理同构），
+	# 转发前把前缀剥掉：`/api/v1/health` → api 容器的 `/v1/health`。
+	handle_path /api/* {
+		reverse_proxy api:8787
+	}
+
+	# 其余走静态站点；react-router 的前端路由（/login、/browse…）回退到 index.html。
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

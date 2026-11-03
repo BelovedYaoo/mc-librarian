@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.7
+
+# 生产 api 镜像（D15/D24）：Python 3.13 + FastAPI，外加索引流水线需要的 JRE 与两个 jar。
+# 不装 Gradle（D24）：vineflower / SpecialSource 都直接取发布好的单个 jar，运行时不联网。
+# 构建上下文是仓库根（见 compose.yaml 的 build.context）。
+FROM python:3.13-slim-bookworm
+
+# 运行时的外部依赖：
+# - openjdk-17-jre-headless：跑 Vineflower / SpecialSource 子进程（docs/00-overview.md §6）
+# - ripgrep：检索的字面量通道（issue #6 定死用 `rg`，不做内置实现）
+# - curl / ca-certificates：只在构建期用来取两个 jar 与 tiktoken 词表，运行时也留着便于排障
+RUN apt-get update \
+ && apt-get install --no-install-recommends --yes \
+      ca-certificates \
+      curl \
+      openjdk-17-jre-headless \
+      ripgrep \
+ && rm -rf /var/lib/apt/lists/*
+
+# 反编译 / remap 工具链。版本随镜像固定，运行时不下载（与 docs/00-overview.md §6 实测口径一致）。
+ARG VINEFLOWER_VERSION=1.12.0
+ARG SPECIALSOURCE_VERSION=1.11.5
+RUN set -eux \
+ && mkdir -p /opt/mc-librarian/tools \
+ && curl --fail --silent --show-error --location \
+      --output /opt/mc-librarian/tools/vineflower.jar \
+      "https://github.com/Vineflower/vineflower/releases/download/${VINEFLOWER_VERSION}/vineflower-${VINEFLOWER_VERSION}.jar" \
+ && curl --fail --silent --show-error --location \
+      --output /opt/mc-librarian/tools/specialsource-shaded.jar \
+      "https://repo1.maven.org/maven2/net/md-5/SpecialSource/${SPECIALSOURCE_VERSION}/SpecialSource-${SPECIALSOURCE_VERSION}-shaded.jar"
+
+WORKDIR /app
+COPY apps/api/pyproject.toml apps/api/README.md ./
+COPY apps/api/src ./src
+RUN pip install --no-cache-dir --disable-pip-version-check .
+
+# tiktoken 词表预置：`cl100k_base` 首次使用会去 openaipublic.blob.core.windows.net 拉词表
+# （约 1.7 MB），节点拉不到时会阻塞到一次 HTTP 超时再静默退回「字符 ÷ 3.5」估算，改变
+# `max_tokens` 的语义。构建期拉一次、把 tiktoken 自己算出的缓存文件名留在镜像里，
+# 运行时只读缓存、不联网（`TIKTOKEN_CACHE_DIR` 的取值见 apps/api/README.md 的配置表）。
+ENV TIKTOKEN_CACHE_DIR=/opt/mc-librarian/tiktoken-cache
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" \
+ && test -n "$(ls -A "$TIKTOKEN_CACHE_DIR")"
+
+# 数据根在容器内固定 /data（宿主路径由 compose 的挂载决定）。镜像里不含仓库哨兵，
+# 因此 `resolve_data_dir` 接受这个绝对路径（不会命中「数据根不能落在仓库内」）。
+ENV MC_LIBRARIAN_DATA_DIR=/data \
+    MC_LIBRARIAN_HOST=0.0.0.0 \
+    MC_LIBRARIAN_PORT=8787 \
+    MC_LIBRARIAN_JAVA=java \
+    MC_LIBRARIAN_VINEFLOWER_JAR=/opt/mc-librarian/tools/vineflower.jar \
+    MC_LIBRARIAN_SPECIALSOURCE_JAR=/opt/mc-librarian/tools/specialsource-shaded.jar \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8787
+
+# 走 `python -m mc_librarian`：监听地址与端口统一取自 Settings（`MC_LIBRARIAN_HOST` / `PORT`）。
+CMD ["python", "-m", "mc_librarian"]
