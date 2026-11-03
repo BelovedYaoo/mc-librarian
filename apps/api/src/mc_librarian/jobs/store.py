@@ -493,6 +493,22 @@ def find_version(conn: sqlite3.Connection, version: str) -> VersionInfo | None:
     return None if row is None else row_to_version(row)
 
 
+def index_db_path(conn: sqlite3.Connection, version: str) -> tuple[bool, str | None]:
+    """返回 (版本是否已注册, 注册的 `db_path`)。
+
+    `db_path` 对任务产出的版本行是 NULL（"尚无索引文件"）；检索端点据此区分
+    「版本未注册」与「已注册但还没有索引」两种 404（规格 §9）。
+    """
+    row = conn.execute("SELECT db_path FROM versions WHERE version = ?", (version,)).fetchone()
+
+    if row is None:
+        return False, None
+
+    raw = row["db_path"]
+
+    return True, raw if isinstance(raw, str) and raw else None
+
+
 def list_versions(conn: sqlite3.Connection) -> list[VersionInfo]:
     rows = conn.execute(
         f"SELECT {_VERSION_COLUMNS} FROM versions ORDER BY indexed_at DESC, version DESC"

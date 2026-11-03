@@ -18,6 +18,7 @@ const SetupPage = lazy(() => import('src/pages/setup'));
 const UsersPage = lazy(() => import('src/pages/users'));
 const InvitePage = lazy(() => import('src/pages/invite'));
 const VersionsPage = lazy(() => import('src/pages/versions'));
+const BrowsePage = lazy(() => import('src/pages/browse'));
 const JobsPage = lazy(() => import('src/pages/jobs'));
 const AuditPage = lazy(() => import('src/pages/audit'));
 const Page404 = lazy(() => import('src/pages/error/404'));
@@ -79,6 +80,20 @@ export const routesSection: RouteObject[] = [
         <Suspense fallback={<SplashScreen />}>
           <MainLayout>
             <VersionsPage />
+          </MainLayout>
+        </Suspense>
+      </RequireAuth>
+    ),
+  },
+
+  // 检索调试台：符号搜索 → 骨架 → 源码片段（所有登录用户可用）
+  {
+    path: paths.browse,
+    element: (
+      <RequireAuth>
+        <Suspense fallback={<SplashScreen />}>
+          <MainLayout>
+            <BrowsePage />
           </MainLayout>
         </Suspense>
       </RequireAuth>

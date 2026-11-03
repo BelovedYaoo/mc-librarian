@@ -18,12 +18,21 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
 JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
 
+# 检索/阅读端点的枚举（契约 `SymbolKind` 与 `SymbolDetail`/`Outline` 的 `kind`）。
+SymbolKind = Literal["any", "class", "method", "field"]
+SymbolDetailKind = Literal["class", "method", "field"]
+ClassKind = Literal["class", "interface", "enum", "record", "annotation"]
+ReferenceKind = Literal["call", "field", "type", "other"]
+MemberKind = Literal["method", "field"]
+
 __all__ = [
     "AcceptInviteRequest",
     "AuditEntry",
     "AuditList",
+    "ClassKind",
     "CreateUserRequest",
     "CreatedUser",
+    "FileSlice",
     "InviteStatus",
     "Job",
     "JobCreate",
@@ -36,11 +45,23 @@ __all__ = [
     "JobStatus",
     "LogLevel",
     "LoginRequest",
+    "MemberKind",
+    "Outline",
+    "OutlineClass",
+    "OutlineMethod",
     "PatchUserRequest",
+    "Reference",
+    "ReferenceKind",
+    "ReferenceResponse",
     "RegisterVersionRequest",
     "Role",
     "SetupRequest",
     "SetupStatus",
+    "SymbolDetail",
+    "SymbolDetailKind",
+    "SymbolKind",
+    "SymbolMatches",
+    "SymbolMember",
     "TokenCreateRequest",
     "TokenCreated",
     "TokenInfo",
@@ -229,3 +250,89 @@ class VersionList(BaseModel):
 class RegisterVersionRequest(BaseModel):
     version: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
     obfuscated: bool = True
+
+
+class SymbolMember(BaseModel):
+    """`SymbolDetail.members` 的一项：类的一个方法或字段。"""
+
+    kind: MemberKind
+    name: str
+    signature: str | None = None
+    lines: list[int] = Field(min_length=2, max_length=2)
+
+
+class SymbolDetail(BaseModel):
+    """契约 `components.schemas.SymbolDetail`；`lines` 是 1-based 闭区间。"""
+
+    fqn: str
+    kind: SymbolDetailKind
+    signature: str | None = None
+    path: str
+    lines: list[int] = Field(min_length=2, max_length=2)
+    superclass: str | None = None
+    interfaces: list[str] = Field(default_factory=list)
+    annotations: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    members: list[SymbolMember] = Field(default_factory=list)
+
+
+class SymbolMatches(BaseModel):
+    """`GET /v1/symbol` 的 200。"""
+
+    matches: list[SymbolDetail]
+
+
+class Reference(BaseModel):
+    """一条引用；`lines` 固定两元素，引用落在同一行时是 `[line, line]`。"""
+
+    path: str
+    lines: list[int] = Field(min_length=2, max_length=2)
+    enclosing: str | None = None
+    kind: ReferenceKind | None = None
+    snippet: str | None = None
+
+
+class ReferenceResponse(BaseModel):
+    """契约 `components.schemas.ReferenceResponse`。"""
+
+    symbol: str
+    version: str
+    references: list[Reference]
+
+
+class OutlineMethod(BaseModel):
+    name: str
+    signature: str | None = None
+    lines: list[int] = Field(min_length=2, max_length=2)
+
+
+class OutlineClass(BaseModel):
+    fqn: str
+    kind: ClassKind
+    signature: str | None = None
+    lines: list[int] = Field(min_length=2, max_length=2)
+    methods: list[OutlineMethod] = Field(default_factory=list)
+
+
+class Outline(BaseModel):
+    """契约 `components.schemas.Outline`；不含方法体与字段列表。
+
+    `package` 可为 null：`data/` 下的文件与无包声明的 `.java` 都没有包名。
+    """
+
+    path: str
+    package: str | None
+    imports: list[str] = Field(default_factory=list)
+    classes: list[OutlineClass]
+
+
+class FileSlice(BaseModel):
+    """契约 `components.schemas.FileSlice`；`lines` 语义见规格 §2。"""
+
+    path: str
+    version: str
+    start: int
+    end: int
+    total_lines: int | None = None
+    content: str
+    truncated: bool

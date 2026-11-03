@@ -15,6 +15,7 @@ from fastapi import APIRouter, Request
 from mc_librarian import audit
 from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
 from mc_librarian.db import transaction
+from mc_librarian.indexing.layout import index_path
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import RegisterVersionRequest, VersionInfo
@@ -22,9 +23,6 @@ from mc_librarian.schemas import RegisterVersionRequest, VersionInfo
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 BAD_REQUEST_TITLE = "请求不合法"
-
-# 索引 sqlite 放在数据根的 `db/` 下（见 docs/00-overview.md §4、§5.2）。
-DB_DIR_NAME = "db"
 
 
 @dataclass(frozen=True)
@@ -34,10 +32,6 @@ class IndexStats:
     files: int
     tokens: int
     has_summaries: bool
-
-
-def index_path(data_dir: Path, version: str) -> Path:
-    return data_dir / DB_DIR_NAME / f"{version}.sqlite"
 
 
 def read_index_stats(path: Path) -> IndexStats | None:

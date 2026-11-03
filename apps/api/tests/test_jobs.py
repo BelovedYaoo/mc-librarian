@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sqlite3
 import threading
 import time
@@ -22,8 +23,9 @@ from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
 from mc_librarian.jobs.runner import JobRunner
 
+FIXTURE_SOURCE = Path(__file__).parent / "fixtures" / "source"
+
 TERMINAL = {"succeeded", "failed", "canceled"}
-SOURCE_JAVA = "package net.minecraft;\n\npublic class MobCategory {}\n"
 
 WAIT_TIMEOUT_S = 10.0
 
@@ -35,15 +37,9 @@ WAIT_TIMEOUT_S = 10.0
 
 @pytest.fixture
 def source_dir(tmp_path: Path) -> Path:
-    """一个最小源码根：1 个 `.java` + `data/` 下的 1 个文件（D11 的索引范围）。"""
+    """仓库 fixture 源码树：5 个 `.java` + `data/` 下的 1 个 `.json`（issue #5 扩充）。"""
     root = tmp_path / "src" / "26.3"
-    java = root / "net" / "minecraft"
-    java.mkdir(parents=True)
-    (java / "MobCategory.java").write_text(SOURCE_JAVA, encoding="utf-8")
-
-    data = root / "data" / "minecraft" / "tags"
-    data.mkdir(parents=True)
-    (data / "mob_category.json").write_text('{"values": []}', encoding="utf-8")
+    shutil.copytree(FIXTURE_SOURCE, root)
 
     return root
 
@@ -329,7 +325,8 @@ def test_index_job_lifecycle(
     versions = admin_client.get("/v1/versions").json()["versions"]
     registered = next(item for item in versions if item["version"] == "26.3")
 
-    assert registered["files"] == 2
+    # 5 个 .java + 1 个 data JSON 都进 files 表（`data/` 只进 files，不解析符号）。
+    assert registered["files"] == 6
     assert registered["tokens"] > 0
     # #4 的 parse 阶段只统计文件数与 token：不 remap、不生成摘要（#7/#13 接管后才可能为 True）。
     assert registered["obfuscated"] is False
@@ -337,6 +334,24 @@ def test_index_job_lifecycle(
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
     assert any("parse" in line["message"] for line in logs)
+
+
+def test_parse_stage_places_source_and_writes_index(
+    admin_client: TestClient, settings: Settings, tmp_path: Path
+) -> None:
+    """`parse` 把源码树就位到 `<data_dir>/src/<version>/` 并写出索引库（issue #5 / 规格 §14）。"""
+    outside = tmp_path / "elsewhere"
+    shutil.copytree(FIXTURE_SOURCE, outside)
+
+    job_id = submit(admin_client, "26.3", outside).json()["id"]
+    assert wait_for_terminal(admin_client, job_id)["status"] == "succeeded"
+
+    placed = settings.data_dir / "src" / "26.3"
+    assert (placed / "net" / "minecraft" / "world" / "Mob.java").is_file()
+    assert (settings.data_dir / "db" / "26.3.sqlite").is_file()
+
+    logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
+    assert any("就位" in line["message"] for line in logs)
 
 
 def test_job_failure_records_error_summary(admin_client: TestClient, tmp_path: Path) -> None:
@@ -850,7 +865,7 @@ def test_successful_job_records_version_audit_with_null_actor(
     recorded = next(entry for entry in entries if entry["action"] == "version.recorded")
 
     assert recorded["target"] == "26.3"
-    assert recorded["detail"]["files"] == 2
+    assert recorded["detail"]["files"] == 6
     assert recorded["actor"] is None
 
 
@@ -920,7 +935,7 @@ def test_job_does_not_clobber_registered_version(
 
     assert row["db_path"] == str(path)
     assert row["has_summaries"] == 1
-    # 版本已注册：任务产出一个字段都不动（注册时 files=1、tokens=4096，不是任务算出的 2）。
+    # 版本已注册：任务产出一个字段都不动（注册时 files=1、tokens=4096，不是任务算出的 6）。
     assert row["files"] == 1
     assert row["tokens"] == 4096
 

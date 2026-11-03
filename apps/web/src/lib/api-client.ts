@@ -71,6 +71,29 @@ export type JobCreate = components['schemas']['JobCreate'];
 
 export type JobLog = components['schemas']['JobLog'];
 
+/** 符号查找的匹配级别开关（`any` 不过滤）。 */
+export type SymbolKind = components['schemas']['SymbolKind'];
+
+/** 一条符号命中（`GET /v1/symbol`）。 */
+export type SymbolDetail = components['schemas']['SymbolDetail'];
+
+export type SymbolMatches =
+  paths['/v1/symbol']['get']['responses'][200]['content']['application/json'];
+
+/** 反查引用的响应体（`GET /v1/references`）。 */
+export type ReferenceResponse =
+  paths['/v1/references']['get']['responses'][200]['content']['application/json'];
+
+/** 文件骨架（`GET /v1/outline`）；不含方法体。 */
+export type Outline = paths['/v1/outline']['get']['responses'][200]['content']['application/json'];
+
+export type OutlineClass = Outline['classes'][number];
+
+export type OutlineMethod = NonNullable<OutlineClass['methods']>[number];
+
+/** 源码切片（`GET /v1/read`）。 */
+export type FileSlice = paths['/v1/read']['get']['responses'][200]['content']['application/json'];
+
 /** RFC 7807 错误体，直接取契约的 `Problem`，不从某一条响应里反推。 */
 export type Problem = components['schemas']['Problem'];
 
@@ -248,8 +271,8 @@ export function acceptInvite(token: string, body: AcceptInviteRequest): Promise<
 // 版本与索引任务（admin）
 // ----------------------------------------------------------------------
 
-/** 拼 `?a=1&b=2`，忽略 `undefined` 与空串。 */
-function buildQuery(params: Record<string, string | number | undefined>): string {
+/** 拼 `?a=1&b=2`，忽略 `undefined` 与空串；`false` 要发出去（如 `fuzzy=false`）。 */
+function buildQuery(params: Record<string, string | number | boolean | undefined>): string {
   const search = new URLSearchParams();
 
   Object.entries(params).forEach(([key, value]) => {
@@ -330,4 +353,40 @@ export async function listAudit(
   );
 
   return body.entries ?? [];
+}
+
+// ----------------------------------------------------------------------
+// 检索与阅读（登录即可用）
+// ----------------------------------------------------------------------
+
+/** 符号查找；`fuzzy=false` 只做全限定名与简单名精确匹配。 */
+export function getSymbol(
+  params: { version: string; name: string; fuzzy?: boolean; kind?: SymbolKind },
+  signal?: AbortSignal
+): Promise<SymbolMatches> {
+  return request<SymbolMatches>(`/v1/symbol${buildQuery(params)}`, { signal });
+}
+
+/** 反查引用；`symbol` 是方法名或 `Class#method`。 */
+export function getReferences(
+  params: { version: string; symbol: string; limit?: number },
+  signal?: AbortSignal
+): Promise<ReferenceResponse> {
+  return request<ReferenceResponse>(`/v1/references${buildQuery(params)}`, { signal });
+}
+
+/** 文件骨架：包名、imports、类与方法签名和行号。 */
+export function getOutline(
+  params: { version: string; path: string },
+  signal?: AbortSignal
+): Promise<Outline> {
+  return request<Outline>(`/v1/outline${buildQuery(params)}`, { signal });
+}
+
+/** 源码切片：`start`/`end` 必填；超出 `max_tokens` 时服务端按行从尾部截断。 */
+export function readFile(
+  params: { version: string; path: string; start: number; end: number; max_tokens?: number },
+  signal?: AbortSignal
+): Promise<FileSlice> {
+  return request<FileSlice>(`/v1/read${buildQuery(params)}`, { signal });
 }
