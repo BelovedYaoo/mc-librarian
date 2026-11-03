@@ -71,3 +71,17 @@ def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def get_admin_user(user: CurrentUser) -> User:
+    """`/v1/admin/*` 的守卫：已登录但不是 admin 一律 403。
+
+    前端隐藏菜单只是体验，真正的判定在每个 admin 端点里。
+    """
+    if user.role != "admin":
+        raise ProblemException(403, "无权访问", "需要管理员权限")
+
+    return user
+
+
+AdminUser = Annotated[User, Depends(get_admin_user)]

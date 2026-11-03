@@ -18,6 +18,7 @@ from mc_librarian import __version__
 from mc_librarian.api.v1 import api_router
 from mc_librarian.config import Settings, get_settings
 from mc_librarian.db import Database
+from mc_librarian.jobs import JobRunner
 from mc_librarian.problems import component_schema, install_exception_handlers
 
 logger = logging.getLogger("mc_librarian")
@@ -88,7 +89,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("data root: %s（来源：%s）", settings.data_dir, source)
     logger.info("control db: %s（schema v%d）", database.path, version)
-    yield
+
+    # 任务队列随应用启动：单进程内并发 1 串行消费，退出时等当前任务收尾。
+    runner = JobRunner(settings, database)
+    app.state.job_runner = runner
+    await runner.start()
+
+    try:
+        yield
+    finally:
+        await runner.stop()
 
 
 def _build_openapi(app: FastAPI) -> dict[str, Any]:

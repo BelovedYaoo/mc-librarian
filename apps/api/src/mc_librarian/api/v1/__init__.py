@@ -1,18 +1,21 @@
 """v1 路由聚合。
 
-已挂载：meta（health）、auth（setup / login / logout / me）。
-retrieve / read / answer / admin 由后续 ticket 逐个挂载。
+已挂载：meta（health、versions）、auth（setup / login / logout / me）、
+admin（versions 注册、jobs 任务框架）。retrieve / read / answer 由后续 ticket 逐个挂载。
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import auth, health, setup
+from . import admin_jobs, admin_versions, auth, health, setup, versions
 
 api_router = APIRouter(prefix="/v1")
 api_router.include_router(health.router)
 api_router.include_router(setup.router)
 api_router.include_router(auth.router)
+api_router.include_router(versions.router)
+api_router.include_router(admin_versions.router)
+api_router.include_router(admin_jobs.router)
 
 __all__ = ["api_router"]

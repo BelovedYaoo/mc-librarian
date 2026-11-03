@@ -112,6 +112,7 @@ paths:
                   versions:
                     type: array
                     items: { $ref: "#/components/schemas/VersionInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/search:
     post:
@@ -380,7 +381,7 @@ paths:
               type: object
               required: [version]
               properties:
-                version: { type: string, examples: ["26.3"] }
+                version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$", examples: ["26.3"] }
                 obfuscated: { type: boolean, default: true }
       responses:
         "201":
@@ -388,6 +389,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/VersionInfo" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/BadRequest" }
 
   /v1/admin/users:
@@ -485,6 +487,7 @@ paths:
                   jobs:
                     type: array
                     items: { $ref: "#/components/schemas/Job" }
+        "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [admin]
       summary: 创建索引任务
@@ -501,7 +504,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "409": { description: 已有同类任务在运行或该版本正在索引 }
+        "422": { $ref: "#/components/responses/BadRequest" }
 
   /v1/admin/jobs/{jobId}:
     get:
@@ -516,6 +521,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/admin/jobs/{jobId}/logs:
     get:
@@ -543,6 +550,8 @@ paths:
                   lines:
                     type: array
                     items: { $ref: "#/components/schemas/JobLog" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/admin/jobs/{jobId}/cancel:
     post:
@@ -558,6 +567,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: 任务已结束，无法取消 }
 
   /v1/admin/settings:
     get:
@@ -992,10 +1004,15 @@ components:
       required: [kind, version]
       properties:
         kind: { type: string, enum: [index, reindex, summarize] }
-        version: { type: string, examples: ["26.3"] }
+        version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$", examples: ["26.3"] }
         options:
           type: object
           properties:
+            source_dir:
+              type: string
+              description: |
+                源码根目录；相对路径按数据根解析。`index` / `reindex` 必填。
+                #4 只统计 `.java` 与 `data/` 的文件数与 token 估算。
             with_summaries: { type: boolean, default: true }
             force: { type: boolean, default: false }
 

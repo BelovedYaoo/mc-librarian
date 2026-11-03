@@ -44,7 +44,7 @@ class Migration:
     statements: tuple[str, ...]
 
 
-# v1：首个 schema——账号与会话。#9 加 invites/pats、#4 加 jobs 时往后追加即可。
+# v1：首个 schema——账号与会话。#9 加 invites/pats 时继续往后追加即可。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
         version=1,
@@ -75,6 +75,63 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             """,
             "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id)",
             "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)",
+        ),
+    ),
+    # v2：索引任务框架——任务、任务日志、版本注册表。
+    # `jobs` 里的 `checkpoint`/`options` 存 JSON 文本：`checkpoint` 记已完成的阶段与产物，
+    # 供失败后从下一阶段续跑；`options` 记 `source_dir` 等创建参数。
+    Migration(
+        version=2,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+              id               TEXT PRIMARY KEY,
+              kind             TEXT NOT NULL CHECK (kind IN ('index', 'reindex', 'summarize')),
+              version          TEXT NOT NULL,
+              status           TEXT NOT NULL CHECK (
+                                 status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')
+                               ),
+              stage            TEXT CHECK (stage IN (
+                                 'download', 'decompile', 'parse', 'summarize', 'finalize'
+                               )),
+              progress         REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
+              message          TEXT,
+              error            TEXT,
+              checkpoint       TEXT NOT NULL DEFAULT '{}',
+              options          TEXT NOT NULL DEFAULT '{}',
+              cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+              created_at       TEXT NOT NULL,
+              started_at       TEXT,
+              finished_at      TEXT,
+              created_by       TEXT REFERENCES users (id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs (status, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_version ON jobs (version, status)",
+            # 日志 id 单调递增，`?after=<id>` 才能稳定增量拉取。
+            """
+            CREATE TABLE IF NOT EXISTS job_logs (
+              id      INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_id  TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+              ts      TEXT NOT NULL,
+              level   TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),
+              message TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs (job_id, id)",
+            # 版本注册表：`db_path` 指向数据根里的 `<version>.sqlite`（job 产出的可能为空）。
+            """
+            CREATE TABLE IF NOT EXISTS versions (
+              version           TEXT PRIMARY KEY,
+              files             INTEGER NOT NULL DEFAULT 0,
+              tokens            INTEGER NOT NULL DEFAULT 0,
+              indexed_at        TEXT NOT NULL,
+              obfuscated        INTEGER NOT NULL DEFAULT 1 CHECK (obfuscated IN (0, 1)),
+              has_summaries     INTEGER NOT NULL DEFAULT 0 CHECK (has_summaries IN (0, 1)),
+              source_size_bytes INTEGER NOT NULL DEFAULT 0,
+              db_path           TEXT
+            )
+            """,
         ),
     ),
 )

@@ -53,6 +53,18 @@ def _deref(spec: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _non_null(schema: dict[str, Any]) -> dict[str, Any]:
+    """可空字段在 FastAPI 里是 `anyOf: [..., {type: null}]`，取出非 null 的那一支。"""
+    for keyword in ("anyOf", "oneOf"):
+        if keyword in schema:
+            for branch in schema[keyword]:
+                if branch.get("type") != "null":
+                    resolved: dict[str, Any] = branch
+                    return resolved
+
+    return schema
+
+
 def _response_schema(
     spec: dict[str, Any], path: str, method: str = "get", status: str = "200"
 ) -> dict[str, Any]:
@@ -249,3 +261,113 @@ def test_problem_schema_is_present_in_both_specs() -> None:
         assert problem["type"] == "object"
         assert set(problem["properties"]) == {"type", "title", "status", "detail", "instance"}
         assert {"title", "status"} <= set(problem["required"])
+
+
+def test_job_paths_are_implemented() -> None:
+    """issue #4 把任务框架与版本注册从契约落到了实现。"""
+    runtime_paths = set(_runtime()["paths"])
+
+    assert {
+        "/v1/versions",
+        "/v1/admin/versions",
+        "/v1/admin/jobs",
+        "/v1/admin/jobs/{jobId}",
+        "/v1/admin/jobs/{jobId}/logs",
+        "/v1/admin/jobs/{jobId}/cancel",
+    } <= runtime_paths
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "operation_id"),
+    [
+        ("/v1/versions", "get", "listVersions"),
+        ("/v1/admin/versions", "post", "registerVersion"),
+        ("/v1/admin/jobs", "get", "listJobs"),
+        ("/v1/admin/jobs", "post", "createJob"),
+        ("/v1/admin/jobs/{jobId}", "get", "getJob"),
+        ("/v1/admin/jobs/{jobId}/logs", "get", "getJobLogs"),
+        ("/v1/admin/jobs/{jobId}/cancel", "post", "cancelJob"),
+    ],
+)
+def test_job_operation_ids_match(path: str, method: str, operation_id: str) -> None:
+    runtime = _operation(_runtime(), path, method)
+    contract = _operation(_contract(), path, method)
+
+    assert runtime["operationId"] == contract["operationId"] == operation_id
+
+
+def test_admin_operations_declare_forbidden() -> None:
+    """`/v1/admin/*` 对已登录的非 admin 回 403，契约里写明。"""
+    for path, method in (
+        ("/v1/admin/versions", "post"),
+        ("/v1/admin/jobs", "get"),
+        ("/v1/admin/jobs", "post"),
+        ("/v1/admin/jobs/{jobId}", "get"),
+        ("/v1/admin/jobs/{jobId}/logs", "get"),
+        ("/v1/admin/jobs/{jobId}/cancel", "post"),
+    ):
+        for spec in (_runtime(), _contract()):
+            assert "403" in _operation(spec, path, method)["responses"]
+
+        # 不覆盖 security：继承全局 cookieAuth / bearerAuth。
+        assert "security" not in _operation(_runtime(), path, method)
+
+
+def test_job_schema_matches() -> None:
+    runtime = _response_schema(_runtime(), "/v1/admin/jobs/{jobId}")
+    contract = _response_schema(_contract(), "/v1/admin/jobs/{jobId}")
+
+    assert runtime["required"] == contract["required"] == ["id", "kind", "status", "created_at"]
+    assert set(runtime["properties"]) == set(contract["properties"])
+
+    for field in ("status", "stage"):
+        runtime_field = _non_null(runtime["properties"][field])
+        contract_field = _non_null(contract["properties"][field])
+
+        assert runtime_field["enum"] == contract_field["enum"]
+
+
+def test_job_create_schema_matches() -> None:
+    runtime = _request_schema(_runtime(), "/v1/admin/jobs", "post")
+    contract = _request_schema(_contract(), "/v1/admin/jobs", "post")
+
+    assert runtime["required"] == contract["required"] == ["kind", "version"]
+    assert set(runtime["properties"]) == set(contract["properties"])
+
+    runtime_options = _deref(_runtime(), _non_null(runtime["properties"]["options"]))
+    contract_options = _non_null(contract["properties"]["options"])
+
+    assert set(runtime_options["properties"]) == set(contract_options["properties"])
+    assert "source_dir" in runtime_options["properties"]
+
+
+def test_job_log_and_version_schemas_match() -> None:
+    runtime_logs = _response_schema(_runtime(), "/v1/admin/jobs/{jobId}/logs")
+    contract_logs = _response_schema(_contract(), "/v1/admin/jobs/{jobId}/logs")
+
+    runtime_line = _deref(_runtime(), runtime_logs["properties"]["lines"]["items"])
+    contract_line = _deref(_contract(), contract_logs["properties"]["lines"]["items"])
+
+    assert runtime_line["required"] == contract_line["required"] == [
+        "id",
+        "ts",
+        "level",
+        "message",
+    ]
+    assert set(runtime_line["properties"]) == set(contract_line["properties"])
+
+    runtime_version = _response_schema(_runtime(), "/v1/admin/versions", "post", "201")
+    contract_version = _response_schema(_contract(), "/v1/admin/versions", "post", "201")
+
+    assert runtime_version["required"] == contract_version["required"] == [
+        "version",
+        "files",
+        "tokens",
+        "indexed_at",
+    ]
+    assert set(runtime_version["properties"]) == set(contract_version["properties"])
+
+    runtime_list = _response_schema(_runtime(), "/v1/versions")
+    contract_list = _response_schema(_contract(), "/v1/versions")
+
+    assert set(runtime_list["properties"]) == set(contract_list["properties"]) == {"versions"}

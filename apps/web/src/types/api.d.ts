@@ -715,6 +715,11 @@ export interface components {
             /** @example 26.3 */
             version: string;
             options?: {
+                /**
+                 * @description 源码根目录；相对路径按数据根解析。`index` / `reindex` 必填。
+                 *     #4 只统计 `.java` 与 `data/` 的文件数与 token 估算。
+                 */
+                source_dir?: string;
                 /** @default true */
                 with_summaries: boolean;
                 /** @default false */
@@ -962,6 +967,7 @@ export interface operations {
                     };
                 };
             };
+            401: components["responses"]["Unauthorized"];
         };
     };
     search: {
@@ -1310,6 +1316,7 @@ export interface operations {
                     "application/json": components["schemas"]["VersionInfo"];
                 };
             };
+            403: components["responses"]["Forbidden"];
             422: components["responses"]["BadRequest"];
         };
     };
@@ -1437,6 +1444,7 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["Forbidden"];
         };
     };
     createJob: {
@@ -1461,6 +1469,7 @@ export interface operations {
                     "application/json": components["schemas"]["Job"];
                 };
             };
+            403: components["responses"]["Forbidden"];
             /** @description 已有同类任务在运行或该版本正在索引 */
             409: {
                 headers: {
@@ -1468,6 +1477,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            422: components["responses"]["BadRequest"];
         };
     };
     getJob: {
@@ -1490,6 +1500,8 @@ export interface operations {
                     "application/json": components["schemas"]["Job"];
                 };
             };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     getJobLogs: {
@@ -1518,6 +1530,8 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     cancelJob: {
@@ -1539,6 +1553,15 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Job"];
                 };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 任务已结束，无法取消 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

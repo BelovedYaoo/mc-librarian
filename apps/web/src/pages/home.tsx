@@ -26,7 +26,7 @@ export default function HomePage() {
             你好，{user?.username ?? '访客'}
           </Typography>
           <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-            会话在服务端，刷新页面不会掉线。版本管理、检索、问答在后续 ticket 落地。
+            会话在服务端，刷新页面不会掉线。版本管理与任务队列已可用，检索、问答在后续 ticket 落地。
           </Typography>
         </div>
 

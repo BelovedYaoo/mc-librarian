@@ -13,6 +13,8 @@ import { paths } from 'src/routes/paths';
 
 import { HeaderSection, LayoutSection, MainSection } from 'src/layouts/core';
 
+import { NavMenu } from './nav-menu';
+
 // ----------------------------------------------------------------------
 
 export type MainLayoutProps = {
@@ -68,9 +70,13 @@ export function MainLayout({ children }: MainLayoutProps) {
       }
     >
       <MainSection>
-        <Container maxWidth="md" sx={{ py: { xs: 5, md: 8 } }}>
-          {children}
-        </Container>
+        <Box sx={{ display: 'flex', flex: '1 1 auto', alignItems: 'stretch' }}>
+          <NavMenu />
+
+          <Container maxWidth="md" sx={{ py: { xs: 5, md: 8 }, flex: '1 1 auto', minWidth: 0 }}>
+            {children}
+          </Container>
+        </Box>
       </MainSection>
     </LayoutSection>
   );
