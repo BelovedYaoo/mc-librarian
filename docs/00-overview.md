@@ -119,8 +119,12 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 
 | 版本 | 方式 | 需要 remap |
 |---|---|---|
-| ≤ 1.21.11 | 官方 mappings + Vineflower | 是 |
+| ≤ 1.21.11 | 官方 mappings + **SpecialSource** remap → Vineflower 反编译 | 是 |
 | ≥ 26.x | 官方 jar 直接反编译（Mojang 已停止混淆） | 否 |
+
+**remap 工具不是 Vineflower。** 实测 Vineflower 1.12.0 只有 3 个插件（VariableRenaming / Kotlin / IdeaNotNull），没有任何读取 ProGuard 映射表的选项（`--rename-members` 是加数字后缀，`--user-renamer-class` 需要一个 JRE 编不出来的 Java 类）。应用官方 mappings 用 `net.md-5:SpecialSource`（Maven Central 上有自包含的 `-shaded.jar`，单个 jar，无需 Gradle）。
+
+运行时依赖因此是：**JRE + vineflower jar + SpecialSource shaded jar**（后者仅 ≤ 1.21.11 的版本需要）。
 
 | 版本 | 文件 | 行数 | token |
 |---|---|---|---|
@@ -156,7 +160,7 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 | D21 | 符号表 | 扩展字段（父类/接口/注解/参数名）+ 引用表 |
 | D22 | 评测 | 人工 30 题为主，LLM 扩到 100 题做回归 |
 | D23 | 用量 | 只记录不限额；Webhook 阈值告警 + 手动熔断 |
-| D24 | 工具链瘦身 | 镜像内只要 JRE + Vineflower，不装 Gradle |
+| D24 | 工具链瘦身 | 镜像内只要 JRE + Vineflower + SpecialSource（单个 shaded jar），不装 Gradle |
 
 ## 8. 里程碑
 
