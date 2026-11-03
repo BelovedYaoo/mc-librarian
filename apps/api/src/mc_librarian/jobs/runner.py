@@ -119,6 +119,21 @@ def resolve_obfuscated(options: Mapping[str, Any], checkpoint: Mapping[str, Any]
     return bool(checkpoint.get("obfuscated", True))
 
 
+def checkpoint_int(checkpoint: Mapping[str, Any], key: str) -> int:
+    """从 checkpoint 取整数统计（`files`/`tokens`/`source_size_bytes`）。
+
+    checkpoint 是阶段写入的 JSON，正常是 int；旧版本残留或外部改动可能给出别的类型或
+    缺失键。非 int 一律退回 0，而不是 `int(...)` 直接抛——那个异常会把整个 `_finish` 事务
+    回滚，把任务留在 `running`。
+    """
+    value = checkpoint.get(key)
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+
+    return value
+
+
 def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     """执行一个阶段，返回要并入 checkpoint 的产物。
 
@@ -221,7 +236,13 @@ class JobRunner:
             return
 
         # 先收上次进程遗留的 running，再开消费循环：否则它们永远不会被认领。
-        await asyncio.to_thread(self._recover_interrupted)
+        # 恢复失败（如 control 库 busy）不能拖垮启动：只记 error 日志，消费循环照常起来
+        # （与 `main.backfill_version_db_paths` 的取舍一致）。
+        try:
+            await asyncio.to_thread(self._recover_interrupted)
+        except Exception:
+            logger.exception("启动恢复遗留 running 任务失败，已跳过（不影响启动）")
+
         self._stopping.clear()
         self._task = asyncio.create_task(self._loop(), name="job-runner")
 
@@ -251,9 +272,15 @@ class JobRunner:
                 await self._execute(row)
             except Exception:  # 兜底：单个任务的意外不能杀死整个 runner
                 logger.exception("任务 %s 执行时出现未捕获异常", row["id"])
-                await asyncio.to_thread(
-                    self._fail, str(row["id"]), "任务执行异常，请查看服务端日志"
-                )
+
+                try:
+                    await asyncio.to_thread(
+                        self._fail, str(row["id"]), "任务执行异常，请查看服务端日志"
+                    )
+                except Exception:
+                    # 兜底自身不能再失败：异常一旦逃出 `_loop`，asyncio 任务静默死亡，
+                    # 整个任务队列永久停摆且没有任何日志。
+                    logger.exception("任务 %s 的兜底失败路径自身异常，已跳过", row["id"])
 
     async def _idle(self) -> None:
         with suppress(TimeoutError):
@@ -436,12 +463,12 @@ class JobRunner:
                     inserted = store.insert_version_if_absent(
                         conn,
                         version=version,
-                        files=int(checkpoint.get("files", 0)),
-                        tokens=int(checkpoint.get("tokens", 0)),
+                        files=checkpoint_int(checkpoint, "files"),
+                        tokens=checkpoint_int(checkpoint, "tokens"),
                         # `options.obfuscated` 优先；未声明时跑过 `download` 用 checkpoint 的真值，
                         # parse-only 缺省按「已 remap」记录（见 `resolve_obfuscated`）。
                         obfuscated=resolve_obfuscated(options, checkpoint),
-                        source_size_bytes=int(checkpoint.get("source_size_bytes", 0)),
+                        source_size_bytes=checkpoint_int(checkpoint, "source_size_bytes"),
                         db_path=str(index_file),
                     )
 

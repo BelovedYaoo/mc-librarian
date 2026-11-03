@@ -522,7 +522,10 @@ def insert_version_if_absent(
 
     inserted = find_version(conn, version)
 
-    assert inserted is not None, "刚写入的版本必须能查回来"
+    if inserted is None:
+        # 同一事务内刚插入的行读不回来属于内部不一致：显式报错而不是 assert
+        # （`python -O` 会把 assert 整个去掉，等于没有校验）。
+        raise RuntimeError(f"刚写入的版本读不回来：{version}")
 
     return inserted
 

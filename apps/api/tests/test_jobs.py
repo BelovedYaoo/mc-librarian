@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from mc_librarian import audit
 from mc_librarian.config import Settings
 from mc_librarian.db import (
     LATEST_VERSION,
@@ -29,7 +30,7 @@ from mc_librarian.db import (
 from mc_librarian.indexing.layout import index_path
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
-from mc_librarian.jobs.runner import JobRunner, resolve_obfuscated
+from mc_librarian.jobs.runner import JobRunner, checkpoint_int, resolve_obfuscated
 from mc_librarian.main import create_app
 
 FIXTURE_SOURCE = Path(__file__).parent / "fixtures" / "source"
@@ -1452,3 +1453,166 @@ def test_register_version_source_size_bytes_uses_source_tree(
 
     assert preserved.status_code == 201, preserved.text
     assert preserved.json()["source_size_bytes"] == java_bytes + data_bytes
+
+
+# ----------------------------------------------------------------------
+# runner 自身的健壮性（#21 关闭前最后一轮）
+# ----------------------------------------------------------------------
+
+
+def test_loop_survives_failing_fallback(
+    settings: Settings,
+    source_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_loop` 的兜底自身抛异常（如 DB busy）时：任务队列不能永久停摆，且必须有 error 日志。
+
+    `_fail` 抛出且未被接住的话，异常会逃出 `_loop`、asyncio 任务静默死亡：之后所有任务都
+    不再被认领，运维看不到任何症状。
+    """
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    with database.connect() as conn, transaction(conn):
+        broken = store.create(
+            conn,
+            kind="index",
+            version="26.3",
+            options={"source_dir": str(settings.data_dir / "missing")},
+            created_by=None,
+        )
+        healthy = store.create(
+            conn,
+            kind="index",
+            version="1.20.1",
+            options={"source_dir": str(source_dir)},
+            created_by=None,
+        )
+
+    real_fail = JobRunner._fail
+
+    def broken_fail(self: JobRunner, job_id: str, error: str) -> None:
+        if job_id == broken.id:
+            raise RuntimeError("database is locked")
+
+        real_fail(self, job_id, error)
+
+    monkeypatch.setattr(JobRunner, "_fail", broken_fail)
+
+    runner = JobRunner(settings, database, poll_interval=0.01)
+
+    async def run_until_healthy_terminal() -> None:
+        await runner.start()
+
+        try:
+            deadline = time.monotonic() + WAIT_TIMEOUT_S
+
+            while time.monotonic() < deadline:
+                with database.connect() as conn:
+                    current = store.find(conn, healthy.id)
+
+                if current is not None and current.status in TERMINAL:
+                    return
+
+                await asyncio.sleep(0.02)
+
+            raise AssertionError("第二个任务未被处理：runner 可能已随兜底异常停摆")
+        finally:
+            await runner.stop()
+
+    with caplog.at_level("ERROR", logger="mc_librarian.jobs"):
+        asyncio.run(run_until_healthy_terminal())
+
+    with database.connect() as conn:
+        broken_after = store.find(conn, broken.id)
+        healthy_after = store.find(conn, healthy.id)
+
+    assert healthy_after is not None
+    assert healthy_after.status == "succeeded"
+    # 兜底被替换成抛异常，终态没写进去：任务停在 running——但这不等于 runner 停摆。
+    assert broken_after is not None
+    assert broken_after.status == "running"
+
+    messages = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+    assert any("兜底失败路径自身异常" in message for message in messages)
+
+
+def test_finish_transaction_failure_lands_in_failed(
+    admin_client: TestClient,
+    source_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`_finish` 事务体内某一步抛出（这里让审计写入失败）：任务必须落到终态 `failed`。
+
+    事务回滚会把任务留在 `running`，靠 `_loop` 的兜底转 `failed`——绝不能永久停在 `running`
+    （`claim_next` 只认 `queued`，本进程内再也不会重跑），且必须有日志。
+    """
+    real_record = audit.record
+
+    def broken_record(
+        conn: sqlite3.Connection,
+        *,
+        actor_id: str | None,
+        action: str,
+        target: str | None = None,
+        detail: dict[str, Any] | None = None,
+        ip: str | None = None,
+    ) -> None:
+        if action == audit.ACTION_VERSION_RECORDED:
+            raise RuntimeError("模拟审计写入失败")
+
+        real_record(conn, actor_id=actor_id, action=action, target=target, detail=detail, ip=ip)
+
+    monkeypatch.setattr(audit, "record", broken_record)
+
+    job_id = submit(admin_client, "26.3", source_dir).json()["id"]
+
+    with caplog.at_level("ERROR", logger="mc_librarian.jobs"):
+        job = wait_for_terminal(admin_client, job_id)
+
+    assert job["status"] == "failed"
+    assert job["error"] is not None
+
+    logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
+    assert any(line["level"] == "error" for line in logs)
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+    # 事务整体回滚：版本没有被登记成已索引。
+    versions = admin_client.get("/v1/versions").json()["versions"]
+    assert all(item["version"] != "26.3" for item in versions)
+
+
+def test_startup_survives_recover_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """启动恢复抛异常（control 库 busy 等）不能拖垮启动：只记 error 日志，服务照常起来。"""
+    settings = Settings(data_dir=tmp_path / "data")
+
+    def boom(self: JobRunner) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(JobRunner, "_recover_interrupted", boom)
+
+    with (
+        caplog.at_level("ERROR", logger="mc_librarian.jobs"),
+        TestClient(create_app(settings)) as client,
+    ):
+        assert client.get("/v1/health").status_code == 200
+
+    assert any(
+        record.levelname == "ERROR" and "启动恢复" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_checkpoint_int_falls_back_for_bad_values() -> None:
+    """checkpoint 缺键或类型不对退回 0，而不是 `int(...)` 直接抛（那会回滚整个 `_finish` 事务）。"""
+    assert checkpoint_int({"files": 6}, "files") == 6
+    assert checkpoint_int({}, "files") == 0
+    assert checkpoint_int({"files": None}, "files") == 0
+    assert checkpoint_int({"files": "6"}, "files") == 0
+    assert checkpoint_int({"files": True}, "files") == 0

@@ -833,6 +833,7 @@ export interface components {
                  * @description 该版本源码是否经官方映射 remap（写入注册表 `VersionInfo.obfuscated`）。**可省略**：
                  *
                  *     - 显式给值 → 用它；
+                 *     - 显式传 `null` → 422（契约里是 boolean、非 nullable，省略才是「未声明」）；
                  *     - 省略且任务跑过 `download` → 用 checkpoint 里的真值（等于该版本是否需要官方 mappings）；
                  *     - 省略且为 parse-only → 按「已 remap」记录（`true`）。parse-only 的典型来源是本地
                  *       `fetch` 出来、已经 remap 过的源码树；26.x 这类本来就不混淆的版本请显式传 `false`。
