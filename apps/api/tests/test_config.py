@@ -8,11 +8,16 @@ import pytest
 from pydantic import ValidationError
 
 from mc_librarian.config import (
+    ALERT_DAILY_COST_THRESHOLD_ENV,
+    ALERT_DAILY_TOKEN_THRESHOLD_ENV,
+    ALERT_WEBHOOK_URL_ENV,
     DATA_DIR_ENV,
     DATA_DIR_NAME,
     Settings,
     default_data_dir,
     find_repo_root,
+    pricing_configured,
+    resolve_alerts_config,
     resolve_data_dir,
 )
 
@@ -159,3 +164,47 @@ def test_production_with_secure_cookie_is_accepted(tmp_path: Path) -> None:
 def test_unknown_env_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         Settings(data_dir=tmp_path / "data", env="staging")  # type: ignore[arg-type]
+
+
+def test_alerts_default_to_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """#12：默认没有 Webhook、阈值为 0（不告警）。"""
+    for name in (
+        ALERT_WEBHOOK_URL_ENV,
+        ALERT_DAILY_TOKEN_THRESHOLD_ENV,
+        ALERT_DAILY_COST_THRESHOLD_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    config = resolve_alerts_config(Settings(data_dir=tmp_path / "data"))
+
+    assert config.webhook_url is None
+    assert config.daily_token_threshold == 0
+    assert config.daily_cost_threshold_usd == 0.0
+
+
+def test_resolve_alerts_config_reads_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """阈值与 Webhook 地址都从 `MC_LIBRARIAN_ALERT_*` 读（`#11` 落地前只有这一条来源）。"""
+    monkeypatch.setenv(ALERT_WEBHOOK_URL_ENV, "https://hook.example/alerts")
+    monkeypatch.setenv(ALERT_DAILY_TOKEN_THRESHOLD_ENV, "1000000")
+    monkeypatch.setenv(ALERT_DAILY_COST_THRESHOLD_ENV, "5.5")
+
+    config = resolve_alerts_config(Settings(data_dir=tmp_path / "data"))
+
+    assert config.webhook_url == "https://hook.example/alerts"
+    assert config.daily_token_threshold == 1_000_000
+    assert config.daily_cost_threshold_usd == 5.5
+
+
+def test_pricing_configured_needs_a_positive_price(tmp_path: Path) -> None:
+    """`cost_configured` 的口径：只有真的配了正单价才算「成本可读」，否则页面要标注只统计 token。"""
+    settings = Settings(data_dir=tmp_path / "data")
+
+    assert pricing_configured(settings) is False
+
+    settings.llm_input_price_per_m = 0.0
+
+    assert pricing_configured(settings) is False
+
+    settings.llm_input_price_per_m = 0.27
+
+    assert pricing_configured(settings) is True

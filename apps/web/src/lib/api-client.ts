@@ -63,6 +63,16 @@ export type AdminSettings = components['schemas']['Settings'];
 /** 审计流水里的一行：谁在什么时候对什么做了什么（`GET /v1/admin/audit`）。 */
 export type AuditEntry = components['schemas']['AuditEntry'];
 
+/** 用量报表（`GET /v1/admin/usage`）：区间合计 + 分组明细，两者由服务端同源算出。 */
+export type UsageReport = components['schemas']['UsageReport'];
+
+export type UsageBucket = UsageReport['buckets'][number];
+
+/** 用量聚合维度（契约 `getUsage` 的 `group_by`）。 */
+export type UsageGroupBy = NonNullable<
+  NonNullable<paths['/v1/admin/usage']['get']['parameters']['query']>['group_by']
+>;
+
 /** 索引任务；`stage` / `progress` 由 JobRunner 推进。 */
 export type Job = components['schemas']['Job'];
 
@@ -395,6 +405,17 @@ export async function listAudit(
   );
 
   return body.entries ?? [];
+}
+
+/**
+ * 用量报表（仅 admin）：`totals` 与 `buckets` 都是服务端算好的，页面直接用；
+ * 区间内没有数据时返回零值（`totals` 全 0、`buckets` 空数组），不是报错。
+ */
+export function getUsage(
+  params: { from?: string; to?: string; user_id?: string; group_by?: UsageGroupBy } = {},
+  signal?: AbortSignal
+): Promise<UsageReport> {
+  return request<UsageReport>(`/v1/admin/usage${buildQuery(params)}`, { signal });
 }
 
 // ----------------------------------------------------------------------

@@ -855,3 +855,104 @@ def test_ask_request_schema_matches() -> None:
 
     assert runtime["required"] == contract["required"] == ["question", "version"]
     assert set(runtime["properties"]) == set(contract["properties"])
+
+
+# ----------------------------------------------------------------------
+# issue #12：用量聚合与告警（`GET /v1/admin/usage`）
+# ----------------------------------------------------------------------
+
+
+def test_usage_path_is_implemented() -> None:
+    """issue #12 把 `/v1/admin/usage` 从契约落到了实现。"""
+    runtime = _operation(_runtime(), "/v1/admin/usage", "get")
+    contract = _operation(_contract(), "/v1/admin/usage", "get")
+
+    assert runtime["operationId"] == contract["operationId"] == "getUsage"
+    assert runtime["tags"] == contract["tags"] == ["admin"]
+    # 不覆盖 security：继承全局 cookieAuth / bearerAuth。
+    assert "security" not in runtime
+
+
+def test_usage_query_parameters_match() -> None:
+    runtime = _operation(_runtime(), "/v1/admin/usage", "get")["parameters"]
+    contract = _operation(_contract(), "/v1/admin/usage", "get")["parameters"]
+
+    assert [param["name"] for param in runtime] == [param["name"] for param in contract] == [
+        "from",
+        "to",
+        "user_id",
+        "group_by",
+    ]
+
+    for spec in (_runtime(), _contract()):
+        parameters = {
+            param["name"]: param
+            for param in _operation(spec, "/v1/admin/usage", "get")["parameters"]
+        }
+
+        assert parameters["group_by"]["schema"]["enum"] == ["day", "user", "version", "model"]
+        assert parameters["group_by"]["schema"]["default"] == "day"
+
+
+def test_usage_report_schema_matches() -> None:
+    """`totals` 是区间合计、`buckets` 是分组明细；`requests`/`cost_configured` 是页面要的标量。"""
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/admin/usage")
+
+        assert schema["required"] == [
+            "from",
+            "to",
+            "requests",
+            "cost_configured",
+            "totals",
+            "buckets",
+        ]
+        assert set(schema["properties"]) == {
+            "from",
+            "to",
+            "requests",
+            "cost_configured",
+            "totals",
+            "buckets",
+        }
+        assert schema["properties"]["from"]["format"] == "date"
+        assert schema["properties"]["to"]["format"] == "date"
+        assert schema["properties"]["totals"]["$ref"].endswith("/Usage")
+
+        bucket = _deref(spec, schema["properties"]["buckets"]["items"])
+
+        assert bucket["required"] == [
+            "key",
+            "requests",
+            "prompt_tokens",
+            "completion_tokens",
+            "cost_usd",
+        ]
+
+
+def test_usage_declares_problem_responses() -> None:
+    """未认证 / 非 admin / 查询参数不合法都是 problem+json。"""
+    for spec in (_runtime(), _contract()):
+        responses = _operation(spec, "/v1/admin/usage", "get")["responses"]
+
+        assert {"200", "401", "403", "422"} <= set(responses)
+
+        for status in ("401", "403", "422"):
+            assert "application/problem+json" in _resolved_response(
+                spec, "/v1/admin/usage", "get", status
+            )["content"]
+
+
+def _resolved_response(
+    spec: dict[str, Any], path: str, method: str, status: str
+) -> dict[str, Any]:
+    """某个响应；契约里是 `components.responses` 的 `$ref`，运行时是内联的 problem+json。"""
+    response: dict[str, Any] = _operation(spec, path, method)["responses"][status]
+    ref = response.get("$ref")
+
+    if isinstance(ref, str):
+        *_, name = ref.split("/")
+        resolved: dict[str, Any] = spec["components"]["responses"][name]
+        return resolved
+
+    return response

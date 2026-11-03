@@ -739,17 +739,33 @@ paths:
     get:
       tags: [admin]
       summary: 用量统计
-      description: 按请求粒度记录，可聚合。无硬预算，仅用于观测与告警。
+      description: |
+        按请求粒度记录，可按 `group_by` 聚合。无硬预算，仅用于观测与告警（D23）。
+
+        - `totals` 与 `buckets` 由服务端同源算出（同一个区间条件），页面直接用这些数字，
+          不在前端再算一遍。
+        - 区间内没有数据时返回零值（`totals` 全 0、`buckets` 为空数组），**不是报错**。
+        - `totals.latency_ms` 是区间内所有请求的耗时**之和**（与其余字段同为合计口径）。
+        - 分天口径是**本地日期（UTC+8）**，与告警的 `day` 一致。
+        - `from`/`to` 缺省为最近 7 天（含今天）；`from` 晚于 `to` 时自然为空，不报错。
+        - `user_id` 按 `usage.user_id`（用户 id）过滤；`group_by=user` 的 `key` 优先显示用户名，
+          取不到时退回 id。
+        - `cost_configured=false` 时 `cost_usd` 恒为 0（未配单价）：页面必须标注
+          「未配置单价，仅统计 token」，不要让用户以为成本是 0。
+        - 调用时顺带做一次当日告警检查（幂等、不阻塞响应）。
       operationId: getUsage
       parameters:
         - name: from
           in: query
+          description: 起始日期（本地日期，含当天）；缺省为 `to` 往前 7 天
           schema: { type: string, format: date }
         - name: to
           in: query
+          description: 结束日期（本地日期，含当天）；缺省为今天
           schema: { type: string, format: date }
         - name: user_id
           in: query
+          description: 只看某个用户（`usage.user_id`）
           schema: { type: string }
         - name: group_by
           in: query
@@ -760,6 +776,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/UsageReport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/BadRequest" }
 
   /v1/admin/audit:
     get:
@@ -1278,15 +1297,25 @@ components:
 
     UsageReport:
       type: object
-      required: [from, to, totals, buckets]
+      required: [from, to, requests, cost_configured, totals, buckets]
       properties:
         from: { type: string, format: date }
         to: { type: string, format: date }
+        requests:
+          type: integer
+          description: 区间内的请求总数（顶部卡片的「请求数」直接用这个值）
+        cost_configured:
+          type: boolean
+          description: |
+            是否配置了单价（`MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` /
+            `MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M`）。false 时 `cost_usd` 恒为 0，
+            页面必须标注「未配置单价，仅统计 token」。
         totals: { $ref: "#/components/schemas/Usage" }
         buckets:
           type: array
           items:
             type: object
+            required: [key, requests, prompt_tokens, completion_tokens, cost_usd]
             properties:
               key: { type: string }
               requests: { type: integer }

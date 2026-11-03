@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import FakeChat, final_answer, session_cookie, tool_call
+from mc_librarian import alerts
 from mc_librarian.answer import client as answer_client
 from mc_librarian.answer.client import ChatError, post_chat_completion
 from mc_librarian.answer.tools import ToolBox
@@ -415,6 +416,32 @@ def test_ask_cost_uses_configured_prices(
 
     row = usage_rows()[0]
     assert row["cost_usd"] == pytest.approx(11 / 1_000_000 * 1.0 + 7 / 1_000_000 * 2.0)
+
+
+def test_ask_returns_ok_when_alert_webhook_fails(
+    user_client: TestClient,
+    indexed: Path,
+    fake_chat: FakeChat,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    usage_rows: Any,
+) -> None:
+    """#12 验收第 4 条：超阈值不阻断请求——Webhook 抛异常时 `/v1/ask` 仍正常返回并记账。"""
+    settings.alert_webhook_url = "https://hook.invalid/alerts"
+    settings.alert_daily_token_threshold = 1
+    fake_chat.script = [final_answer("答案。")]
+
+    def boom(url: str, payload: dict[str, object], timeout: float) -> None:
+        raise alerts.AlertError("Webhook 请求失败：connection refused")
+
+    monkeypatch.setattr(alerts, "post_webhook", boom)
+
+    response = ask(user_client)
+
+    assert response.status_code == 200
+    assert "event: done" in response.text
+    # 告警是旁路：用量照记，问答结果不受影响。
+    assert len(usage_rows()) == 1
 
 
 # ----------------------------------------------------------------------

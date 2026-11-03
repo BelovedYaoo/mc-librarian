@@ -548,7 +548,19 @@ export interface paths {
         };
         /**
          * 用量统计
-         * @description 按请求粒度记录，可聚合。无硬预算，仅用于观测与告警。
+         * @description 按请求粒度记录，可按 `group_by` 聚合。无硬预算，仅用于观测与告警（D23）。
+         *
+         *     - `totals` 与 `buckets` 由服务端同源算出（同一个区间条件），页面直接用这些数字，
+         *       不在前端再算一遍。
+         *     - 区间内没有数据时返回零值（`totals` 全 0、`buckets` 为空数组），**不是报错**。
+         *     - `totals.latency_ms` 是区间内所有请求的耗时**之和**（与其余字段同为合计口径）。
+         *     - 分天口径是**本地日期（UTC+8）**，与告警的 `day` 一致。
+         *     - `from`/`to` 缺省为最近 7 天（含今天）；`from` 晚于 `to` 时自然为空，不报错。
+         *     - `user_id` 按 `usage.user_id`（用户 id）过滤；`group_by=user` 的 `key` 优先显示用户名，
+         *       取不到时退回 id。
+         *     - `cost_configured=false` 时 `cost_usd` 恒为 0（未配单价）：页面必须标注
+         *       「未配置单价，仅统计 token」，不要让用户以为成本是 0。
+         *     - 调用时顺带做一次当日告警检查（幂等、不阻塞响应）。
          */
         get: operations["getUsage"];
         put?: never;
@@ -954,14 +966,22 @@ export interface components {
             from: string;
             /** Format: date */
             to: string;
+            /** @description 区间内的请求总数（顶部卡片的「请求数」直接用这个值） */
+            requests: number;
+            /**
+             * @description 是否配置了单价（`MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` /
+             *     `MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M`）。false 时 `cost_usd` 恒为 0，
+             *     页面必须标注「未配置单价，仅统计 token」。
+             */
+            cost_configured: boolean;
             totals: components["schemas"]["Usage"];
             buckets: {
-                key?: string;
-                requests?: number;
-                prompt_tokens?: number;
-                completion_tokens?: number;
+                key: string;
+                requests: number;
+                prompt_tokens: number;
+                completion_tokens: number;
                 /** Format: float */
-                cost_usd?: number;
+                cost_usd: number;
             }[];
         };
         AuditEntry: {
@@ -1897,8 +1917,11 @@ export interface operations {
     getUsage: {
         parameters: {
             query?: {
+                /** @description 起始日期（本地日期，含当天）；缺省为 `to` 往前 7 天 */
                 from?: string;
+                /** @description 结束日期（本地日期，含当天）；缺省为今天 */
                 to?: string;
+                /** @description 只看某个用户（`usage.user_id`） */
                 user_id?: string;
                 group_by?: "day" | "user" | "version" | "model";
             };
@@ -1917,6 +1940,9 @@ export interface operations {
                     "application/json": components["schemas"]["UsageReport"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["BadRequest"];
         };
     };
     listAudit: {

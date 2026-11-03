@@ -144,7 +144,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
 | `GET/PUT /v1/admin/settings` | 模型、索引参数、会话时长、告警阈值；密钥 writeOnly。**`GET` 已实现（只读，值从 `MC_LIBRARIAN_*` 运行时配置派生，未实现的块整块省略）；`PUT` 与 `settings` 表随 #11 落地** |
-| `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
+| `GET /v1/admin/usage` | **已实现**（#12）：按 `day`/`user`/`version`/`model` 聚合，`totals` 与 `buckets` 同源；区间内无数据返回零值 |
 | `GET /v1/admin/audit` | 审计日志 |
 
 **任务只保留 `kind: index`**：`reindex` / `summarize` 是后续 ticket 的事，当前不提供，避免出现「跑成功但什么都没做」的任务。
@@ -167,7 +167,9 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 **版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行，并把产出的 `db_path`、`obfuscated` 与 `source_size_bytes`（`parse` 阶段写入）一并登记，`has_summaries` 按任务是否跑过 `summarize`（#7）写；已注册版本一个字段都不动。`obfuscated` 的取值：`options.obfuscated` 显式声明优先；未声明时跑过 `download` 用 checkpoint 里的真值，parse-only 缺省按「已 remap」（`true`）记录。`source_size_bytes` 的语义统一为**源码树字节数**（`.java` 与 `data/` 下 `.json` 的总字节数）：注册时若 `<data_dir>/src/<version>/` 不存在则**保留原值**（首次注册写 0），不拿索引 sqlite 的大小充数。
 
-**用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定。
+**用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定（D23）。
+
+**聚合与告警（#12）**：`GET /v1/admin/usage` 的 `totals` 与 `buckets` 由**同一个区间条件**在服务端算出来（用量页直接用这些数字，前端不再累加），分天口径是**本地日期（UTC+8）**，无数据区间返回零值而不是报错；`cost_configured=false`（未配单价）时 `cost_usd` 恒为 0，页面必须标注「未配置单价，仅统计 token」。告警阈值只从环境配置读——`MC_LIBRARIAN_ALERT_WEBHOOK_URL` / `MC_LIBRARIAN_ALERT_DAILY_TOKEN_THRESHOLD` / `MC_LIBRARIAN_ALERT_DAILY_COST_THRESHOLD_USD`（阈值 ≤ 0 表示该指标不告警，默认 0 即默认不告警），读取收敛在 `resolve_alerts_config()`，数据库覆盖随 #11 加进同一个函数、调用点不动。检查在 usage 写入之后与 `GET /v1/admin/usage` 两处触发，都在**后台线程**里跑（不阻断请求）；Webhook 超时 5 秒，失败只 warn 且**不重试**（避免告警风暴），超阈值不做任何限制。同日同指标只告警一次靠 `alert_events` 的 `UNIQUE(day, metric)` + `INSERT ... ON CONFLICT DO NOTHING` + `rowcount` 判定。
 
 ## 8. 三种接入方式
 
@@ -206,3 +208,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-04 | 0.2.0 | issue #14：1.20.1 映射版本流水线的验收证据——`mc-librarian index --version 1.20.1` 复用 #13/#21 的既有实现直接跑通（实测 4,786 个 `.java`、557,300 行、5,560,214 cl100k token、内存峰值 4.5 GiB、53 秒，索引内 4,773 个文件 = 13 个 tree-sitter 解析失败被跳过）；`download` 阶段的复用判据补上「标记里记着用过官方 mappings 就必须还在」——缓存被删后重跑会重新取 mappings，取不到就报错点明版本与 mappings（不再把半份缓存当完成证据，也绝不退回反编译混淆 jar 产出 `a.java`）；补三类自动化测试：`files.path` 无 `a.java`/`ab.java` 形式且已知可读类名存在（离线跑，见 `tests/test_fetch.py`）、映射缺失报错（`tests/test_index_cli.py` 断言非 0 退出与错误文案）、1.20.1 与 26.3 两个索引共存时各自可查（`tests/test_symbols.py`）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | issue #7：中文摘要层落地——新增 `mc_librarian.indexing.summarize`（LLM 只从 `MC_LIBRARIAN_LLM_BASE_URL`/`MC_LIBRARIAN_LLM_MODEL`/`MC_LIBRARIAN_LLM_API_KEY` 读，未配置时 `summarize` 阶段明确失败并给出可操作报错，不静默跳过）；按类内容哈希（FQN+父类+接口+字段签名+public 方法签名）幂等，只重跑变化的类；按 package 分批（`summary_batch_size`，默认 40）并发 `summary_concurrency`（默认 4）生成，单类失败保留其余、任务标 `failed`；索引库新增 `summaries`（普通表，带 `content_hash`）与 `summaries_fts`（FTS5 + jieba 预分词，两字词「刷怪」可命中），摘要通道真正接入融合（`why` 含 `summary`，不改 RRF）；任务产出登记版本时 `has_summaries` 按是否跑过 `summarize` 写；`/v1/versions` 的 `VersionInfo` 新增 `summary_count`/`class_count`（从索引库实时读，版本页显示摘要覆盖率），`has_summaries` 描述改为登记快照。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | 复审修复（#8 关闭前）：`/v1/ask` 的收尾（还并发槽位 / 关索引 / 记一行 `usage`）从流生成器的 `finally` 挪到 ASGI 响应的 `__call__`——客户端中途断开时 Starlette 取消流任务，生成器停在 `yield`，那段 `finally` 要等 async generator 被 GC / `aclose` 才跑，不是显式保证（槽位会漏，服务最终对新问答全部 429）；`AskRun` 构造与索引连接一起移进受保护区间；前端 `/ask` 页把 `context_budget` 伪工具单独渲染（「已丢弃 N 条最旧结果」）且不再计入「完成/总数」；补 `error` 事件、真超时 / 总超时降级、`urlopen` 传输异常转 `ChatError`、客户端断开时归还槽位四类测试；本节注明并发上限是进程内的（多 worker 部署按 worker 数放大）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-04 | 0.2.0 | issue #12：`GET /v1/admin/usage` 落地——`totals` 与 `buckets` 由同一个区间条件在服务端聚合（页面直接用接口数字，不在前端再算一遍），分天口径是本地日期（UTC+8），无数据区间返回零值而不是报错，`cost_configured` 让页面能标注「未配置单价，仅统计 token」；迁移 v7 落地 `alert_events`（`UNIQUE(day, metric)` + `ON CONFLICT DO NOTHING` 去重），当日 token / 成本超阈值推 Webhook（阈值只从 `MC_LIBRARIAN_ALERT_*` 读，读取收敛在 `resolve_alerts_config()`，`#11` 的数据库覆盖加进同一个函数），检查在 `/v1/ask` 写完 usage 后与用量页两处触发、都在后台线程里跑（不阻断请求），Webhook 超时 5 秒、失败只 warn 不重试；前端加 `/usage` 页（时间区间 + 四种聚合维度 + 总量卡片 + 分组表格）。属 v0.2 设计内的增量补齐，`info.version` 不变 |

@@ -53,7 +53,7 @@ class Migration:
 
 # v1：账号与会话；v2：个人访问令牌（pats）；v3：邀请与审计（invites/audit）；
 # v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile；
-# v6：用量（usage，issue #8 建表、`#12` 只读聚合）。
+# v6：用量（usage，issue #8 建表、`#12` 只读聚合）；v7：告警去重（alert_events，issue #12）。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -268,6 +268,25 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
               latency_ms        INTEGER NOT NULL DEFAULT 0,
               version           TEXT,
               created_at        TEXT NOT NULL
+            )
+            """,
+        ),
+    ),
+    # v7：用量告警的去重账（issue #12）。`UNIQUE(day, metric)` 就是「同日同指标只告警一次」的
+    # 实现方式：插入冲突即已告警过（`INSERT ... ON CONFLICT DO NOTHING` + `rowcount` 判定），
+    # 不需要先查后写。`day` 是本地日期（UTC+8），与用量页的分天口径一致。
+    Migration(
+        version=7,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS alert_events (
+              id        INTEGER PRIMARY KEY,
+              day       TEXT NOT NULL,
+              metric    TEXT NOT NULL,
+              value     REAL NOT NULL,
+              threshold REAL NOT NULL,
+              fired_at  TEXT NOT NULL,
+              UNIQUE (day, metric)
             )
             """,
         ),
