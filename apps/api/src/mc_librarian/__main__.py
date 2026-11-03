@@ -6,6 +6,8 @@
   与安装后的 `mc-librarian fetch ...` 是同一个入口。
 - `python -m mc_librarian index --version <v> [--source-dir <dir>] [--force]` 端到端产出可检索
   索引（见 #13），与安装后的 `mc-librarian index ...` 是同一个入口。
+- `python -m mc_librarian eval --version <v> [--set <file>] [--out <dir>] [--limit 5]` 跑人工
+  评测集并产出 JSON + markdown 报告（见 #16），与安装后的 `mc-librarian eval ...` 是同一个入口。
 """
 
 from __future__ import annotations
@@ -59,6 +61,11 @@ def cli() -> None:
         from mc_librarian.indexing.cli import main as index_main
 
         raise SystemExit(index_main(argv[1:]))
+
+    if argv[:1] == ["eval"]:
+        from mc_librarian.eval.cli import main as eval_main
+
+        raise SystemExit(eval_main(argv[1:]))
 
     serve()
 
