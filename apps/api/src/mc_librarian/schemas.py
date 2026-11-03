@@ -195,13 +195,16 @@ class AuditList(BaseModel):
 
 
 class JobOptions(BaseModel):
-    """创建任务时的 `options`；`source_dir`/`obfuscated` 见 docs/openapi.yaml 的 `JobCreate`。
+    """创建任务时的 `options`；三个字段见 docs/openapi.yaml 的 `JobCreate`。
 
     `source_dir` 可省略：省略（或不传 `options`）走完整五段；给了 `options` 但 `source_dir`
     为空由接口层返回 422（空值属于笔误）。
     `obfuscated` 声明该版本源码是否经官方映射 remap；省略时由 `jobs.runner.resolve_obfuscated`
     按 checkpoint 与阶段序列推断（parse-only 缺省按「已 remap」记录）。显式传 `null` 与省略不同，
     由接口层回 422（契约里是非 nullable 的 `boolean`）。
+    `force` 为 `true` 时强制重建：绕过「同版本已有任务」的 409，并且即使
+    `cache/<version>/fetch.json` 记着源码树已反编译完成也重新反编译（见
+    `jobs.runner.reuse_source_tree`）；默认 `false` 时源码树已就绪则复用。
     """
 
     source_dir: str | None = None
