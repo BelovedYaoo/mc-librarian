@@ -1,6 +1,7 @@
 import type { Job, JobLog, JobStage, JobStatus } from 'src/lib/api-client';
 
 import { useState } from 'react';
+import { useSearchParams } from 'react-router';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -48,10 +49,13 @@ const STATUS_META: Record<JobStatus, { label: string; color: ChipColor }> = {
 /** 任务列表 + 进度 + 日志面板 + 取消按钮（仅 admin 可达，路由层有 RequireAdmin）。 */
 export function JobsView() {
   const { jobs, error, refresh } = useJobs();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<'cancel' | 'retry' | null>(null);
 
+  // 选中任务以 `?job=<id>` 为准：刷新与分享链接都能回到同一个任务。
+  // 未知 id 回落到列表首个，列表为空则回落到空态。
+  const selectedId = searchParams.get('job');
   const selected = jobs.find((job) => job.id === selectedId) ?? jobs[0] ?? null;
   const { lines, error: logsError } = useJobLogs(selected?.id ?? null);
 
@@ -119,7 +123,7 @@ export function JobsView() {
                   <ListItemButton
                     key={job.id}
                     selected={job.id === selected?.id}
-                    onClick={() => setSelectedId(job.id)}
+                    onClick={() => setSearchParams({ job: job.id })}
                     sx={{ borderRadius: 1 }}
                   >
                     <ListItemText
