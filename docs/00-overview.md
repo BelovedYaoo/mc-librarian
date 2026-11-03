@@ -20,10 +20,10 @@ mc-librarian/
 │  ├─ api/                 Python：FastAPI + JobRunner + 索引 CLI
 │  └─ web/                 React + Vite + MUI 9（源自 minimal-vite-ts）
 ├─ packages/
-│  ├─ api-client/          由 doc/openapi.yaml 生成
+│  ├─ api-client/          由 docs/openapi.yaml 生成
 │  └─ ui/                  精简版 react-core（删权限 manifest 与私有依赖）
 ├─ deploy/                 Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
-├─ doc/
+├─ docs/
 ├─ package.json            bun workspaces
 └─ pyproject.toml          uv workspace
 ```

@@ -14,12 +14,12 @@ apps/api          Python：FastAPI + JobRunner + 索引 CLI
 apps/web          React + Vite + MUI
 packages/         生成的 API 客户端、精简版 UI 组件库
 deploy/           Dockerfile / Caddyfile / compose
-doc/              openapi.yaml（契约）、01-api.md、00-overview.md
+docs/              openapi.yaml（契约）、01-api.md、00-overview.md
 ```
 
 ## 状态
 
-设计定稿，实现未开始。见 `doc/00-overview.md` §8 里程碑。
+设计定稿，实现未开始。见 `docs/00-overview.md` §8 里程碑。
 
 ## 数据
 

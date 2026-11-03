@@ -102,7 +102,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 | 方式 | 适用 | 来源 |
 |---|---|---|
-| OpenAPI 3.1 | 前端生成的 TS 客户端、Dify / n8n / LangChain | `doc/openapi.yaml` |
+| OpenAPI 3.1 | 前端生成的 TS 客户端、Dify / n8n / LangChain | `docs/openapi.yaml` |
 | MCP | Claude Code / Cursor / pi | `apps/api` 内薄适配器 |
 | 直接 HTTP | 脚本、curl | 同上 |
 
