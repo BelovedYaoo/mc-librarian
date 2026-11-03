@@ -71,7 +71,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | 证书 | OHTTPS 自动续期的 `*.belovedyaoo.top` 泛域名 |
 | 发版 | **不接 CI/CD**。发版频率低，手工 `docker compose up -d` + 网关 conf 变更 |
 
-**索引不在节点上构建。** 节点只有 3.5 GiB 内存，反编译一个 5–7M token 的版本需要 3–4 GiB，硬跑会拖垮同机的其它服务。索引在本地工作站用 `mc-librarian index --version <v>` 生成，产物 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与上传入口。
+**索引不在节点上构建。** 节点只有 3.5 GiB 内存，反编译一个 5–7M token 的版本需要 3–4 GiB，硬跑会拖垮同机的其它服务。本地工作站上的流程是：先 `mc-librarian fetch --version <v> --out <src dir>` 取到源码树，再本地跑一次完整五段任务（`POST /v1/admin/jobs`，省略 `options`），或直接对源码目录跑一次 `parse` 任务（`options.source_dir` 指向该目录），产出 `db/<version>.sqlite`；把该文件上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与「注册索引」入口。
 
 ## 5. 数据模型
 

@@ -656,6 +656,7 @@ paths:
       description: |
         只对 `failed` / `canceled` 有效：保留 checkpoint，把同一任务重新置为 `queued`，
         从下一个未完成的阶段续跑。其他状态返回 `409`。
+        本实例关闭索引构建（`settings.index.enabled=false`）时返回 `403`（重排后 runner 会跑反编译）。
       operationId: retryJob
       parameters:
         - $ref: "#/components/parameters/JobId"
@@ -842,9 +843,9 @@ components:
         files: { type: integer }
         tokens: { type: integer, description: 源码 token 总量（cl100k 估算） }
         indexed_at: { type: string, format: date-time }
-        obfuscated: { type: boolean, description: 是否经官方映射重映射 }
+        obfuscated: { type: boolean, description: 源码是否经官方映射重映射（remap） }
         has_summaries: { type: boolean }
-        source_size_bytes: { type: integer }
+        source_size_bytes: { type: integer, description: 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） }
 
     SearchRequest:
       type: object
@@ -1151,6 +1152,15 @@ components:
                 - 给了 `options` 但 `source_dir` 为空字符串 → 422（空值属于笔误）。
 
                 `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
+            obfuscated:
+              type: boolean
+              description: |
+                该版本源码是否经官方映射 remap（写入注册表 `VersionInfo.obfuscated`）。**可省略**：
+
+                - 显式给值 → 用它；
+                - 省略且任务跑过 `download` → 用 checkpoint 里的真值（等于该版本是否需要官方 mappings）；
+                - 省略且为 parse-only → 按「已 remap」记录（`true`）。parse-only 的典型来源是本地
+                  `fetch` 出来、已经 remap 过的源码树；26.x 这类本来就不混淆的版本请显式传 `false`。
             force: { type: boolean, default: false }
 
     JobLog:
@@ -1190,7 +1200,7 @@ components:
                 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
                 `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
                 `POST /v1/admin/versions` 注册。只读：值是部署级配置，当前不可通过 `PUT` 修改。
-            java_xmx: { type: string, default: "3g" }
+            java_xmx: { type: string, default: "4G" }
             summary_batch_size: { type: integer, default: 40 }
             summary_concurrency: { type: integer, default: 4 }
         security:

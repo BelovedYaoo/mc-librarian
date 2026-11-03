@@ -59,6 +59,12 @@ FINAL_STAGE: Final = "finalize"
 # 停止 runner 时最多等一个任务收尾多久，超时就取消 asyncio 任务。
 STOP_TIMEOUT_S: Final = 5.0
 
+# 闸门关闭时给遗留排队任务的失败原因（与 `POST /v1/admin/jobs` 的 403 detail 同义）。
+INDEX_DISABLED_ERROR: Final = (
+    "本实例已关闭索引构建（MC_LIBRARIAN_INDEX_ENABLED=false）："
+    "请在本地工作站生成索引后用 POST /v1/admin/versions 注册"
+)
+
 
 class StageError(RuntimeError):
     """阶段内部可预期的失败；消息会进任务日志与 `error` 字段。"""
@@ -95,6 +101,22 @@ class JobContext:
 def stages_for(options: Mapping[str, Any]) -> tuple[str, ...]:
     """按任务参数选阶段序列：给了 `source_dir` 走索引三段，否则从官方 jar 起跑完整五段。"""
     return SOURCE_STAGES if options.get("source_dir") else STAGES
+
+
+def resolve_obfuscated(options: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> bool:
+    """任务产出登记版本时决定 `obfuscated`（该版本的源码是否经官方映射 remap）。
+
+    `options.obfuscated` 显式声明优先；未声明时跑过 `download` 的用 checkpoint 里的真值
+    （等于 `downloads.needs_remap`），parse-only 任务缺省按 `True` 记录：它的典型来源是本地
+    `fetch` 出来、**已经 remap 过**的源码树，未 remap 才是少数。26.x 这类本来就不混淆的版本
+    请显式传 `false`。
+    """
+    declared = options.get("obfuscated")
+
+    if isinstance(declared, bool):
+        return declared
+
+    return bool(checkpoint.get("obfuscated", True))
 
 
 def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
@@ -288,7 +310,7 @@ class JobRunner:
                 self._save, job_id, checkpoint, (index + 1) / total, f"{stage} 完成"
             )
 
-        await asyncio.to_thread(self._finish, job_id, version, checkpoint)
+        await asyncio.to_thread(self._finish, job_id, version, checkpoint, options)
 
     # ------------------------------------------------------------------
     # 所有落库操作都开一条短连接，并在写事务里完成「写状态 + 追加日志」。
@@ -322,6 +344,21 @@ class JobRunner:
 
     def _claim(self) -> sqlite3.Row | None:
         with self._database.connect() as conn, transaction(conn):
+            # 闸门关闭：认领前先清掉队首排队任务并写清原因，绝不进入下载/反编译。
+            if not self._settings.index_enabled:
+                job_id = store.fail_next_queued(
+                    conn,
+                    error=INDEX_DISABLED_ERROR,
+                    message="任务失败：本实例已关闭索引构建",
+                )
+
+                if job_id is not None:
+                    store.append_log(
+                        conn, job_id, level="error", message=INDEX_DISABLED_ERROR
+                    )
+
+                return None
+
             return store.claim_next(conn)
 
     def _is_cancel_requested(self, job_id: str) -> bool:
@@ -352,7 +389,13 @@ class JobRunner:
             )
             store.append_log(conn, job_id, level="info", message=message)
 
-    def _finish(self, job_id: str, version: str, checkpoint: dict[str, Any]) -> None:
+    def _finish(
+        self,
+        job_id: str,
+        version: str,
+        checkpoint: dict[str, Any],
+        options: Mapping[str, Any],
+    ) -> None:
         """全部阶段完成：终态与取消标志在同一条 UPDATE 里判定，再按实际终态记账。
 
         `succeeded` 时登记版本行：**仅当版本未注册时插入一行**，已注册版本不动；
@@ -388,9 +431,9 @@ class JobRunner:
                         version=version,
                         files=int(checkpoint.get("files", 0)),
                         tokens=int(checkpoint.get("tokens", 0)),
-                        # `download` 阶段写入，等于 `downloads.needs_remap`；parse-only 任务没跑
-                        # download，按未 remap 记录（与旧行为一致）。
-                        obfuscated=bool(checkpoint.get("obfuscated", False)),
+                        # `options.obfuscated` 优先；未声明时跑过 `download` 用 checkpoint 的真值，
+                        # parse-only 缺省按「已 remap」记录（见 `resolve_obfuscated`）。
+                        obfuscated=resolve_obfuscated(options, checkpoint),
                         source_size_bytes=int(checkpoint.get("source_size_bytes", 0)),
                         db_path=str(index_file),
                     )

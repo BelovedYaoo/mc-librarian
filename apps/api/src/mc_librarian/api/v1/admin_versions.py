@@ -2,6 +2,8 @@
 
 节点侧不构建索引：管理员把本地生成的 `db/<version>.sqlite` 放进数据根，再调本接口。
 服务端校验文件存在且是合法 sqlite，然后把文件数 / token 总量 / 摘要标记写进版本注册表。
+`source_size_bytes` 写「源码树字节数」（与任务产出一致）：数据根里没有 `<data_dir>/src/<version>/`
+时写 0，而不是拿索引 sqlite 的大小充数。
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ from fastapi import APIRouter, Request
 from mc_librarian import audit
 from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
 from mc_librarian.db import transaction
-from mc_librarian.indexing.layout import index_path
+from mc_librarian.indexing.build import source_tree_size_bytes
+from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import RegisterVersionRequest, VersionInfo
@@ -114,6 +117,12 @@ def register_version(
     if stats is None:
         raise ProblemException(422, BAD_REQUEST_TITLE, f"索引文件不是合法的 sqlite：{path}")
 
+    # `source_size_bytes` 的语义是「源码树字节数」（与任务产出一致），不是索引 sqlite 的大小。
+    # 注册时源码树不一定在数据根里（只上传了 db/），此时写 0。
+    source_size_bytes = source_tree_size_bytes(
+        source_root(settings.data_dir, payload.version)
+    )
+
     with transaction(conn):
         registered = store.register_version(
             conn,
@@ -122,7 +131,7 @@ def register_version(
             tokens=stats.tokens,
             obfuscated=payload.obfuscated,
             has_summaries=stats.has_summaries,
-            source_size_bytes=path.stat().st_size,
+            source_size_bytes=source_size_bytes,
             db_path=str(path),
         )
         audit.record(

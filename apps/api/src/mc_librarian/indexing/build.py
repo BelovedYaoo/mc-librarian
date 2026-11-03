@@ -167,6 +167,23 @@ def place_source_tree(source_dir: Path, dest: Path) -> None:
         raise BuildError(f"源码树就位失败：{error}") from error
 
 
+def source_tree_size_bytes(root: Path) -> int:
+    """`root` 下索引范围内的文件总字节数（与 `build_index` 的 `source_size_bytes` 同口径）。
+
+    `root` 不存在时返回 0。供 `POST /v1/admin/versions` 注册时统计源码树体积——
+    与任务产出路径写的是同一个量（源码树字节数，不是索引 sqlite 的大小）。
+    """
+    total = 0
+
+    for path in iter_source_files(root):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+
+    return total
+
+
 def build_index(
     root: Path, db_path: Path, *, log: Callable[[LogLevel, str], None]
 ) -> BuildResult:

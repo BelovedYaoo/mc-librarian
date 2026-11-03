@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Final
 
 from fastapi import FastAPI
@@ -17,8 +18,9 @@ from fastapi.openapi.utils import get_openapi
 from mc_librarian import __version__
 from mc_librarian.api.v1 import api_router
 from mc_librarian.config import Settings, get_settings
-from mc_librarian.db import Database
-from mc_librarian.jobs import JobRunner
+from mc_librarian.db import Database, transaction
+from mc_librarian.indexing.layout import index_path
+from mc_librarian.jobs import JobRunner, store
 from mc_librarian.problems import component_schema, install_exception_handlers
 
 logger = logging.getLogger("mc_librarian")
@@ -90,6 +92,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("data root: %s（来源：%s）", settings.data_dir, source)
     logger.info("control db: %s（schema v%d）", database.path, version)
 
+    # 一次性回填历史遗留的 `db_path`（NULL 行）：只在启动时跑，不建定时任务。
+    backfilled = backfill_version_db_paths(database, settings.data_dir)
+
+    if backfilled:
+        logger.info(
+            "回填 %d 个历史版本的 db_path：%s", len(backfilled), "、".join(backfilled)
+        )
+
     # 任务队列随应用启动：单进程内并发 1 串行消费，退出时等当前任务收尾。
     runner = JobRunner(settings, database)
     app.state.job_runner = runner
@@ -99,6 +109,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await runner.stop()
+
+
+def backfill_version_db_paths(database: Database, data_dir: Path) -> list[str]:
+    """启动时一次性回填历史遗留的 `db_path`，返回被补写的版本号。
+
+    本次修复前注册/产出的版本行 `db_path` 为 NULL，即使 `db/<version>.sqlite` 存在也永远
+    404。只补 `db_path IS NULL` 且索引文件存在的行；已有值的行不动，重复启动幂等。
+    """
+    filled: list[str] = []
+
+    with database.connect() as conn, transaction(conn):
+        for version in store.list_versions_missing_db_path(conn):
+            path = index_path(data_dir, version)
+
+            if not path.is_file():
+                continue
+
+            store.set_db_path(conn, version, str(path))
+            filled.append(version)
+
+    return filled
 
 
 def _build_openapi(app: FastAPI) -> dict[str, Any]:

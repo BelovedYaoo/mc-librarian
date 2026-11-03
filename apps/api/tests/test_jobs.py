@@ -18,11 +18,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_librarian.config import Settings
-from mc_librarian.db import LATEST_VERSION, MIGRATIONS, Database, schema_version, transaction
+from mc_librarian.db import (
+    LATEST_VERSION,
+    MIGRATIONS,
+    Database,
+    schema_version,
+    transaction,
+    utc_now,
+)
 from mc_librarian.indexing.layout import index_path
 from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
-from mc_librarian.jobs.runner import JobRunner
+from mc_librarian.jobs.runner import JobRunner, resolve_obfuscated
 from mc_librarian.main import create_app
 
 FIXTURE_SOURCE = Path(__file__).parent / "fixtures" / "source"
@@ -369,8 +376,8 @@ def test_index_job_lifecycle(
     # 5 个 .java + 1 个 data JSON 都进 files 表（`data/` 只进 files，不解析符号）。
     assert registered["files"] == 6
     assert registered["tokens"] > 0
-    # #4 的 parse 阶段只统计文件数与 token：不 remap、不生成摘要（#7/#13 接管后才可能为 True）。
-    assert registered["obfuscated"] is False
+    # parse-only 任务未声明 `obfuscated`：缺省按「已 remap」记录（`#21` 收尾改为 true）。
+    assert registered["obfuscated"] is True
     assert registered["has_summaries"] is False
 
     logs = admin_client.get(f"/v1/admin/jobs/{job_id}/logs").json()["lines"]
@@ -864,9 +871,13 @@ def test_fallback_failure_does_not_overwrite_succeeded(
     fail_called = threading.Event()
 
     def finish_then_boom(
-        self: JobRunner, job_id: str, version: str, checkpoint: dict[str, Any]
+        self: JobRunner,
+        job_id: str,
+        version: str,
+        checkpoint: dict[str, Any],
+        options: dict[str, Any],
     ) -> None:
-        real_finish(self, job_id, version, checkpoint)
+        real_finish(self, job_id, version, checkpoint, options)
         raise RuntimeError("模拟收尾后异常")
 
     def fail_spy(self: JobRunner, job_id: str, error: str) -> None:
@@ -894,7 +905,7 @@ def test_finish_message_reflects_actual_stages(settings: Settings) -> None:
         conn.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (job.id,))
 
     JobRunner(settings, database, poll_interval=0.01)._finish(
-        job.id, "26.3", {"stages": ["download", "decompile"]}
+        job.id, "26.3", {"stages": ["download", "decompile"]}, {}
     )
 
     with database.connect() as conn:
@@ -1109,3 +1120,171 @@ def test_admin_endpoints_reject_non_admin(user_client: TestClient, source_dir: P
 
     # 版本列表对所有登录用户可见，写入口才需要 admin。
     assert user_client.get("/v1/versions").status_code == 200
+
+
+# ----------------------------------------------------------------------
+# 闸门关闭时的清理与启动回填（#21 最后一轮复审）
+# ----------------------------------------------------------------------
+
+
+def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
+    """闸门关闭时 retry 也回 403：重排会让 runner 跑反编译，与「本实例不构建索引」不符。"""
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/setup", json={"username": "admin", "password": "admin-password-1"}
+        )
+        assert created.status_code == 201, created.text
+
+        database = Database.for_data_dir(settings.data_dir)
+
+        with database.connect() as conn, transaction(conn):
+            job = store.create(conn, kind="index", version="26.3", options={}, created_by=None)
+            store.finish(conn, job.id, status="failed", message="任务失败", error="先前的失败")
+
+        response = client.post(f"/v1/admin/jobs/{job.id}/retry")
+
+        assert response.status_code == 403, response.text
+        assert response.headers["content-type"].startswith("application/problem+json")
+        assert "关闭索引构建" in response.json()["detail"]
+
+        # 任务仍是 failed，没有被重排。
+        assert client.get(f"/v1/admin/jobs/{job.id}").json()["status"] == "failed"
+
+
+def test_runner_fails_queued_jobs_when_index_disabled(tmp_path: Path) -> None:
+    """闸门关闭时 runner 认领前清掉遗留 queued 任务：标 failed 并写清原因，不静默丢弃。"""
+    settings = Settings(data_dir=tmp_path / "data", index_enabled=False)
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    with database.connect() as conn, transaction(conn):
+        job = store.create(conn, kind="index", version="26.3", options={}, created_by=None)
+
+    runner = JobRunner(settings, database, poll_interval=0.01)
+
+    async def run_until_terminal() -> None:
+        await runner.start()
+
+        try:
+            deadline = time.monotonic() + WAIT_TIMEOUT_S
+
+            while time.monotonic() < deadline:
+                with database.connect() as conn:
+                    current = store.find(conn, job.id)
+
+                if current is not None and current.status in TERMINAL:
+                    return
+
+                await asyncio.sleep(0.02)
+
+            raise AssertionError("闸门关闭时的排队任务未被处理")
+        finally:
+            await runner.stop()
+
+    asyncio.run(run_until_terminal())
+
+    with database.connect() as conn:
+        finished = store.find(conn, job.id)
+        logs = store.list_logs(conn, job.id)
+
+    assert finished is not None
+    assert finished.status == "failed"
+    assert finished.error is not None and "关闭索引构建" in finished.error
+    assert any("关闭索引构建" in line.message for line in logs)
+
+
+def test_startup_backfills_legacy_version_db_path(tmp_path: Path) -> None:
+    """启动时一次性回填：`db_path IS NULL` 且索引文件存在的版本行补上路径，其余保持 NULL。"""
+    settings = Settings(data_dir=tmp_path / "data")
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    index = index_path(settings.data_dir, "1.20.1")
+    write_index(index, tokens=4096)
+
+    with database.connect() as conn, transaction(conn):
+        for version in ("1.20.1", "9.9"):
+            conn.execute(
+                "INSERT INTO versions (version, files, tokens, indexed_at, obfuscated,"
+                " has_summaries, source_size_bytes, db_path)"
+                " VALUES (?, 1, 4096, ?, 1, 0, 0, NULL)",
+                (version, utc_now()),
+            )
+
+    with TestClient(create_app(settings)):
+        pass
+
+    with database.connect() as conn:
+        rows = {
+            row["version"]: row["db_path"]
+            for row in conn.execute("SELECT version, db_path FROM versions")
+        }
+
+    assert rows["1.20.1"] == str(index)
+    # 没有对应索引文件的历史行保持 NULL，不会被写成不存在的路径。
+    assert rows["9.9"] is None
+
+
+# ----------------------------------------------------------------------
+# `obfuscated` 的取值与 `source_size_bytes` 的语义（#21 最后一轮复审）
+# ----------------------------------------------------------------------
+
+
+def test_resolve_obfuscated_prefers_explicit_then_checkpoint() -> None:
+    """显式声明优先；未声明时跑过 download 用 checkpoint 真值，parse-only 缺省 True。"""
+    # 显式声明盖过 checkpoint（下载路径也允许覆盖）。
+    assert resolve_obfuscated({"obfuscated": True}, {"obfuscated": False}) is True
+    assert resolve_obfuscated({"obfuscated": False}, {"obfuscated": True}) is False
+    # 未声明：download 阶段写了真值就照抄。
+    assert resolve_obfuscated({}, {"obfuscated": False}) is False
+    assert resolve_obfuscated({}, {"obfuscated": True}) is True
+    # 未声明且没有 download 的产物（parse-only）：按「已 remap」记录。
+    assert resolve_obfuscated({}, {}) is True
+
+
+def test_job_options_obfuscated_overrides_parse_only_default(
+    admin_client: TestClient, source_dir: Path
+) -> None:
+    """`options.obfuscated=false` 覆盖 parse-only 的缺省（缺省为 true）。"""
+    created = admin_client.post(
+        "/v1/admin/jobs",
+        json={
+            "kind": "index",
+            "version": "26.3",
+            "options": {"source_dir": str(source_dir), "obfuscated": False},
+        },
+    )
+
+    assert created.status_code == 202, created.text
+    assert wait_for_terminal(admin_client, created.json()["id"])["status"] == "succeeded"
+
+    versions = admin_client.get("/v1/versions").json()["versions"]
+    registered = next(item for item in versions if item["version"] == "26.3")
+
+    assert registered["obfuscated"] is False
+
+
+def test_register_version_source_size_bytes_uses_source_tree(
+    admin_client: TestClient, settings: Settings
+) -> None:
+    """注册时 `source_size_bytes` 是源码树字节数：源码根不存在写 0，存在则与任务产出口径一致。"""
+    write_index(settings.data_dir / "db" / "26.3.sqlite", tokens=4096)
+
+    missing = admin_client.post("/v1/admin/versions", json={"version": "26.3"})
+
+    assert missing.status_code == 201, missing.text
+    # 数据根里没有 `<data_dir>/src/26.3/`：写 0，不拿索引 sqlite 的大小充数。
+    assert missing.json()["source_size_bytes"] == 0
+
+    placed = settings.data_dir / "src" / "26.3"
+    shutil.copytree(FIXTURE_SOURCE, placed)
+    java_bytes = sum(path.stat().st_size for path in placed.rglob("*.java"))
+    data_bytes = sum(path.stat().st_size for path in (placed / "data").rglob("*.json"))
+
+    registered = admin_client.post("/v1/admin/versions", json={"version": "26.3"})
+
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["source_size_bytes"] == java_bytes + data_bytes
+    assert registered.json()["source_size_bytes"] > 0

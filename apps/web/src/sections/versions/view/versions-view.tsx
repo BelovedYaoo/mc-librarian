@@ -6,9 +6,15 @@ import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
+import Checkbox from '@mui/material/Checkbox';
 import Chip from '@mui/material/Chip';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
 import Drawer from '@mui/material/Drawer';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
@@ -18,7 +24,7 @@ import { useAuth } from 'src/auth';
 
 import { useAdminSettings, useVersions } from 'src/hooks';
 
-import { ApiError, createJob } from 'src/lib/api-client';
+import { ApiError, createJob, registerVersion } from 'src/lib/api-client';
 
 import { paths } from 'src/routes/paths';
 
@@ -29,6 +35,7 @@ export function VersionsView() {
   const { user } = useAuth();
   const { state, refresh } = useVersions();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [registerOpen, setRegisterOpen] = useState(false);
   const isAdmin = user?.role === 'admin';
   const { state: settingsState } = useAdminSettings(isAdmin);
   // 只在明确读到 `index.enabled === false` 时才隐藏入口；读不到（加载中/失败）不假设关闭。
@@ -45,6 +52,12 @@ export function VersionsView() {
           刷新
         </Button>
 
+        {isAdmin && (
+          <Button size="small" variant="outlined" onClick={() => setRegisterOpen(true)}>
+            注册索引
+          </Button>
+        )}
+
         {isAdmin && !indexDisabled && (
           <Button size="small" variant="contained" onClick={() => setDrawerOpen(true)}>
             新建索引
@@ -54,7 +67,8 @@ export function VersionsView() {
 
       {isAdmin && indexDisabled && (
         <Alert severity="info">
-          本实例已关闭索引构建，请在本地工作站生成索引后用「注册索引」上传
+          本实例已关闭索引构建。把本地生成的 <code>db/&lt;版本&gt;.sqlite</code>{' '}
+          放进数据根后，用「注册索引」登记
         </Alert>
       )}
 
@@ -69,6 +83,14 @@ export function VersionsView() {
           {renderList()}
         </CardContent>
       </Card>
+
+      {isAdmin && (
+        <RegisterDialog
+          open={registerOpen}
+          onClose={() => setRegisterOpen(false)}
+          onRegistered={refresh}
+        />
+      )}
 
       {isAdmin && !indexDisabled && (
         <IndexDrawer
@@ -98,7 +120,7 @@ export function VersionsView() {
     if (state.versions.length === 0) {
       return (
         <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-          还没有已索引版本。管理员可以用右上角「新建索引」提交一次任务。
+          还没有已索引版本。管理员可以用右上角「注册索引」登记已上传的索引，或用「新建索引」提交一次任务。
         </Typography>
       );
     }
@@ -144,6 +166,83 @@ function formatTime(value: string): string {
   const parsed = new Date(value);
 
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN');
+}
+
+// ----------------------------------------------------------------------
+
+type RegisterDialogProps = {
+  open: boolean;
+  onClose: () => void;
+  onRegistered: () => void;
+};
+
+/** 注册已上传的 `db/<version>.sqlite`：部署流程（D9）里索引在本地构建、上传后登记。 */
+function RegisterDialog({ open, onClose, onRegistered }: RegisterDialogProps) {
+  const [version, setVersion] = useState('');
+  // 缺省按「已 remap」：未声明时后端也按此记录，26.x 这类不混淆的版本请手动取消勾选。
+  const [obfuscated, setObfuscated] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      await registerVersion({ version, obfuscated });
+      onRegistered();
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : String(cause));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+      <Box component="form" onSubmit={handleSubmit}>
+        <DialogTitle>注册索引</DialogTitle>
+
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              label="版本"
+              value={version}
+              onChange={(event) => setVersion(event.target.value)}
+              placeholder="26.3"
+              helperText="先把本地生成的 db/<版本>.sqlite 放进数据根，再在这里填版本号"
+              autoFocus
+              required
+              fullWidth
+            />
+
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={obfuscated}
+                  onChange={(event) => setObfuscated(event.target.checked)}
+                />
+              }
+              label="源码经官方映射重映射（remap）"
+            />
+
+            {error && <Alert severity="error">{error}</Alert>}
+          </Stack>
+        </DialogContent>
+
+        <DialogActions>
+          <Button onClick={onClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button type="submit" variant="contained" disabled={submitting || version === ''}>
+            {submitting ? '注册中…' : '注册'}
+          </Button>
+        </DialogActions>
+      </Box>
+    </Dialog>
+  );
 }
 
 // ----------------------------------------------------------------------

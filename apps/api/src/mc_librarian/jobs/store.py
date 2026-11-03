@@ -141,6 +141,31 @@ def has_active_job(conn: sqlite3.Connection, version: str) -> bool:
     return row is not None
 
 
+def fail_next_queued(conn: sqlite3.Connection, *, error: str, message: str) -> str | None:
+    """把队首 `queued` 任务直接置为 `failed`，返回任务 id；没有排队任务返回 `None`。
+
+    用于实例能力闸门关闭时（`MC_LIBRARIAN_INDEX_ENABLED=false`）清理遗留的排队任务：
+    它们不会被认领，但也不能静默留着——写清 `error` 让管理员在任务列表里看到原因。
+    不认领、不执行，因此任务不会短暂进入 `running`。
+    """
+    row = conn.execute(
+        "SELECT id FROM jobs WHERE status = 'queued' ORDER BY created_at, id LIMIT 1"
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    job_id = str(row["id"])
+
+    conn.execute(
+        "UPDATE jobs SET status = 'failed', message = ?, error = ?, finished_at = ?"
+        " WHERE id = ? AND status = 'queued'",
+        (message, error, utc_now(), job_id),
+    )
+
+    return job_id
+
+
 def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """原子认领队首任务并置为 running；没有可跑任务返回 None。
 
@@ -502,6 +527,23 @@ def find_version(conn: sqlite3.Connection, version: str) -> VersionInfo | None:
     ).fetchone()
 
     return None if row is None else row_to_version(row)
+
+
+def list_versions_missing_db_path(conn: sqlite3.Connection) -> list[str]:
+    """`db_path` 为 NULL 的版本号（历史遗留行：本次修复前注册时还不写该字段）。"""
+    rows = conn.execute(
+        "SELECT version FROM versions WHERE db_path IS NULL ORDER BY version"
+    ).fetchall()
+
+    return [str(row["version"]) for row in rows]
+
+
+def set_db_path(conn: sqlite3.Connection, version: str, db_path: str) -> None:
+    """只给 `db_path` 仍为 NULL 的行补值（重复启动幂等，不覆盖已有路径）。"""
+    conn.execute(
+        "UPDATE versions SET db_path = ? WHERE version = ? AND db_path IS NULL",
+        (db_path, version),
+    )
 
 
 def index_db_path(conn: sqlite3.Connection, version: str) -> tuple[bool, str | None]:

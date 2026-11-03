@@ -484,6 +484,7 @@ export interface paths {
          * 重试任务
          * @description 只对 `failed` / `canceled` 有效：保留 checkpoint，把同一任务重新置为 `queued`，
          *     从下一个未完成的阶段续跑。其他状态返回 `409`。
+         *     本实例关闭索引构建（`settings.index.enabled=false`）时返回 `403`（重排后 runner 会跑反编译）。
          */
         post: operations["retryJob"];
         delete?: never;
@@ -579,9 +580,10 @@ export interface components {
             tokens: number;
             /** Format: date-time */
             indexed_at: string;
-            /** @description 是否经官方映射重映射 */
+            /** @description 源码是否经官方映射重映射（remap） */
             obfuscated?: boolean;
             has_summaries?: boolean;
+            /** @description 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） */
             source_size_bytes?: number;
         };
         SearchRequest: {
@@ -827,6 +829,15 @@ export interface components {
                  *     `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */
                 source_dir?: string;
+                /**
+                 * @description 该版本源码是否经官方映射 remap（写入注册表 `VersionInfo.obfuscated`）。**可省略**：
+                 *
+                 *     - 显式给值 → 用它；
+                 *     - 省略且任务跑过 `download` → 用 checkpoint 里的真值（等于该版本是否需要官方 mappings）；
+                 *     - 省略且为 parse-only → 按「已 remap」记录（`true`）。parse-only 的典型来源是本地
+                 *       `fetch` 出来、已经 remap 过的源码树；26.x 这类本来就不混淆的版本请显式传 `false`。
+                 */
+                obfuscated?: boolean;
                 /** @default false */
                 force: boolean;
             };
@@ -870,7 +881,7 @@ export interface components {
                  * @default true
                  */
                 enabled: boolean;
-                /** @default 3g */
+                /** @default 4G */
                 java_xmx: string;
                 /** @default 40 */
                 summary_batch_size: number;

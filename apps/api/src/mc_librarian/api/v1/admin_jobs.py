@@ -204,14 +204,18 @@ def cancel_job(
     ),
     operation_id="retryJob",
     responses={
-        403: problem_response("需要管理员权限"),
+        403: problem_response("需要管理员权限，或本实例已关闭索引构建"),
         404: problem_response("任务不存在"),
         409: problem_response("任务不在可重试的终态"),
     },
 )
 def retry_job(
-    jobId: str, request: Request, conn: DbConn, admin: CurrentAdmin
+    jobId: str, request: Request, conn: DbConn, admin: CurrentAdmin, settings: SettingsDep
 ) -> Job:
+    # 闸门关闭时重排会让 runner 跑反编译，与「本实例不构建索引」的承诺不符，同样回 403。
+    if not settings.index_enabled:
+        raise ProblemException(403, FORBIDDEN_TITLE, INDEX_DISABLED_DETAIL)
+
     with transaction(conn):
         # 判定与写入同一 `BEGIN IMMEDIATE` 事务，UPDATE 带状态守卫（只认 failed/canceled）。
         job = _require_job(conn, jobId)
