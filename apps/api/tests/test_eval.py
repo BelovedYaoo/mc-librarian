@@ -14,6 +14,7 @@ import pytest
 
 from conftest import tool_call
 from mc_librarian.config import Settings
+from mc_librarian.db import Database
 from mc_librarian.eval import cli as eval_cli
 from mc_librarian.eval import metrics, questions
 from mc_librarian.eval.metrics import HitStats
@@ -375,6 +376,34 @@ def test_cli_measures_tool_steps_when_llm_configured(
     assert payload["has_llm_metrics"] is True
     assert payload["metrics"]["mean_tool_steps"] == 3.0
     assert [item["tool_steps"] for item in payload["questions"]] == [3, 3, 3]
+
+
+def test_cli_layers_database_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fixture_set: Path,
+    fake_chat: Any,
+) -> None:
+    """CLI 叠上 `settings` 表覆盖：设置页改的步数同样作用于评测（与 `/v1/ask` 同值）。"""
+    settings = make_settings(tmp_path / "data", llm=True)
+    build_fixture_index(settings.data_dir)
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value_json, encrypted, updated_at) VALUES (?, ?, 0, ?)",
+            ("ask.max_steps", "3", "2026-01-01T00:00:00Z"),
+        )
+
+    fake_chat.always_tools = tool_call("search", query="Mob")["tool_calls"]
+    out_dir = tmp_path / "out"
+
+    assert run_cli(settings, monkeypatch, fixture_set, out_dir) == 0
+
+    payload = json.loads((out_dir / f"eval-{VERSION}.json").read_text(encoding="utf-8"))
+    # 环境默认是 6；库里覆盖 3 生效才说明 CLI 真的叠了覆盖。
+    assert payload["metrics"]["mean_tool_steps"] == 3.0
 
 
 def _markdown_without_generated_at(run_dir: Path) -> str:

@@ -16,14 +16,18 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
-from mc_librarian.config import get_settings
+from mc_librarian import settings_store
+from mc_librarian.config import Settings, get_settings
+from mc_librarian.db import Database
 from mc_librarian.eval.questions import DEFAULT_SET_PATH, QuestionSetError, load_question_set
 from mc_librarian.eval.report import MEAN_TOOL_STEPS, EvalReport
 from mc_librarian.eval.runner import EvalError, run_eval
 from mc_librarian.schemas import VERSION_PATTERN
+from mc_librarian.secretbox import SecretError
 
 # 输出目录名（数据根的兄弟目录）。
 OUTPUT_DIR_NAME = "mc-librarian-eval"
@@ -82,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"题目集不合法：{error}", file=sys.stderr)
         return 2
 
-    settings = get_settings()
+    settings = with_database_overrides(get_settings())
     out_dir = (
         default_out_dir(settings.data_dir) if args.out is None else args.out.expanduser().resolve()
     )
@@ -107,6 +111,30 @@ def main(argv: list[str] | None = None) -> int:
 def default_out_dir(data_dir: Path) -> Path:
     """报告默认落在数据根的兄弟目录：仓库之外，也不动只读的数据根。"""
     return data_dir.parent / OUTPUT_DIR_NAME
+
+
+def with_database_overrides(settings: Settings) -> Settings:
+    """叠上控制面 `settings` 表的覆盖，让 CLI 评测与 `/v1/ask` 用同一份配置。
+
+    `/v1/ask` 每次请求都读库覆盖（见 `settings_store`），所以评测里的步数与答案上限必须
+    同样叠上，`eval.runner` 里「与 `/v1/ask` 同值」的注释才成立。控制面库还不存在（还没跑过
+    服务或索引任务）、还是 `#11` 之前的 schema、或密钥解不开时退回纯环境配置并打一条 warn：
+    评测不该因为读不到覆盖就跑不起来。
+    """
+    database = Database.for_data_dir(settings.data_dir)
+
+    if not database.path.is_file():
+        return settings
+
+    try:
+        with database.connect() as conn:
+            return settings_store.effective_settings(
+                settings, settings_store.read_overrides(conn, settings)
+            )
+    except (sqlite3.Error, SecretError) as error:
+        print(f"warn：读控制面设置覆盖失败，本次评测退回环境配置：{error}", file=sys.stderr)
+
+        return settings
 
 
 def write_reports(report: EvalReport, out_dir: Path) -> tuple[Path, Path]:

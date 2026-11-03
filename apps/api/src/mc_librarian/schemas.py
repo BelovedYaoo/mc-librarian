@@ -419,13 +419,20 @@ class SecuritySettingsUpdate(BaseModel):
 
 
 class AlertsSettingsUpdate(BaseModel):
-    """契约 `AlertsSettingsUpdate`。`webhook_url` 给空字符串 = 清除。"""
+    """契约 `AlertsSettingsUpdate`。`webhook_url` 给空字符串 = 清除。
+
+    阈值下限是 0：写 0 = 关闭该指标告警（与 `alerts.check` 的「阈值 ≤ 0 不告警」一致）。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     webhook_url: str | None = Field(default=None, max_length=500)
-    daily_token_threshold: int | None = Field(default=None, ge=1)
-    daily_cost_threshold_usd: float | None = Field(default=None, gt=0)
+    daily_token_threshold: int | None = Field(
+        default=None, ge=0, description="写 0 = 关闭该指标告警"
+    )
+    daily_cost_threshold_usd: float | None = Field(
+        default=None, ge=0, description="写 0 = 关闭该指标告警"
+    )
 
 
 class SettingsUpdate(BaseModel):

@@ -50,10 +50,20 @@ LLM_INPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M"
 LLM_OUTPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M"
 
 # 用量告警（#12）的环境变量，名字与契约块 `Settings.alerts` 对齐（`MC_LIBRARIAN_` 前缀由
-# `Settings` 补）。阈值 ≤ 0 表示该指标不告警（默认 0，即默认不告警）。
+# `Settings` 补）。阈值 0 表示该指标不告警（默认 0，即默认不告警）；阈值下限是 0，写负数
+# 会被字段校验拒绝。
 ALERTS_WEBHOOK_URL_ENV: Final = "MC_LIBRARIAN_ALERTS_WEBHOOK_URL"
 ALERTS_DAILY_TOKEN_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_TOKEN_THRESHOLD"
 ALERTS_DAILY_COST_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHOLD_USD"
+
+# 旧环境变量名（`#11` / `#12` 合并前用过 `MC_LIBRARIAN_ALERT_*`）。`Settings` 是
+# `extra="ignore"`，旧名会被**无声忽略**——按旧名配置的部署会静默失去告警，所以启动时
+# 显式 warn 一次（见 `legacy_env_warnings`）。
+LEGACY_ALERTS_ENV_NAMES: Final[dict[str, str]] = {
+    "MC_LIBRARIAN_ALERT_WEBHOOK_URL": ALERTS_WEBHOOK_URL_ENV,
+    "MC_LIBRARIAN_ALERT_DAILY_TOKEN_THRESHOLD": ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
+    "MC_LIBRARIAN_ALERT_DAILY_COST_THRESHOLD_USD": ALERTS_DAILY_COST_THRESHOLD_ENV,
+}
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -171,11 +181,11 @@ class Settings(BaseSettings):
     index_enabled: bool = True
 
     # 用量告警（`#12` 读它）：超阈值只推 Webhook，不自动暂停服务（D23，不设自动预算上限）。
-    # 契约里「未配置」用 `None`（`GET /v1/admin/settings` 整字段省略），阈值下限是 1 / > 0；
-    # `resolve_alerts_config` 把 `None` 归一成 0（≤ 0 即不告警）再交给 #12。
+    # 契约里「未配置」用 `None`（`GET /v1/admin/settings` 整字段省略）；阈值下限是 0——
+    # 「写 0 = 关闭该指标告警」与文档一致，`resolve_alerts_config` 把 `None` 归一成 0 再交给 #12。
     alerts_webhook_url: str | None = None
-    alerts_daily_token_threshold: int | None = Field(default=None, ge=1)
-    alerts_daily_cost_threshold_usd: float | None = Field(default=None, gt=0)
+    alerts_daily_token_threshold: int | None = Field(default=None, ge=0)
+    alerts_daily_cost_threshold_usd: float | None = Field(default=None, ge=0)
 
     @field_validator("decompile_memory")
     @classmethod
@@ -219,6 +229,19 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """进程级单例，便于在路由中注入。"""
     return Settings()
+
+
+def legacy_env_warnings() -> list[str]:
+    """旧环境变量名仍在环境里时，逐条给出「旧名已失效、请改用新名」的提示。
+
+    `Settings` 是 `extra="ignore"`：旧名不会被读取，也不会报错，只会让告警配置静默失效。
+    启动时把这件事写进日志，比等发现「告警没发出来」再排查便宜得多。
+    """
+    return [
+        f"环境变量 {old} 旧名已失效（不再被读取），请改用 {new}"
+        for old, new in LEGACY_ALERTS_ENV_NAMES.items()
+        if (os.environ.get(old) or "").strip()
+    ]
 
 
 @dataclass(frozen=True)

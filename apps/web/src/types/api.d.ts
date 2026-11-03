@@ -1035,7 +1035,9 @@ export interface components {
         AlertsSettingsUpdate: {
             /** @description 空字符串（或 `null`）= 清除；明文只进不出 */
             webhook_url?: string | null;
+            /** @description 写 0 = 关闭该指标告警 */
             daily_token_threshold?: number | null;
+            /** @description 写 0 = 关闭该指标告警 */
             daily_cost_threshold_usd?: number | null;
         };
         UsageReport: {

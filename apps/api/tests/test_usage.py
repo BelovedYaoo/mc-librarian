@@ -367,6 +367,35 @@ def test_alert_fires_per_metric(
     assert webhook.calls[1]["payload"]["message"] == "今日成本已达 $3.0000，超过阈值 $1.0000"
 
 
+def test_alert_threshold_from_settings_api_takes_effect(
+    admin_client: TestClient,
+    conn: sqlite3.Connection,
+    admin_id: str,
+    settings: Settings,
+    webhook: RecordingWebhook,
+) -> None:
+    """端到端：`PUT /v1/admin/settings` 写阈值 → `alerts.check` 读到并触发。"""
+    insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=150)
+
+    response = admin_client.put(
+        "/v1/admin/settings",
+        json={
+            "alerts": {
+                "webhook_url": "https://hook.invalid/alerts",
+                "daily_token_threshold": 100,
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+
+    alerts.check(database_of(admin_client), settings)
+
+    assert [call["payload"]["metric"] for call in webhook.calls] == [alerts.METRIC_DAILY_TOKENS]
+    assert webhook.calls[0]["payload"]["value"] == 150
+    assert webhook.calls[0]["payload"]["threshold"] == 100
+
+
 def test_alert_skips_non_positive_thresholds(
     client: TestClient,
     conn: sqlite3.Connection,

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from conftest import TEST_SECRET
 from mc_librarian.config import (
     ALERTS_DAILY_COST_THRESHOLD_ENV,
     ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
@@ -16,10 +19,12 @@ from mc_librarian.config import (
     Settings,
     default_data_dir,
     find_repo_root,
+    legacy_env_warnings,
     pricing_configured,
     resolve_alerts_config,
     resolve_data_dir,
 )
+from mc_librarian.main import create_app
 
 
 def test_default_data_dir_is_outside_repo() -> None:
@@ -208,3 +213,46 @@ def test_pricing_configured_needs_a_positive_price(tmp_path: Path) -> None:
     settings.llm_input_price_per_m = 0.27
 
     assert pricing_configured(settings) is True
+
+
+def test_zero_thresholds_are_accepted_and_disable_alerts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """阈值 0 合法且表示不告警：环境变量写 0 不该让启动失败（与文档「0 = 关闭」一致）。"""
+    monkeypatch.setenv(ALERTS_WEBHOOK_URL_ENV, "https://hook.example/alerts")
+    monkeypatch.setenv(ALERTS_DAILY_TOKEN_THRESHOLD_ENV, "0")
+    monkeypatch.setenv(ALERTS_DAILY_COST_THRESHOLD_ENV, "0")
+
+    config = resolve_alerts_config(Settings(data_dir=tmp_path / "data"))
+
+    assert config.daily_token_threshold == 0
+    assert config.daily_cost_threshold_usd == 0.0
+
+    # 负数仍被拒：语义是「0 = 关闭」，不是「随便给个非正数」。
+    with pytest.raises(ValidationError):
+        Settings(data_dir=tmp_path / "data", alerts_daily_token_threshold=-1)
+
+
+def test_legacy_alerts_env_names_warn_at_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """旧名 `MC_LIBRARIAN_ALERT_*` 被 `extra="ignore"` 无声忽略，启动时必须 warn 出旧名与新名。"""
+    monkeypatch.setenv("MC_LIBRARIAN_ALERT_WEBHOOK_URL", "https://old.invalid/hook")
+
+    warnings = legacy_env_warnings()
+
+    assert any("MC_LIBRARIAN_ALERT_WEBHOOK_URL" in warning for warning in warnings)
+
+    settings = Settings(data_dir=tmp_path / "data", secret=TEST_SECRET)
+
+    with caplog.at_level(logging.WARNING, logger="mc_librarian"), TestClient(create_app(settings)):
+        pass
+
+    messages = [record.getMessage() for record in caplog.records]
+
+    assert any(
+        "MC_LIBRARIAN_ALERT_WEBHOOK_URL" in message
+        and "MC_LIBRARIAN_ALERTS_WEBHOOK_URL" in message
+        and "旧名已失效" in message
+        for message in messages
+    )

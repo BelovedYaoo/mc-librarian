@@ -8,7 +8,8 @@
 - 没配 `MC_LIBRARIAN_LLM_*` 时不碰 LLM，第三个指标如实记成「未测」，其余指标与报告照常出。
 
 配了 LLM 时每题跑一次问答（30 题最多 30 次循环、每次最多 `settings.ask.max_steps` 轮，
-即 `AskRequest.max_steps` 省略时服务端用的那个值）。
+即 `AskRequest.max_steps` 省略时服务端用的那个值；CLI 传入的 `settings` 已叠好 `settings`
+表里的覆盖，见 `eval.cli.with_database_overrides`）。
 """
 
 from __future__ import annotations
@@ -161,7 +162,8 @@ async def _measure_steps(
 
     for question in questions:
         # 步数与答案上限用服务端设置（`settings.ask.max_steps` / `max_answer_tokens`，也是
-        # `/v1/ask` 在 `AskRequest` 省略这两个字段时用的值）：契约里的 `AskRequest.max_steps`
+        # `/v1/ask` 在 `AskRequest` 省略这两个字段时用的值；CLI 传入的是叠好 `settings` 表
+        # 覆盖的有效配置，所以设置页改的值同样作用于评测）。契约里的 `AskRequest.max_steps`
         # 是 `int | None`（#11 去掉了 default），拿它当整数用会崩在 `range(None)` 上。
         run = AskRun(
             client=client,

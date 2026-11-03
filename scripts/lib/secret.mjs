@@ -9,8 +9,13 @@
  * 所以这里给一个**固定**的开发用值（固定才不会让上次写入的密文在下次启动时解不开），并把
  * 「用了兜底值」明确打出来——不静默注入。**生产必须显式设置**：这个值写在仓库里，
  * 谁都能解开用它加密的密文。
+ *
+ * `MC_LIBRARIAN_ENV=production` 时**直接返回原 env**（不注入）：拿开发/冒烟脚本对着生产实例
+ * 跑时，绝不能给它一个仓库里公开的开发密钥；缺失密钥导致的启动失败照常发生，那才是对的。
  */
 export const SECRET_ENV = 'MC_LIBRARIAN_SECRET';
+export const ENV_ENV = 'MC_LIBRARIAN_ENV';
+export const ENV_PRODUCTION = 'production';
 
 /** 32 个字符的固定开发用值；只够过 `MIN_SECRET_LENGTH`，不是密钥材料。 */
 export const DEV_SECRET = 'mc-librarian-dev-secret-01234567';
@@ -18,6 +23,11 @@ export const DEV_SECRET = 'mc-librarian-dev-secret-01234567';
 /** 环境里没有 `MC_LIBRARIAN_SECRET` 时补上固定的开发用值并打一条日志；已有则原样返回。 */
 export function withDevSecret(env) {
   if ((env[SECRET_ENV] ?? '').trim()) return env;
+
+  if ((env[ENV_ENV] ?? '').trim() === ENV_PRODUCTION) {
+    // 生产不注入开发默认值：缺失密钥时服务端的启动护栏会直接报错，不给出一条“能跑但不安全”的路。
+    return env;
+  }
 
   console.log(
     `\u001b[33m未设置 ${SECRET_ENV}，本次使用开发默认值（仅限本地开发与冒烟测试；生产必须显式设置）\u001b[0m`

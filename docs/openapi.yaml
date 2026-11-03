@@ -1427,8 +1427,8 @@ components:
           maxLength: 500
           writeOnly: true
           description: 空字符串（或 `null`）= 清除；明文只进不出
-        daily_token_threshold: { type: [integer, "null"], minimum: 1 }
-        daily_cost_threshold_usd: { type: [number, "null"], exclusiveMinimum: 0 }
+        daily_token_threshold: { type: [integer, "null"], minimum: 0, description: 写 0 = 关闭该指标告警 }
+        daily_cost_threshold_usd: { type: [number, "null"], minimum: 0, description: 写 0 = 关闭该指标告警 }
 
     UsageReport:
       type: object
