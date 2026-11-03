@@ -19,14 +19,17 @@ mc-librarian/
 ├─ apps/
 │  ├─ api/                 Python：FastAPI + JobRunner + 索引 CLI
 │  └─ web/                 React + Vite + MUI 9（源自 minimal-vite-ts）
-├─ packages/
-│  ├─ api-client/          由 docs/openapi.yaml 生成
-│  └─ ui/                  精简版 react-core（删权限 manifest 与私有依赖）
-├─ deploy/                 Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
+├─ scripts/                setup / dev / check / smoke（本地开发与校验入口）
+├─ packages/               （计划中）
+│  ├─ api-client/          （计划中）由 docs/openapi.yaml 生成
+│  └─ ui/                  （计划中）精简版 react-core（删权限 manifest 与私有依赖）
+├─ deploy/                 （计划中）Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
 ├─ docs/
 ├─ package.json            bun workspaces
-└─ pyproject.toml          uv workspace
+└─ pyproject.toml          （计划中）uv workspace
 ```
+
+计划中的部分尚未落地：**当前仓库只有 `apps/api` + `apps/web` + `scripts`**。
 
 ## 4. 运行时
 
@@ -141,7 +144,7 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 | D16 | 前端底座 | React + Vite + MUI 9 + 精简版 react-core |
 | D17 | 权限实现 | 自写 `RoleGuard`；删除 react-core/authorization 与私有依赖 |
 | D18 | 前端交付 | web 镜像内嵌 `dist`，只提供静态文件与 `/api/*` 反代入口；TLS/证书在边缘节点 `gateway-nginx` |
-| D19 | 契约同步 | `openapi-typescript` 生成 `packages/api-client`，CI 校验一致性 |
+| D19 | 契约同步 | `openapi-typescript` 生成 `apps/web/src/types/api.d.ts`；无 CI，由 `scripts/check.mjs` 漂移守卫 + `tests/test_contract.py` 校验一致性 |
 | D20 | 摘要粒度 | 类级 3 行，按 package 分批（30–50 个类/次） |
 | D21 | 符号表 | 扩展字段（父类/接口/注解/参数名）+ 引用表 |
 | D22 | 评测 | 人工 30 题为主，LLM 扩到 100 题做回归 |

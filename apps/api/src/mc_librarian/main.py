@@ -20,6 +20,11 @@ from mc_librarian.config import Settings, get_settings
 
 logger = logging.getLogger("mc_librarian")
 
+# 最小 logging 配置：uvicorn 只配自己的 logger，不配 root，导致这里的 logger.info 被吞掉。
+LOG_FORMAT: Final = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+
 # 与 docs/openapi.yaml 的 `servers` / `security` / `components.securitySchemes` 对齐。
 SERVERS: Final = [
     {
@@ -30,6 +35,31 @@ SERVERS: Final = [
 ]
 
 GLOBAL_SECURITY: Final[list[dict[str, list[str]]]] = [{"cookieAuth": []}, {"bearerAuth": []}]
+
+# 与 docs/openapi.yaml 的 `info.description` / `tags` 对齐（逐字一致，由 test_contract 校验）。
+DESCRIPTION: Final = (
+    "面向 agent 与人类、带账号体系的代码知识库服务。"
+    "对每个 Minecraft 版本提供三路混合检索：\n"
+    "\n"
+    "- **summary** — 中文类摘要（中文问题直接映射到类）\n"
+    "- **symbol** — 类/方法/字段符号表（tree-sitter 派生）\n"
+    "- **literal** — 源码字面量与正则检索（ripgrep 派生）\n"
+    "\n"
+    "设计约束：检索接口无状态、`version` 显式必传（不支持 `latest`）；"
+    "响应带 `why` 与\n"
+    "`suggestions`；调用方用 `max_tokens` 控制上下文预算；"
+    "索引由 `JobRunner` 异步执行，\n"
+    "接口只返回 `202 + job_id`。\n"
+)
+
+TAGS: Final[list[dict[str, str]]] = [
+    {"name": "meta"},
+    {"name": "retrieve"},
+    {"name": "read"},
+    {"name": "answer"},
+    {"name": "auth"},
+    {"name": "admin"},
+]
 
 SECURITY_SCHEMES: Final = {
     "cookieAuth": {
@@ -70,6 +100,9 @@ def _build_openapi(app: FastAPI) -> dict[str, Any]:
         routes=app.routes,
         servers=app.servers,
     )
+    schema["info"]["description"] = DESCRIPTION
+    schema["tags"] = TAGS
+
     components = schema.setdefault("components", {})
     components.setdefault("securitySchemes", {}).update(SECURITY_SCHEMES)
     schema["security"] = GLOBAL_SECURITY

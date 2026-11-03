@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from openapi_spec_validator import validate
 
 from mc_librarian import __version__
 from mc_librarian.config import find_repo_root
@@ -51,8 +52,32 @@ def _response_schema(spec: dict[str, Any], path: str) -> dict[str, Any]:
     return _deref(spec, schema)
 
 
+def test_contract_spec_is_valid() -> None:
+    """契约本身必须过 OpenAPI 3.1 校验（openapi-spec-validator）。"""
+    validate(_contract())
+
+
+def test_runtime_spec_is_valid() -> None:
+    """运行时 spec 也必须过校验，避免补 metadata 时写出非法结构。"""
+    validate(_runtime())
+
+
 def test_versions_match() -> None:
     assert __version__ == _contract()["info"]["version"]
+
+
+def test_description_matches() -> None:
+    contract = _contract()["info"]
+
+    assert _runtime()["info"]["description"] == contract["description"]
+    assert _runtime()["info"]["description"].strip(), "info.description 不能为空"
+
+
+def test_tags_match() -> None:
+    contract = _contract()["tags"]
+    runtime = _runtime()["tags"]
+
+    assert [tag["name"] for tag in runtime] == [tag["name"] for tag in contract]
 
 
 def test_servers_match() -> None:

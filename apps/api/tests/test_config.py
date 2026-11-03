@@ -5,12 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from mc_librarian.config import (
     DATA_DIR_ENV,
+    DATA_DIR_NAME,
     Settings,
     default_data_dir,
     find_repo_root,
+    resolve_data_dir,
 )
 
 
@@ -31,6 +34,35 @@ def test_default_data_dir_falls_back_to_home(tmp_path: Path) -> None:
 
     assert find_repo_root(stranger) is None
     assert default_data_dir(stranger) == Path.home() / "mc-librarian-data"
+
+
+def test_relative_data_dir_is_resolved_against_repo_root() -> None:
+    """相对路径按仓库根解析，而不是按进程 cwd（dev 时 cwd 是 apps/api）。"""
+    root = find_repo_root()
+    assert root is not None
+
+    resolved = resolve_data_dir(Path("..") / DATA_DIR_NAME)
+
+    assert resolved == (root.parent / DATA_DIR_NAME).resolve()
+
+
+def test_relative_data_dir_inside_repo_is_rejected() -> None:
+    root = find_repo_root()
+    assert root is not None
+
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(data_dir=Path("data"))
+
+    assert "数据根不能落在仓库内" in str(excinfo.value)
+    assert str(root) in str(excinfo.value)
+
+
+def test_absolute_data_dir_inside_repo_is_rejected() -> None:
+    root = find_repo_root()
+    assert root is not None
+
+    with pytest.raises(ValidationError):
+        Settings(data_dir=root / "data")
 
 
 def test_data_dir_env_var_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

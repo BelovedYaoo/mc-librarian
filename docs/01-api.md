@@ -1,6 +1,6 @@
 # MC Librarian API · v0.2
 
-> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（23 个端点 / 23 个 schema，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
+> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（23 条路径 / 27 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
 
 ## 1. 定位
 
@@ -30,8 +30,10 @@
 | retrieve | `POST /v1/search`、`GET /v1/symbol`、`GET /v1/references` | user |
 | read | `GET /v1/outline`、`GET /v1/read` | user |
 | answer | `POST /v1/ask`（SSE） | user |
-| auth | `login` / `logout` / `me` / `tokens` | 公开 / 本人 |
-| admin | `users`、`jobs`、`jobs/{id}/logs`、`settings`、`usage`、`audit` | admin |
+| auth | `POST /v1/auth/login`、`POST /v1/auth/logout`、`GET /v1/auth/me`、`GET /v1/auth/tokens`、`POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}` | 公开 / 本人 |
+| admin | `POST /v1/admin/versions`、`GET /v1/admin/users`、`POST /v1/admin/users`、`PATCH /v1/admin/users/{userId}`、`GET /v1/admin/jobs`、`POST /v1/admin/jobs`、`GET /v1/admin/jobs/{jobId}`、`GET /v1/admin/jobs/{jobId}/logs`、`POST /v1/admin/jobs/{jobId}/cancel`、`GET /v1/admin/settings`、`PUT /v1/admin/settings`、`GET /v1/admin/usage`、`GET /v1/admin/audit` | admin |
+
+合计 23 条路径 / 27 个操作，与 `openapi.yaml` 一一对应。
 
 ## 4. 检索接口
 
@@ -43,7 +45,7 @@
 
 响应里两个字段是刻意设计的：
 
-- **`why`**：`summary` 说明是语义命中（可以信摘要）、`symbol` 说明是名字命中（可能同名不同义）、`literal` 说明只是字面量巧合。模型据此判断要不要继续 `read`。
+- **`why`**：`summary` 说明是语义命中（可以信摘要）、`symbol` 说明是名字命中（可能同名不同义）、`literal` 说明只是字面量巧合、`reference` 说明来自引用表反查到的调用点（召回优先、允许误报，`read` 可证伪）。模型据此判断要不要继续 `read`。
 - **`suggestions`**：从同批命中的方法名/字段名里挑出区分度最高的几个，把「查询改写」变成「挑一个建议」。
 
 `detail=locate` 只返回 `path + lines`，用于「先定位、后精读」的两段式调用，比直接给片段省 5–10 倍 token。
@@ -107,7 +109,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | MCP | Claude Code / Cursor / pi | `apps/api` 内薄适配器 |
 | 直接 HTTP | 脚本、curl | 同上 |
 
-前端 `packages/api-client` 由 `openapi-typescript` 从本文件生成，CI 校验 `app.openapi()` 与文档一致，防止契约漂移。
+前端类型由 `openapi-typescript` 从本文件生成到 `apps/web/src/types/api.d.ts`（`bun run --cwd apps/web gen:api`）。**本仓没有 CI**，契约守卫是两道脚本/测试：`scripts/check.mjs` 的契约漂移守卫（重新生成类型，目录里的文件与生成结果不一致就失败）与 `apps/api/tests/test_contract.py`（比对运行时 `app.openapi()` 与本文件），防止「文档写了、代码没做」。
 
 ## 9. 变更记录
 

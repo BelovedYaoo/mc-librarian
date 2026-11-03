@@ -32,6 +32,30 @@ def find_repo_root(start: Path | None = None) -> Path | None:
     return None
 
 
+def resolve_data_dir(value: Path, root: Path | None = None) -> Path:
+    """规范化数据根：相对路径相对**仓库根**解析，且结果不允许落在仓库内。
+
+    dev 时进程 cwd 是 `apps/api`，直接按 cwd 解析相对路径会静默落进仓库，所以统一锚到仓库根，
+    并对「落进仓库」显式报错（D9：数据根独立、不入库）。
+    """
+    root = root if root is not None else find_repo_root()
+    expanded = value.expanduser()
+
+    if not expanded.is_absolute():
+        expanded = (root or Path.cwd()) / expanded
+
+    resolved = expanded.resolve()
+
+    if root is not None and resolved.is_relative_to(root):
+        raise ValueError(
+            f"数据根不能落在仓库内：{resolved}（仓库根 {root}）。"
+            f" 相对路径按仓库根解析，请用例如 `../{DATA_DIR_NAME}`，"
+            f" 或用 {DATA_DIR_ENV} 指向仓库之外的绝对路径。"
+        )
+
+    return resolved
+
+
 def default_data_dir(start: Path | None = None) -> Path:
     """数据根的默认值，永远在仓库之外。
 
@@ -55,8 +79,8 @@ class Settings(BaseSettings):
 
     @field_validator("data_dir")
     @classmethod
-    def _expand(cls, value: Path) -> Path:
-        return value.expanduser().resolve()
+    def _resolve(cls, value: Path) -> Path:
+        return resolve_data_dir(value)
 
     @property
     def repo_root(self) -> Path | None:

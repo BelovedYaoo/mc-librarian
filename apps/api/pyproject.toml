@@ -15,6 +15,7 @@ dependencies = [
 dev = [
   "httpx>=0.28",
   "mypy>=1.19",
+  "openapi-spec-validator>=0.7.2",
   "pytest>=8.4",
   "pyyaml>=6.0.2",
   "ruff>=0.14",
