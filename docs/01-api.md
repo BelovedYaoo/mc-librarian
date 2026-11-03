@@ -96,7 +96,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 - **角色**：`admin` / `user`，可提升可降级；**最后一个启用的 admin 不允许降级或停用**（`409`）。
   禁用账号会同时删除其全部会话，旧 cookie 立刻失效。
 - **PAT**：每人可签发多个，单独吊销，展示 `last_used_at` 与前缀。
-- **审计**：角色变更、禁用、创建用户、邀请创建/接受、PAT 签发/吊销、版本注册、任务创建、设置修改全部落 `audit` 表
+- **审计**：角色变更、禁用、创建用户、邀请创建/接受、PAT 签发/吊销、版本注册、任务创建/取消/重试、任务产出登记版本、设置修改全部落 `audit` 表
   （`GET /v1/admin/audit` 可按 `actor` 用户名筛选；前端 `/audit` 页按同一口径展示）。
 
 密码用 **argon2id** 哈希存库（argon2-cffi 默认参数），接口与日志里都不会出现明文。
@@ -108,7 +108,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `POST /v1/admin/versions` | 注册已上传的索引文件（节点侧不构建索引） |
 | `GET/POST /v1/admin/users`、`PATCH /v1/admin/users/{id}` | 建号（返回一次性邀请链接）、升降角色、启停；最后一个启用的 admin 受保护 |
 | `POST /v1/admin/jobs` | 创建索引任务（`kind` 目前仅 `index`），立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
-| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize，`progress` 0–1 |
+| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ parse/summarize/finalize（`#4`；`#13` 会补 download/decompile），`progress` 0–1 |
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
@@ -116,7 +116,18 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET /v1/admin/usage` | 按请求粒度记录，可按 day/user/version/model 聚合 |
 | `GET /v1/admin/audit` | 审计日志 |
 
-**任务只保留 `kind: index`**：`reindex` / `summarize` 待 #7（remap）/ #13（摘要流水线）引入，当前不提供，避免出现「跑成功但什么都没做」的任务。阶段序列按 `options.source_dir` 选择：给了时从 `parse` 开始（`parse → summarize → finalize`，设计文档约定 `download`/`decompile` 跳过），没给时走完整序列（`download → decompile → parse → summarize → finalize`）；#4 里 `download`/`decompile` 是占位实现，标记完成的同时写一条 warn 日志说明「待 #13」。
+**任务只保留 `kind: index`**：`reindex` / `summarize` 待 #7 / #13 引入，当前不提供，避免出现「跑成功但什么都没做」的任务。
+
+**阶段序列由 `options.source_dir` 决定，且 `#4` 只支持带源目录的任务：**
+
+| 入参 | 阶段序列 | 说明 |
+|---|---|---|
+| 带 `source_dir` | `parse → summarize → finalize` | `#4` 的真实路径：扫描源码目录、统计文件数与 token 估算 |
+| 不带 `source_dir` | — | `#4` 返回 422 |
+
+`download` / `decompile` 属于 #13（真实版本流水线），`#4` 不实现也不占位。`#13` 落地后再把 `source_dir` 改为可选，并为不带源目录的任务补上这两段。这样不存在「阶段永不推进」或「必在 `parse` 失败且重试永久卡死」的路径。
+
+**版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
 **版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出只更新 `files`/`tokens`/`indexed_at`，**不覆盖**已注册的 `db_path` 与 `has_summaries`。
 
