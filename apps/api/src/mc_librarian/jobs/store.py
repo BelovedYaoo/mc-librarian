@@ -513,21 +513,23 @@ def insert_version_if_absent(
     files: int,
     tokens: int,
     obfuscated: bool,
+    has_summaries: bool,
     source_size_bytes: int,
     db_path: str,
 ) -> VersionInfo | None:
     """任务产出登记版本：仅在版本**尚未注册**时插入一行，已存在则什么都不写。
 
     `db_path` 指向任务刚产出的索引库（`<data_dir>/db/<version>.sqlite`），`obfuscated` 与
-    `source_size_bytes` 来自 checkpoint（`download` / `parse` 阶段写入），`has_summaries=0`
-    （摘要由 #7 产出）。版本已存在（管理员注册过）时**一个字段都不动**，返回 `None` 让调用方
-    知道没写；任务产出不是权威索引，想替换已注册版本请重新注册（docs/01-api.md §7）。
+    `source_size_bytes` 来自 checkpoint（`download` / `parse` 阶段写入），`has_summaries` 按
+    任务是否跑过 `summarize`（#7）传。版本已存在（管理员注册过）时**一个字段都不动**，
+    返回 `None` 让调用方知道没写；任务产出不是权威索引，想替换已注册版本请重新注册
+    （docs/01-api.md §7）。
     """
     cursor = conn.execute(
         """
         INSERT INTO versions (
           version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
-        ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (version) DO NOTHING
         """,
         (
@@ -536,6 +538,7 @@ def insert_version_if_absent(
             tokens,
             utc_now(),
             1 if obfuscated else 0,
+            1 if has_summaries else 0,
             source_size_bytes,
             db_path,
         ),
@@ -601,3 +604,12 @@ def list_versions(conn: sqlite3.Connection) -> list[VersionInfo]:
     ).fetchall()
 
     return [row_to_version(row) for row in rows]
+
+
+def list_version_db_paths(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """`version → db_path`（`/v1/versions` 据此读每个版本的摘要覆盖率，规格 §8）。"""
+    rows = conn.execute("SELECT version, db_path FROM versions").fetchall()
+
+    return {
+        str(row["version"]): (str(row["db_path"]) if row["db_path"] else None) for row in rows
+    }

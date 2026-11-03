@@ -10,7 +10,8 @@
 - 不给 `--force` 且 `db/<version>.sqlite` 已是合法索引：跳过重建（复用已有索引）后继续收尾，
   因此重复执行同一命令不会改动已有产物；
 - 跑完由 `_finish` 登记版本行（`db_path` 指向刚产出的索引），服务不需要再手工注册；
-- `summarize` 仍是占位（#7 才接 LLM），本命令不引入任何 LLM 调用。
+- `summarize` 调 LLM 生成中文摘要（#7）：没配 `MC_LIBRARIAN_LLM_*` 时该阶段明确失败，
+  不静默跳过。
 """
 
 from __future__ import annotations

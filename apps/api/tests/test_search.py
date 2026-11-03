@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_librarian.config import Settings
-from mc_librarian.indexing import query
+from mc_librarian.indexing import query, summarize
 from mc_librarian.indexing.build import build_index, place_source_tree
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
@@ -138,16 +138,51 @@ def build_big_version(settings: Settings, conn: sqlite3.Connection) -> Path:
     return build_version(settings, conn, {BIG_PATH: "\n".join(lines) + "\n"})
 
 
-FTS5_SUMMARIES = (
-    "CREATE VIRTUAL TABLE summaries USING fts5(fqn, text_zh, keywords, tokens)",
-    "INSERT INTO summaries (fqn, text_zh, keywords, tokens)"
-    " VALUES ('net.minecraft.world.Mob', '自然生成分类：定义怪物数量上限 spawninterval',"
-    " 'spawninterval', 'tokens')",
+# `#7` 的摘要表：普通表 `summaries` + FTS5 `summaries_fts`（存 jieba 预分词后的 text_zh）。
+SUMMARY_ROWS = (
+    (
+        "net.minecraft.world.Mob",
+        "刷怪上限：定义怪物/动物的最大数量上限与每区块生成预算\n"
+        "机制：按生物群系权重挑选候选，受 mob cap 与玩家距离约束\n"
+        "关键成员：maxInstancesPerChunk, spawnInterval",
+    ),
+    (
+        "net.minecraft.world.Entity",
+        "实体刻：每刻推进实体状态并触发 tick 回调\n"
+        "机制：服务端/客户端各自按 tick 调度\n"
+        "关键成员：tick, position",
+    ),
 )
 
 
-def write_summaries(settings: Settings, statements: tuple[str, ...]) -> None:
-    """在索引库里建 `summaries`（#7 的产物），供摘要通道的接入与降级用例使用。"""
+def write_summaries(
+    settings: Settings, rows: tuple[tuple[str, str], ...] = SUMMARY_ROWS
+) -> None:
+    """用 `#7` 的真实写入路径给索引库灌摘要（普通表 + jieba 预分词的 FTS5）。"""
+    path = index_path(settings.data_dir, VERSION)
+    readable = sqlite3.connect(path)
+
+    try:
+        ids = {str(row[0]): int(row[1]) for row in readable.execute("SELECT fqn, id FROM classes")}
+    finally:
+        readable.close()
+
+    summarize.write_summaries(
+        path,
+        [
+            summarize.SummaryRow(
+                class_id=ids[fqn],
+                fqn=fqn,
+                text_zh=text,
+                content_hash=summarize.compute_content_hash(fqn, None, (), (), ()),
+            )
+            for fqn, text in rows
+        ],
+    )
+
+
+def write_statements(settings: Settings, statements: tuple[str, ...]) -> None:
+    """在索引库里直接执行 DDL（构造「表存在但不是 FTS5」这类异常状态）。"""
     writable = sqlite3.connect(index_path(settings.data_dir, VERSION))
 
     try:
@@ -220,8 +255,8 @@ def test_reference_channel_reverses_refs(
 def test_summary_channel_is_empty_without_the_table(
     indexed: Path, index_conn: sqlite3.Connection
 ) -> None:
-    """`summaries` 表由 #7 建；不存在时该路返回空、不报错（规格 §2）。"""
-    assert query.has_table(index_conn, "summaries") is False
+    """`summaries_fts` 由 #7 建；不存在时该路返回空、不报错（规格 §2）。"""
+    assert query.has_table(index_conn, "summaries_fts") is False
     assert channels.summary_candidates(index_conn, "刷怪上限", path_prefix=None) == []
 
 
@@ -269,7 +304,7 @@ def test_why_is_deduped_and_follows_the_fixed_order(
         assert why == [channel for channel in WHY_ORDER if channel in why]
 
 
-def test_summary_never_appears_before_issue_seven(user_client: TestClient, indexed: Path) -> None:
+def test_summary_absent_without_summaries_tables(user_client: TestClient, indexed: Path) -> None:
     body = post_search(user_client, {"query": "Mob"})
 
     assert body["hits"]
@@ -410,13 +445,53 @@ def test_overloaded_methods_stay_separate(
     assert len({hit["id"] for hit in hits}) == 2, "重载方法的 id 必须带行区间才不重复"
 
 
-def test_summary_channel_contributes_when_the_table_exists(
+def test_summary_channel_hits_two_char_chinese_word(
+    settings: Settings, indexed: Path, index_conn: sqlite3.Connection
+) -> None:
+    """两字词「刷怪」能命中摘要索引（验收）：不预分词的话 `unicode61` 永远切不出这个词。"""
+    write_summaries(
+        settings,
+        (
+            (
+                "net.minecraft.world.Mob",
+                "刷怪上限：每区块生成预算\n机制：mob cap\n关键成员：spawnInterval",
+            ),
+        ),
+    )
+
+    candidates = channels.summary_candidates(index_conn, "刷怪", path_prefix=None)
+
+    assert [(item.symbol, item.kind, item.path) for item in candidates] == [
+        ("net.minecraft.world.Mob", "class", MOB_PATH)
+    ]
+    assert candidates[0].summary
+
+
+def test_summary_channel_degrades_when_not_fts5(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
 ) -> None:
-    """`summaries` 表就位后（#7），摘要通道真正接入融合（本票只留接口）。"""
-    write_summaries(settings, FTS5_SUMMARIES)
+    """`summaries_fts` 存在但不是 FTS5（建错 / 被外部改过）时该路返回空，不 500（规格 §8）。"""
+    write_statements(
+        settings,
+        (
+            "CREATE TABLE summaries (id INTEGER PRIMARY KEY, class_id INTEGER, fqn TEXT,"
+            " text_zh TEXT, content_hash TEXT)",
+            "CREATE TABLE summaries_fts (fqn TEXT, text_zh TEXT)",
+        ),
+    )
 
-    body = post_search(user_client, {"query": "spawninterval"})
+    body = post_search(user_client, {"query": "刷怪上限"})
+
+    assert all("summary" not in hit["why"] for hit in body["hits"])
+
+
+def test_summary_hit_reports_summary_in_why(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
+) -> None:
+    """摘要通道命中时 `why` 含 `summary`（验收，规格 §7）。"""
+    write_summaries(settings)
+
+    body = post_search(user_client, {"query": "刷怪上限"})
 
     assert body["hits"]
     assert body["hits"][0]["why"] == ["summary"]
@@ -424,17 +499,17 @@ def test_summary_channel_contributes_when_the_table_exists(
     assert body["hits"][0]["summary"]
 
 
-def test_summary_channel_degrades_when_table_is_not_fts5(
+@requires_ripgrep
+def test_one_query_hits_summary_symbol_and_literal_together(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
 ) -> None:
-    """`summaries` 存在但不是 FTS5（建错 / 被外部改过）时该路返回空，不 500（规格 §8）。"""
-    write_summaries(
-        settings, ("CREATE TABLE summaries (fqn TEXT, text_zh TEXT, keywords TEXT, tokens TEXT)",)
-    )
+    """同一个 query 能同时返回摘要、符号、字面量三路的命中（验收，承接 #6）。"""
+    write_summaries(settings)
 
-    body = post_search(user_client, {"query": "spawninterval"})
+    body = post_search(user_client, {"query": "tick"})
+    recalled = {channel for hit in body["hits"] for channel in hit["why"]}
 
-    assert all("summary" not in hit["why"] for hit in body["hits"])
+    assert {"summary", "symbol", "literal"} <= recalled
 
 
 def test_summary_channel_degrades_on_fts_syntax_in_query(
@@ -445,7 +520,7 @@ def test_summary_channel_degrades_on_fts_syntax_in_query(
     这些字符在 FTS5 的 `MATCH` 里是语法错误（`unterminated string` 等），不是「查询不合法」：
     规格 §8 要求任何一路为空都不算错误。
     """
-    write_summaries(settings, FTS5_SUMMARIES)
+    write_summaries(settings)
 
     for raw_query in ('"', "*", "-"):
         response = user_client.post(
@@ -465,7 +540,7 @@ def test_fts_syntax_query_still_reaches_the_literal_channel(
     断言落在 `literal` 上，所以依赖 `rg`：symbol 路的编辑距离降级也可能对 `"` 返回命中，
     但那不代表字面量通道正常（见 `test_summary_channel_degrades_on_fts_syntax_in_query`）。
     """
-    write_summaries(settings, FTS5_SUMMARIES)
+    write_summaries(settings)
 
     body = post_search(user_client, {"query": '"'})
 

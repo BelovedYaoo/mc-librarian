@@ -7,6 +7,9 @@ requires-python = ">=3.13"
 dependencies = [
   "argon2-cffi>=25.1",
   "fastapi>=0.118",
+  # 摘要层的 FTS5 预分词（#7 规格 §6）：`trigram` 对两字词（「刷怪」）不友好，`unicode61`
+  # 又不切中文，所以入库前用 jieba 切好、查询时对 query 做同样切分。
+  "jieba>=0.42",
   "pydantic>=2.12",
   "pydantic-settings>=2.11",
   # token 计数口径：`#13` 的验收标准（26.3 约 7.5M token）是用 cl100k 真分词器实测的，
@@ -80,4 +83,9 @@ disallow_untyped_defs = false
 # 不引入额外的 stubs 依赖，按未类型化模块处理。
 [[tool.mypy.overrides]]
 module = "psutil"
+ignore_missing_imports = true
+
+# jieba 也不带类型标注；本仓只用 `cut` 与 `setLogLevel`。
+[[tool.mypy.overrides]]
+module = "jieba"
 ignore_missing_imports = true

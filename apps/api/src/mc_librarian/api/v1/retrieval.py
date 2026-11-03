@@ -88,7 +88,7 @@ def _read_source(settings: Settings, version: str, path: str) -> str:
     tags=["retrieve"],
     summary="混合检索（摘要 / 符号 / 字面量）",
     description=(
-        "三路召回（symbol / literal / reference，摘要通道待 #7）在服务端用 RRF 融合，"
+        "四路召回（summary / symbol / literal / reference）在服务端用 RRF 融合，"
         "调用方不需要知道该用哪条通道。`detail=locate` 只返回定位信息（省 token），"
         "`snippet` 额外附带源码片段与摘要；`max_tokens` 按 score 降序截断；"
         "`path_prefix` 在候选阶段过滤。"

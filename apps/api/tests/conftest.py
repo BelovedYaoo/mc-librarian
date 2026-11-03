@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,6 +16,7 @@ from fastapi.testclient import TestClient
 from mc_librarian.auth import passwords
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import CONTROL_DB_NAME, utc_now
+from mc_librarian.indexing import summarize
 from mc_librarian.main import create_app
 
 ADMIN_USERNAME = "admin"
@@ -22,6 +25,65 @@ USER_USERNAME = "worker"
 USER_PASSWORD = "worker-password-1"
 
 NETWORK_ENV = "MC_LIBRARIAN_NETWORK"
+
+# 假 LLM 生成的三行摘要模板：含游戏机制词（规格 §1 要求），且每个 fqn 输出确定。
+FAKE_SUMMARY_TEMPLATE = (
+    "刷怪与区块生成：{simple} 在游戏里负责生成与掉落相关的约束\n"
+    "机制：按每刻预算与区块范围调度\n"
+    "关键成员：{simple}"
+)
+
+_FQN_LINE = re.compile(r"^### (.+)$", re.MULTILINE)
+
+
+class FakeLlm:
+    """假 LLM：从提示词里取出本批的 fqn，回一个合法的 JSON 对象。
+
+    `calls` 记录每次调用的 fqn 列表（幂等测试断言「类未变时不重复调用」）；`failures` 里的
+    fqn 不返回摘要（验证「单类失败、其余照常」）；`raw_override` 直接指定原始响应文本
+    （验证「解析失败按单类失败处理」）。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.failures: set[str] = set()
+        self.raw_override: str | None = None
+
+    @property
+    def fqns(self) -> list[str]:
+        """所有调用里请求过的 fqn（去重后仍保留调用顺序）。"""
+        return [fqn for call in self.calls for fqn in call]
+
+    def post(self, url: str, payload: dict[str, object], api_key: str, timeout: float) -> str:
+        del url, api_key, timeout
+        messages = payload["messages"]
+        prompt = messages[-1]["content"]  # type: ignore[index]
+        fqns = _FQN_LINE.findall(prompt)
+        self.calls.append(list(fqns))
+
+        if self.raw_override is not None:
+            return self.raw_override
+
+        return json.dumps(
+            {
+                fqn: FAKE_SUMMARY_TEMPLATE.format(simple=fqn.rsplit(".", 1)[-1])
+                for fqn in fqns
+                if fqn not in self.failures
+            }
+        )
+
+
+@pytest.fixture(autouse=True)
+def fake_llm(monkeypatch: pytest.MonkeyPatch) -> FakeLlm:
+    """全局替换 LLM 的 HTTP 发送函数：测试不联网，也不碰真实 LLM。
+
+    只换掉最外层的 `post_chat_completion`，因此客户端、提示词拼装、响应解析与入库都走真实
+    代码路径；需要断言调用次数/注入失败的用例直接拿这个 fixture。
+    """
+    fake = FakeLlm()
+    monkeypatch.setattr(summarize, "post_chat_completion", fake.post)
+
+    return fake
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -47,7 +109,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data")
+    """临时数据根 + 假 LLM 配置：真实 LLM 调用由 `fake_llm` fixture 换掉（不联网）。"""
+    return Settings(
+        data_dir=tmp_path / "data",
+        llm_base_url="http://fake-llm.invalid/v1",
+        llm_model="fake-model",
+        llm_api_key="fake-key",
+    )
 
 
 @pytest.fixture

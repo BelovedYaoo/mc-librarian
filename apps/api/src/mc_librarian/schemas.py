@@ -266,6 +266,9 @@ class VersionInfo(BaseModel):
     obfuscated: bool | None = None
     has_summaries: bool | None = None
     source_size_bytes: int | None = None
+    # 摘要覆盖率（#7 规格 §8）：已生成的摘要条数 / 类总数，从索引库实时读。
+    summary_count: int | None = None
+    class_count: int | None = None
 
 
 class VersionList(BaseModel):
@@ -278,9 +281,11 @@ class RegisterVersionRequest(BaseModel):
 
 
 class IndexSettings(BaseModel):
-    """契约 `Settings.index` 里当前**真正有实现**的两个字段（`GET /v1/admin/settings`）。
+    """契约 `Settings.index` 里当前**真正返回**的两个字段（`GET /v1/admin/settings`）。
 
-    `summary_batch_size`/`summary_concurrency` 是 #7 的摘要参数，尚无实现，刻意不返回。
+    `summary_batch_size`/`summary_concurrency`（#7 已实现为运行时配置
+    `MC_LIBRARIAN_SUMMARY_BATCH_SIZE` / `MC_LIBRARIAN_SUMMARY_CONCURRENCY`）与 `llm` 块一样，
+    随 #11 的 `PUT` 一起暴露；这里只读返回 `enabled` 与 `java_xmx`。
     """
 
     enabled: bool
@@ -390,7 +395,7 @@ class FileSlice(BaseModel):
 SearchDetail = Literal["locate", "snippet"]
 # `file` 是没有任何符号覆盖的位置（如 `package` 行 / `data/` 下的 JSON）。
 HitType = Literal["class", "method", "field", "file"]
-# `why` 的取值域与固定顺序（issue #6 规格 §4）；`summary` 由 #7 落地后才可能出现。
+# `why` 的取值域与固定顺序（issue #6 规格 §4）；`summary` 需要索引库里有 `summaries_fts`（#7）。
 WhyChannel = Literal["summary", "symbol", "literal", "reference"]
 
 

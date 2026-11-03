@@ -76,12 +76,14 @@ export interface paths {
         put?: never;
         /**
          * 混合检索（摘要 / 符号 / 字面量）
-         * @description 三路召回在服务端融合，调用方不需要知道该用哪条通道：
+         * @description 四路召回在服务端融合，调用方不需要知道该用哪条通道：
          *
          *     - **symbol** — 索引库的类/方法/字段，复用 `/v1/symbol` 的四级匹配（fqn → simple → 后缀 → 编辑距离）
          *     - **literal** — ripgrep 子进程扫 `<data_dir>/src/<version>/`，按文件路径 + 行号排序
          *     - **reference** — query 命中某个符号名时反查 `refs` 表里的引用点
-         *     - **summary** — `summaries` 表（#7 落地；表不存在时该路为空，不报错）
+         *     - **summary** — `summaries_fts`（FTS5，`#7` 落地；表不存在时该路为空，不报错）。
+         *       query 与入库时一样先过 jieba 分词：`unicode61` 不切中文，不预分词的话两字词
+         *       （「刷怪」）命中不了
          *
          *     融合用 RRF（`1/(60+rank)` 逐路累加，再按本次最高分归一化到 `[0, 1]`），
          *     每路各取前 50 条候选。`why` 是去重后的来源数组，顺序固定 `summary → symbol →
@@ -597,9 +599,14 @@ export interface components {
             indexed_at: string;
             /** @description 源码是否经官方映射重映射（remap） */
             obfuscated?: boolean;
+            /** @description 登记时索引库是否已带摘要（任务跑过 `summarize` 时为真） */
             has_summaries?: boolean;
             /** @description 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） */
             source_size_bytes?: number;
+            /** @description 已生成的摘要条数（从索引库实时读，`summaries` 的行数） */
+            summary_count?: number;
+            /** @description 类总数（摘要覆盖率的分母，从索引库实时读） */
+            class_count?: number;
         };
         SearchRequest: {
             query: string;
