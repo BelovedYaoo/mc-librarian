@@ -1,0 +1,222 @@
+{
+  "name": "mc-librarian 人工评测集 v1",
+  "description": "30 条中文问题，覆盖机制 / 数值 / 定位 / 跨类调用 / 版本差异 / 配置读取六类。每题标 gold：期望命中的类 FQN 或 Class#method，命中任一即算命中。gold 可以跨版本列出（同名类在两个版本里不同包时都写），单版本跑评测时命中其中之一即可。",
+  "questions": [
+    {
+      "id": "mech-01",
+      "category": "机制",
+      "question": "刷怪上限是怎么算的",
+      "gold": ["net.minecraft.world.level.NaturalSpawner"]
+    },
+    {
+      "id": "mech-02",
+      "category": "机制",
+      "question": "随机刻是怎么驱动作物生长的",
+      "gold": [
+        "net.minecraft.server.level.ServerLevel",
+        "net.minecraft.world.level.block.CropBlock"
+      ]
+    },
+    {
+      "id": "mech-03",
+      "category": "机制",
+      "question": "红石线的信号强度是怎么逐格衰减的",
+      "gold": [
+        "net.minecraft.world.level.block.RedStoneWireBlock",
+        "net.minecraft.world.level.block.RedstoneWireBlock"
+      ]
+    },
+    {
+      "id": "mech-04",
+      "category": "机制",
+      "question": "爆炸是怎么破坏方块的",
+      "gold": ["net.minecraft.world.level.Explosion"]
+    },
+    {
+      "id": "mech-05",
+      "category": "机制",
+      "question": "玩家的经验等级是怎么结算的",
+      "gold": ["net.minecraft.world.entity.player.Player"]
+    },
+    {
+      "id": "num-01",
+      "category": "数值",
+      "question": "默认的 mob cap 是多少",
+      "gold": ["net.minecraft.world.entity.MobCategory"]
+    },
+    {
+      "id": "num-02",
+      "category": "数值",
+      "question": "敌对生物默认每区块上限是多少",
+      "gold": ["net.minecraft.world.entity.MobCategory"]
+    },
+    {
+      "id": "num-03",
+      "category": "数值",
+      "question": "甘蔗最高能长到几格",
+      "gold": ["net.minecraft.world.level.block.SugarCaneBlock"]
+    },
+    {
+      "id": "num-04",
+      "category": "数值",
+      "question": "随机刻的默认速度是多少",
+      "gold": [
+        "net.minecraft.world.level.gamerules.GameRules",
+        "net.minecraft.world.level.GameRules"
+      ]
+    },
+    {
+      "id": "num-05",
+      "category": "数值",
+      "question": "玩家的基础移动速度是多少",
+      "gold": [
+        "net.minecraft.world.entity.ai.attributes.Attributes",
+        "net.minecraft.world.entity.ai.attributes.AttributeSupplier"
+      ]
+    },
+    {
+      "id": "loc-01",
+      "category": "定位",
+      "question": "处理甘蔗生长的类在哪",
+      "gold": ["net.minecraft.world.level.block.SugarCaneBlock"]
+    },
+    {
+      "id": "loc-02",
+      "category": "定位",
+      "question": "解析掉落表 JSON 的类在哪",
+      "gold": [
+        "net.minecraft.world.level.storage.loot.LootTable",
+        "net.minecraft.world.level.storage.loot.LootDataType"
+      ]
+    },
+    {
+      "id": "loc-03",
+      "category": "定位",
+      "question": "负责区块加载与保存的类在哪",
+      "gold": [
+        "net.minecraft.server.level.ChunkMap",
+        "net.minecraft.server.level.ServerChunkCache"
+      ]
+    },
+    {
+      "id": "loc-04",
+      "category": "定位",
+      "question": "记录玩家背包内容的类在哪",
+      "gold": ["net.minecraft.world.entity.player.Inventory"]
+    },
+    {
+      "id": "loc-05",
+      "category": "定位",
+      "question": "解析合成表 JSON 的类在哪",
+      "gold": ["net.minecraft.world.item.crafting.RecipeManager"]
+    },
+    {
+      "id": "ref-01",
+      "category": "跨类调用",
+      "question": "谁调用了 NaturalSpawner 的刷怪入口 spawnForChunk",
+      "gold": ["net.minecraft.server.level.ServerChunkCache"]
+    },
+    {
+      "id": "ref-02",
+      "category": "跨类调用",
+      "question": "谁调用了 LootTable 的 getRandomItems",
+      "gold": [
+        "net.minecraft.world.entity.LivingEntity",
+        "net.minecraft.server.commands.LootCommand"
+      ]
+    },
+    {
+      "id": "ref-03",
+      "category": "跨类调用",
+      "question": "谁在实体死亡时发放经验",
+      "gold": ["net.minecraft.world.entity.LivingEntity"]
+    },
+    {
+      "id": "ref-04",
+      "category": "跨类调用",
+      "question": "谁调用了玩家死亡掉落 dropAllDeathLoot",
+      "gold": [
+        "net.minecraft.server.level.ServerPlayer",
+        "net.minecraft.world.entity.LivingEntity"
+      ]
+    },
+    {
+      "id": "ref-05",
+      "category": "跨类调用",
+      "question": "谁在刷怪时统计每个区块的怪物数量",
+      "gold": ["net.minecraft.world.level.LocalMobCapCalculator"]
+    },
+    {
+      "id": "ver-01",
+      "category": "版本差异",
+      "question": "1.20.1 与 26.3 的刷怪逻辑有什么不同",
+      "gold": ["net.minecraft.world.level.NaturalSpawner"]
+    },
+    {
+      "id": "ver-02",
+      "category": "版本差异",
+      "question": "两个版本里红石线的类名和包路径有什么不同",
+      "gold": [
+        "net.minecraft.world.level.block.RedStoneWireBlock",
+        "net.minecraft.world.level.block.RedstoneWireBlock"
+      ]
+    },
+    {
+      "id": "ver-03",
+      "category": "版本差异",
+      "question": "两个版本的 GameRules 分别放在哪个包",
+      "gold": [
+        "net.minecraft.world.level.gamerules.GameRules",
+        "net.minecraft.world.level.GameRules"
+      ]
+    },
+    {
+      "id": "ver-04",
+      "category": "版本差异",
+      "question": "1.20.1 与 26.3 的 MobCategory 定义有什么不同",
+      "gold": ["net.minecraft.world.entity.MobCategory"]
+    },
+    {
+      "id": "ver-05",
+      "category": "版本差异",
+      "question": "两个版本的经验球生成逻辑有什么不同",
+      "gold": ["net.minecraft.world.entity.ExperienceOrb"]
+    },
+    {
+      "id": "cfg-01",
+      "category": "配置读取",
+      "question": "掉落表里某个物品的概率在哪定义",
+      "gold": [
+        "net.minecraft.world.level.storage.loot.LootPool",
+        "net.minecraft.world.level.storage.loot.entries.LootItem"
+      ]
+    },
+    {
+      "id": "cfg-02",
+      "category": "配置读取",
+      "question": "生物群系里生成某种怪的权重在哪配置",
+      "gold": ["net.minecraft.world.level.biome.MobSpawnSettings"]
+    },
+    {
+      "id": "cfg-03",
+      "category": "配置读取",
+      "question": "游戏规则 gamerule 的默认值在哪定义",
+      "gold": [
+        "net.minecraft.world.level.gamerules.GameRules",
+        "net.minecraft.world.level.GameRules"
+      ]
+    },
+    {
+      "id": "cfg-04",
+      "category": "配置读取",
+      "question": "server.properties 的默认值在哪读取",
+      "gold": ["net.minecraft.server.dedicated.DedicatedServerProperties"]
+    },
+    {
+      "id": "cfg-05",
+      "category": "配置读取",
+      "question": "数据包里的标签 tag 是怎么加载的",
+      "gold": ["net.minecraft.tags.TagLoader"]
+    }
+  ]
+}
