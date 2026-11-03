@@ -8,7 +8,7 @@ FastAPI 会声明成 `type: string, format: date-time`。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,11 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
 JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
 
+# 版本号允许的字符（契约 `JobCreate.version` / `RegisterVersionRequest.version` 的 pattern）。
+# 版本号会进文件路径（`db/<version>.sqlite`、`cache/<version>/`），带 `/` 会跑出数据根，
+# 所以 `mc-librarian index` 的 CLI 也用同一条正则先校验一次。
+VERSION_PATTERN: Final = r"^[A-Za-z0-9._-]+$"
+
 # 检索/阅读端点的枚举（契约 `SymbolKind` 与 `SymbolDetail`/`Outline` 的 `kind`）。
 SymbolKind = Literal["any", "class", "method", "field"]
 SymbolDetailKind = Literal["class", "method", "field"]
@@ -26,6 +31,7 @@ ReferenceKind = Literal["call", "field", "type", "other"]
 MemberKind = Literal["method", "field"]
 
 __all__ = [
+    "VERSION_PATTERN",
     "AcceptInviteRequest",
     "AuditEntry",
     "AuditList",
@@ -195,13 +201,16 @@ class AuditList(BaseModel):
 
 
 class JobOptions(BaseModel):
-    """创建任务时的 `options`；`source_dir`/`obfuscated` 见 docs/openapi.yaml 的 `JobCreate`。
+    """创建任务时的 `options`；三个字段见 docs/openapi.yaml 的 `JobCreate`。
 
     `source_dir` 可省略：省略（或不传 `options`）走完整五段；给了 `options` 但 `source_dir`
     为空由接口层返回 422（空值属于笔误）。
     `obfuscated` 声明该版本源码是否经官方映射 remap；省略时由 `jobs.runner.resolve_obfuscated`
     按 checkpoint 与阶段序列推断（parse-only 缺省按「已 remap」记录）。显式传 `null` 与省略不同，
     由接口层回 422（契约里是非 nullable 的 `boolean`）。
+    `force` 为 `true` 时强制重建：绕过「同版本已有任务」的 409，并且即使
+    `cache/<version>/fetch.json` 记着源码树已反编译完成也重新反编译（见
+    `jobs.runner.reuse_source_tree`）；默认 `false` 时源码树已就绪则复用。
     """
 
     source_dir: str | None = None
@@ -211,7 +220,7 @@ class JobOptions(BaseModel):
 
 class JobCreate(BaseModel):
     kind: JobKind
-    version: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    version: str = Field(min_length=1, max_length=64, pattern=VERSION_PATTERN)
     options: JobOptions | None = None
 
 
@@ -264,7 +273,7 @@ class VersionList(BaseModel):
 
 
 class RegisterVersionRequest(BaseModel):
-    version: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    version: str = Field(min_length=1, max_length=64, pattern=VERSION_PATTERN)
     obfuscated: bool = True
 
 

@@ -77,9 +77,32 @@ MC_LIBRARIAN_SPECIALSOURCE_JAR=/path/SpecialSource-1.11.5-shaded.jar \
 安装后也可用 `mc-librarian fetch --version <v> --out <dir>`（同一个入口）。
 
 - jar / mappings / checkpoint 默认缓存在 `<data_dir>/cache/<version>/`（`--cache` 可改）；
-  中断后重跑会跳过已完成的阶段，不重复下载与反编译。
+  中断后重跑会跳过已完成的阶段，不重复下载与反编译。`fetch.json` 里的完成状态也被
+  `mc-librarian index` 读写（同一份），因此两个入口不会互相重复反编译。
 - 是否 remap 由版本清单里有没有 `client_mappings` 决定，不比较版本号（26.x 与 1.14.4 之前的版本都没有）。
 - 真实链路（联网 + 真反编译）的测试默认跳过：`.venv/Scripts/python -m pytest --run-network`。
+
+## 端到端索引（issue #13）
+
+一条命令从官方 jar 跑到可检索索引，产出 `db/<version>.sqlite` 并登记版本：
+
+```bash
+cd apps/api
+MC_LIBRARIAN_VINEFLOWER_JAR=/path/vineflower-1.12.0.jar \
+  .venv/Scripts/python -m mc_librarian index --version 26.3
+```
+
+- 不给 `--source-dir`：完整五段 `download → decompile → parse → summarize → finalize`；
+- 给了 `--source-dir <dir>`：跳过 download/decompile，从 `parse` 开始（相对路径按当前目录解析）；
+- 不给 `--force` 且索引已存在：跳过重建（复用已有索引）后继续收尾，重复执行不改变产物；
+  `cache/<version>/fetch.json` 记着源码树已反编译完成时也跳过 `decompile`（与 `mc-librarian fetch`
+  共用同一个完成标记），`--force` 一律重建；
+- `summarize` 仍是占位（摘要由 #7 落地），本命令不调 LLM；
+- 跑完版本行已登记（`db_path` 指向产出的索引），服务不需要再手工 `POST /v1/admin/versions`；
+- 输出文件数 / 行数 / token / 内存峰值 / 耗时；内存峰值按秒采样**进程树** RSS（`psutil` 是 dev
+  依赖，装不上只跳过测量并记一条 warn，不阻断）。
+
+退出码：`0` 成功、`1` 任务失败（`error` 打到 stderr）、`2` 参数错误。
 
 ## 校验
 

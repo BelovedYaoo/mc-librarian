@@ -5,6 +5,8 @@
 
 失败降级（规格 §4）：单个文件读不了或解析失败就跳过并记一条 `warn` 日志；失败率超过
 `MAX_PARSE_FAILURE_RATIO` 则整体失败，说明环境有问题（例如 tree-sitter 语法版本不匹配）。
+
+另提供 `read_index_totals`：只读读回已有索引库的统计，供流水线复用已有索引与 `index` CLI 汇总。
 """
 
 from __future__ import annotations
@@ -114,6 +116,16 @@ class BuildResult:
 
 
 @dataclass(frozen=True)
+class IndexTotals:
+    """已有索引库的统计（`mc-librarian index` 复用索引与汇总时读）。"""
+
+    files: int
+    java_files: int
+    lines: int
+    tokens: int
+
+
+@dataclass(frozen=True)
 class _FileRecord:
     relative: str
     package: str | None
@@ -142,6 +154,49 @@ def iter_source_files(root: Path) -> Iterator[Path]:
     for path in sorted(data_root.rglob(f"*{JSON_SUFFIX}")):
         if path.is_file() and path not in seen:
             yield path
+
+
+def read_index_totals(db_path: Path) -> IndexTotals | None:
+    """只读打开已有索引库读出统计；打不开或缺 `files` 表（0 字节文件/截断文件）返回 `None`。
+
+    调用方把 `None` 当作「没有可用索引」：流水线会正常重建，而不是把坏文件登记成版本。
+    与 `api.v1.admin_versions.read_index_stats` 的分工：那个给注册接口用（还要 `summaries`
+    标记），这个给流水线复用已有索引与 CLI 汇总用（还要行数）。
+    """
+    try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+    try:
+        has_files = connection.execute(
+            "SELECT 1 AS hit FROM sqlite_master WHERE type = 'table' AND name = 'files'"
+        ).fetchone()
+
+        if has_files is None:
+            return None
+
+        row = connection.execute(
+            "SELECT COUNT(*) AS files,"
+            " COALESCE(SUM(CASE WHEN path LIKE '%.java' THEN 1 ELSE 0 END), 0) AS java_files,"
+            " COALESCE(SUM(loc), 0) AS lines,"
+            " COALESCE(SUM(tokens), 0) AS tokens FROM files"
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        # 文件存在但不是 sqlite（或已损坏）：当作没有可用索引。
+        return None
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+
+    return IndexTotals(
+        files=int(row[0]),
+        java_files=int(row[1]),
+        lines=int(row[2]),
+        tokens=int(row[3]),
+    )
 
 
 def place_source_tree(source_dir: Path, dest: Path) -> None:

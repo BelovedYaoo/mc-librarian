@@ -13,6 +13,13 @@
 - 启动时把上一次进程遗留的 `running` 任务收回 `queued`（已请求取消的直接置 `canceled`），
   否则它们永远不会再被认领。
 - 阻塞的文件扫描与 sqlite 读写都丢进 `asyncio.to_thread`，不占事件循环。
+- `options.reuse_index` 为真且 `db/<version>.sqlite` 已是合法索引时，跳过 `parse`（不重建），
+  直接复用已有索引的统计：`mc-librarian index` 未给 `--force` 时的幂等语义（见
+  `reuse_index_stats`）。
+- `cache/<version>/fetch.json`（与 `mc-librarian fetch` 共用）记着 `decompile` 已完成且源码树
+  还在、又没给 `--force` 时，跳过 `decompile`（见 `reuse_source_tree`）；跑完 `download`/
+  `decompile` 会把完成状态写回该文件（见 `persist_fetch_stage`）。
+- `run_job(job_id)` 是 CLI 的入口：只认领并跑完指定的那一个任务，不走常驻队列循环。
 
 `#4`/`#5` 实现 `parse`：就位源码树、tree-sitter 解析、原子写出 `db/<version>.sqlite`；
 `#21` 补上 `download`/`decompile` 两段（实现在 `mc_librarian.fetch.pipeline`，这里只做编排）；
@@ -35,13 +42,23 @@ from mc_librarian.config import Settings
 from mc_librarian.db import Database, transaction
 from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.pipeline import (
+    CHECKPOINT_FILE_NAME,
     FETCH_STAGES,
     FetchContext,
     cache_dir_for,
+    count_java_files,
+    read_checkpoint,
     run_fetch_stage,
+    write_checkpoint,
 )
 from mc_librarian.fetch.tools import PipelineTools, default_tools
-from mc_librarian.indexing.build import BuildError, build_index, place_source_tree
+from mc_librarian.indexing.build import (
+    BuildError,
+    build_index,
+    place_source_tree,
+    read_index_totals,
+    source_tree_size_bytes,
+)
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
 from mc_librarian.schemas import LogLevel
@@ -64,6 +81,15 @@ INDEX_DISABLED_ERROR: Final = (
     "本实例已关闭索引构建（MC_LIBRARIAN_INDEX_ENABLED=false）："
     "请在本地工作站生成索引后用 POST /v1/admin/versions 注册"
 )
+
+# 索引已存在且未要求重建时，写进任务日志与命令输出的提示（规格补充 §2）。
+REUSE_INDEX_MESSAGE: Final = "索引已存在，跳过重建（用 --force 重建）"
+# 源码树已反编译完成时的同类提示。
+REUSE_SOURCE_TREE_MESSAGE: Final = "源码树已存在，跳过反编译（用 --force 重建）"
+REUSE_MESSAGES: Final[dict[str, str]] = {
+    "parse": REUSE_INDEX_MESSAGE,
+    "decompile": REUSE_SOURCE_TREE_MESSAGE,
+}
 
 
 class StageError(RuntimeError):
@@ -119,6 +145,120 @@ def resolve_obfuscated(options: Mapping[str, Any], checkpoint: Mapping[str, Any]
     return bool(checkpoint.get("obfuscated", True))
 
 
+def reuse_index_stats(
+    options: Mapping[str, Any], data_dir: Path, version: str
+) -> dict[str, Any] | None:
+    """索引已存在且未要求重建时，返回复用索引要并入 checkpoint 的统计；否则 `None`。
+
+    `options.reuse_index` 为真才复用——只有 `mc-librarian index` 会设置它（未给 `--force`
+    时）；API 任务不设，保持「提交即重建」的既有语义。索引文件存在但不是合法索引
+    （打不开/缺 `files` 表）时返回 `None`，交回正常 `parse` 重建，不把坏文件登记成版本。
+    """
+    if options.get("reuse_index") is not True:
+        return None
+
+    totals = read_index_totals(index_path(data_dir, version))
+
+    if totals is None:
+        return None
+
+    return {
+        "files": totals.files,
+        "tokens": totals.tokens,
+        # 与 `parse` 同口径（索引范围内的源码字节数），不拿索引 sqlite 的大小充数。
+        "source_size_bytes": source_tree_size_bytes(source_root(data_dir, version)),
+    }
+
+
+def done_stages(checkpoint: Mapping[str, Any]) -> set[str]:
+    """checkpoint 里已完成的阶段名；脏数据（`stages` 不是列表）按「没有已完成阶段」处理。"""
+    raw = checkpoint.get("stages")
+
+    if not isinstance(raw, list):
+        return set()
+
+    return {str(name) for name in raw}
+
+
+def fetch_checkpoint_path(data_dir: Path, version: str) -> Path:
+    """`<data_dir>/cache/<version>/fetch.json`：`download`/`decompile` 的完成状态。"""
+    return cache_dir_for(data_dir, version) / CHECKPOINT_FILE_NAME
+
+
+def reuse_source_tree(
+    options: Mapping[str, Any], data_dir: Path, version: str
+) -> dict[str, Any] | None:
+    """`decompile` 已完成且源码树还在时，返回复用要并入 checkpoint 的统计；否则 `None`。
+
+    完成状态以 `<data_dir>/cache/<version>/fetch.json` 为准——`mc-librarian fetch` 与
+    `JobRunner` 写的是同一份（见 `persist_fetch_stage`），两个入口因此共用同一个「源码树已就绪」
+    的事实来源。刻意**不**用「目录里有 `.java` 就算完成」这种弱判据：被强杀的半成品树会被静默
+    复用、产出残缺索引。`options.force` 为真时一律重建；标记为真但源码树缺失/为空时也重跑。
+
+    `java_files`/`java_bytes` 取标记里记录的值（那是「这次反编译已完成」的权威产物大小），
+    标记里缺这两项时才退回数目录。
+    """
+    if options.get("force") is True:
+        return None
+
+    persisted = read_checkpoint(fetch_checkpoint_path(data_dir, version))
+
+    if "decompile" not in done_stages(persisted):
+        return None
+
+    source_dir = source_root(data_dir, version)
+    files, size_bytes = count_java_files(source_dir)
+
+    if files == 0:
+        return None
+
+    return {
+        "source_dir": str(source_dir),
+        "java_files": checkpoint_int(persisted, "java_files") or files,
+        "java_bytes": checkpoint_int(persisted, "java_bytes") or size_bytes,
+    }
+
+
+def reuse_stage_stats(
+    stage: str, options: Mapping[str, Any], data_dir: Path, version: str
+) -> dict[str, Any] | None:
+    """该阶段能否复用已有产物；能就返回要并入 checkpoint 的统计，否则 `None`（规格补充 §2）。
+
+    - `parse`：`options.reuse_index` 为真且 `db/<version>.sqlite` 已是合法索引——只有
+      `mc-librarian index` 会设这个键（API 任务不设，保持「提交即重建」的既有语义）；
+    - `decompile`：`options.force` 不为真且按版本的 fetch checkpoint 记着该阶段已完成、
+      源码树还在（与 `mc-librarian fetch` 共用，API 任务同样受益）。
+    """
+    if stage == "parse":
+        return reuse_index_stats(options, data_dir, version)
+
+    if stage == "decompile":
+        return reuse_source_tree(options, data_dir, version)
+
+    return None
+
+
+def persist_fetch_stage(cache_dir: Path, stage: str, stats: Mapping[str, Any]) -> None:
+    """把完成的 fetch 阶段并进 `<cache>/fetch.json`（与 `run_fetch` 同一份格式）。
+
+    `JobRunner` 只跑单段（`run_fetch_stage`），因此这一步得自己做：否则只有 `mc-librarian
+    fetch` 跑过的版本才留有完成标记，`index` 自己跑的版本第二次还会重新反编译。
+    """
+    path = cache_dir / CHECKPOINT_FILE_NAME
+    persisted = read_checkpoint(path)
+    done = done_stages(persisted)
+    done.add(stage)
+
+    write_checkpoint(
+        path,
+        {
+            **persisted,
+            "stages": [name for name in FETCH_STAGES if name in done],
+            **stats,
+        },
+    )
+
+
 def checkpoint_int(checkpoint: Mapping[str, Any], key: str) -> int:
     """从 checkpoint 取整数统计（`files`/`tokens`/`source_size_bytes`）。
 
@@ -155,22 +295,32 @@ def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
 
 
 def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
-    """`download` / `decompile` 两段：转调 fetch 流水线，失败统一转成 `StageError`。"""
+    """`download` / `decompile` 两段：转调 fetch 流水线，失败统一转成 `StageError`。
+
+    跑完把阶段与产物写进**按版本**的 `<data_dir>/cache/<version>/fetch.json`（`mc-librarian
+    fetch` 写的是同一份）：两个入口共用同一个「源码树已就绪」的事实来源，谁先跑完另一个都能跳过
+    （见 `reuse_source_tree`）。
+    """
     if context.tools is None:
         raise StageError(f"{stage} 阶段缺少工具链（PipelineTools）")
 
+    cache_dir = cache_dir_for(context.data_dir, context.version)
     fetch_context = FetchContext(
         version=context.version,
-        cache_dir=cache_dir_for(context.data_dir, context.version),
+        cache_dir=cache_dir,
         source_dir=source_root(context.data_dir, context.version),
         log=context.log,
         checkpoint=context.checkpoint,
     )
 
     try:
-        return run_fetch_stage(stage, fetch_context, context.tools)
+        stats = run_fetch_stage(stage, fetch_context, context.tools)
     except FetchError as error:
         raise StageError(str(error)) from error
+
+    persist_fetch_stage(cache_dir, stage, stats)
+
+    return stats
 
 
 def _parse_stage(context: JobContext) -> dict[str, Any]:
@@ -260,6 +410,24 @@ class JobRunner:
             with suppress(asyncio.CancelledError):
                 await task
 
+    async def run_job(self, job_id: str) -> None:
+        """认领并跑完指定的一个已入队任务，跑完即返回（`mc-librarian index` 用它）。
+
+        常驻服务走 `start()` 串行消费整个队列；CLI 只关心自己刚建的那一个任务，所以只认领它，
+        不碰队列里的其它任务（也不会因 `_claim` 失败而空转）。执行的仍是同一套 `_execute`
+        与 checkpoint 机制。任务不存在或不在 `queued` 状态时抛 `StageError`。
+        """
+        row = await asyncio.to_thread(self._claim_job, job_id)
+
+        if row is None:
+            raise StageError(f"任务不存在或不在排队状态：{job_id}")
+
+        await self._execute(row)
+
+    def _claim_job(self, job_id: str) -> sqlite3.Row | None:
+        with self._database.connect() as conn, transaction(conn):
+            return store.claim(conn, job_id)
+
     async def _loop(self) -> None:
         while not self._stopping.is_set():
             row = await asyncio.to_thread(self._claim)
@@ -305,6 +473,29 @@ class JobRunner:
             if await asyncio.to_thread(self._is_cancel_requested, job_id):
                 await asyncio.to_thread(self._cancel, job_id, current_stage)
                 return
+
+            # 已有产物可复用时不再重跑该阶段（规格补充 §2）：`decompile` 复用已就绪的源码树，
+            # `parse` 复用已有索引。产物字节不变，因此重复执行同一命令是幂等的。
+            reused = await asyncio.to_thread(
+                reuse_stage_stats, stage, options, self._settings.data_dir, version
+            )
+
+            if reused is not None:
+                current_stage = stage
+                done.add(stage)
+                checkpoint = {
+                    **checkpoint,
+                    "stages": [name for name in STAGES if name in done],
+                    **reused,
+                }
+                await asyncio.to_thread(
+                    self._save,
+                    job_id,
+                    checkpoint,
+                    (index + 1) / total,
+                    REUSE_MESSAGES[stage],
+                )
+                continue
 
             await asyncio.to_thread(self._mark, job_id, stage, index / total)
             current_stage = stage

@@ -1511,8 +1511,17 @@ def test_loop_survives_failing_fallback(
             while time.monotonic() < deadline:
                 with database.connect() as conn:
                     current = store.find(conn, healthy.id)
+                    broken_now = store.find(conn, broken.id)
 
-                if current is not None and current.status in TERMINAL:
+                # 两个条件缺一不可：健康任务跑完证明 runner 没停摆；断掉的任务被认领过
+                # （不再 queued）才说明它真的走过 broken `_fail`。两个 job 的 created_at 精度是秒，
+                # 排序由 id 决定，健康任务可能先被认领——只等健康任务会有竞态。
+                if (
+                    current is not None
+                    and current.status in TERMINAL
+                    and broken_now is not None
+                    and broken_now.status != "queued"
+                ):
                     return
 
                 await asyncio.sleep(0.02)

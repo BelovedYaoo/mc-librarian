@@ -22,6 +22,9 @@ dev = [
   "httpx>=0.28",
   "mypy>=1.19",
   "openapi-spec-validator>=0.7.2",
+  # 内存峰值采样（`mc-librarian index`，规格补充 §3）：只在本地跑真实流水线时用，
+  # 生产不装；导入失败时流水线照跑，只跳过测量并记一条 warn。
+  "psutil>=7.0",
   "pytest>=8.4",
   "pyyaml>=6.0.2",
   "ruff>=0.14",
@@ -69,3 +72,9 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# psutil 不带 py.typed（上游把类型放在独立的 types-psutil 里）。本仓只用它采样 RSS，
+# 不引入额外的 stubs 依赖，按未类型化模块处理。
+[[tool.mypy.overrides]]
+module = "psutil"
+ignore_missing_imports = true
