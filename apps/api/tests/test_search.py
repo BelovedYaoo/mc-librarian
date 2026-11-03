@@ -467,6 +467,34 @@ def test_summary_channel_hits_two_char_chinese_word(
     assert candidates[0].summary
 
 
+def test_summary_channel_ignores_chinese_punctuation(
+    settings: Settings, indexed: Path, index_conn: sqlite3.Connection
+) -> None:
+    """query 带中文标点仍能命中：标点碎片被丢掉、词加引号，不被 FTS 语法误解析（规格 §6）。"""
+    write_summaries(
+        settings,
+        (
+            (
+                "net.minecraft.world.Mob",
+                "刷怪上限：每区块生成预算\n机制：mob cap\n关键成员：spawnInterval",
+            ),
+        ),
+    )
+
+    candidates = channels.summary_candidates(index_conn, "刷怪，上限", path_prefix=None)
+
+    assert [item.symbol for item in candidates] == ["net.minecraft.world.Mob"]
+
+
+def test_summary_channel_returns_empty_for_punctuation_only_query(
+    settings: Settings, indexed: Path, index_conn: sqlite3.Connection
+) -> None:
+    """纯标点 query 没有可匹配的词：该路直接返回空，不去执行注定报错的 SQL。"""
+    write_summaries(settings)
+
+    assert channels.summary_candidates(index_conn, "，。！", path_prefix=None) == []
+
+
 def test_summary_channel_degrades_when_not_fts5(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
 ) -> None:

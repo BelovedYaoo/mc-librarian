@@ -40,13 +40,15 @@ class FakeLlm:
     """假 LLM：从提示词里取出本批的 fqn，回一个合法的 JSON 对象。
 
     `calls` 记录每次调用的 fqn 列表（幂等测试断言「类未变时不重复调用」）；`failures` 里的
-    fqn 不返回摘要（验证「单类失败、其余照常」）；`raw_override` 直接指定原始响应文本
+    fqn 不返回摘要（验证「单类失败、其余照常」）；`overrides` 里的 fqn 换成指定文本
+    （验证「格式不合格的摘要不进库」）；`raw_override` 直接指定原始响应文本
     （验证「解析失败按单类失败处理」）。
     """
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.failures: set[str] = set()
+        self.overrides: dict[str, str] = {}
         self.raw_override: str | None = None
 
     @property
@@ -66,7 +68,9 @@ class FakeLlm:
 
         return json.dumps(
             {
-                fqn: FAKE_SUMMARY_TEMPLATE.format(simple=fqn.rsplit(".", 1)[-1])
+                fqn: self.overrides.get(
+                    fqn, FAKE_SUMMARY_TEMPLATE.format(simple=fqn.rsplit(".", 1)[-1])
+                )
                 for fqn in fqns
                 if fqn not in self.failures
             }

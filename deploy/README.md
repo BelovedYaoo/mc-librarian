@@ -19,7 +19,7 @@ issue #15 分两段：**段一**是本地产出部署物并在本地验证（本
 TLS 在边界终止（D15/D18）：**两个容器都不持有证书**，web 只提供静态文件与 `/api/*` 反代入口。
 api 只挂在 compose 的内部网络上，网关不直连 api。
 
-| 文件 | 作用 |
+| 文件（路径相对仓库根） | 作用 |
 |---|---|
 | `deploy/Dockerfile.api` | api 镜像：Python 3.13 + JRE 17 + Vineflower + SpecialSource + ripgrep + 预置 tiktoken 词表 |
 | `deploy/Dockerfile.web` | web 镜像：bun 构建 `apps/web/dist` → Caddy 运行 |
@@ -37,10 +37,11 @@ api 只挂在 compose 的内部网络上，网关不直连 api。
 | SpecialSource | 1.11.5 shaded → `/opt/mc-librarian/tools/specialsource-shaded.jar` |
 | ripgrep | 13.0.0（`rg --version`） |
 | tiktoken 词表 | `cl100k_base` 预置在 `/opt/mc-librarian/tiktoken-cache/9b5ad71b2ce5302211f9c61530b329a4922fc6a4`（1,681,126 字节） |
+| 运行用户 | api：`app`（uid/gid 10001）；web：`caddy`（uid/gid 1000，镜像内自建） |
 
 **不装 Gradle**（D24）：两个 jar 都是发布好的单个 jar，构建期用 `curl` 取进镜像，运行时不联网。
 
-本地实测体积（`linux/amd64`）：api 589 MB、web 93.8 MB。
+本地实测体积（`linux/amd64`，`docker image ls` 的 SI 口径）：api 656 MB、web 93.8 MB。
 
 ## 2. 段一：本地验证（已跑通）
 
@@ -53,33 +54,59 @@ docker network inspect deploy-net >/dev/null 2>&1 || docker network create deplo
 
 # 2) 起两个容器。端口用非默认值，避免与并行车道/本机服务冲突；
 #    ENV/COOKIE_SECURE 显式降回 dev，否则会命中生产护栏（见 §4）
+#    数据根写 ../../mc-librarian-data：compose 的挂载源按 deploy/ 解析（见下表）。
 cd <仓库根>
 MC_LIBRARIAN_ENV=dev MC_LIBRARIAN_COOKIE_SECURE=false \
-MC_LIBRARIAN_DATA_DIR=../mc-librarian-data \
+MC_LIBRARIAN_DATA_DIR=../../mc-librarian-data \
   docker compose -f deploy/compose.yaml up -d --build
 ```
+
+**相对路径的基准目录**（写错会直接踩坑）：
+
+| 写法 | 相对谁解析 |
+|---|---|
+| `-f deploy/compose.yaml` 里的 `deploy/...` | 当前 shell 的工作目录（本文档统一约定从**仓库根**执行） |
+| compose 文件里的 `build.context: ..` / `dockerfile: deploy/...` | compose 文件所在目录（`deploy/`），即构建上下文是仓库根 |
+| `MC_LIBRARIAN_DATA_DIR=...` 这类**挂载源** | compose 文件所在目录（`deploy/`），**不是** shell 的工作目录 |
+
+所以数据根的默认值只能是 `../../mc-librarian-data`（= 仓库根的同级目录）。写成
+`../mc-librarian-data` 会落到**仓库内**的 `mc-librarian-data/`：既违反 D9（源码/索引产物不入库），
+也会被 `resolve_data_dir` 直接拒绝、容器启动即失败。生产上直接给绝对路径（§3.2）。
+
+api 容器以非 root（uid 10001，见 §5）运行：数据根里的文件属主跟着这个 uid。Linux 宿主要
+保证该目录可被 uid 10001 写（`sudo chown -R 10001:10001 <数据根>`）；Docker Desktop（Windows /
+macOS）的挂载对 uid 不敏感，实测无需处理。
 
 验证清单（全部为实测结果）：
 
 ```bash
 curl -s http://127.0.0.1:18787/v1/health          # {"status":"ok","version":"0.2.0"}
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18787/openapi.json   # 200（44,619 字节）
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18787/openapi.json   # 200（44,927 字节）
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:15173/               # 200（前端 index.html）
 curl -s http://127.0.0.1:15173/api/v1/health      # 经 web 反代，剥掉 /api 前缀后同上
 curl -s http://127.0.0.1:15173/api/v1/setup       # {"required":true}（前端真的连上了后端）
 
 docker compose -f deploy/compose.yaml logs api | grep 'token 计数'
 # 2026-11-03 17:53:48,363 INFO    mc_librarian: token 计数：cl100k（tiktoken）
+docker compose -f deploy/compose.yaml logs api | grep '中文分词'
+# 2026-11-03 17:53:48,4xx INFO    mc_librarian: 中文分词：jieba 词典已加载（498113 个词）
 docker exec mc-librarian-api-1 rg --version       # ripgrep 13.0.0
 docker exec mc-librarian-api-1 java -version      # openjdk version "17.0.21"
+docker exec mc-librarian-api-1 id                 # uid=10001(app) gid=10001(app)（非 root）
+docker exec mc-librarian-web-1 id                 # uid=1000(caddy) gid=1000(caddy)（非 root）
+# 数据根可见；节点上属主是 10001，Docker Desktop 的挂载显示 0 0/0777（uid 不敏感）
+docker exec mc-librarian-api-1 ls -ln /data
 ```
 
-词表预置的强证据：断网也能出 `cl100k`（不走 fallback）：
+词表与词典预置的强证据：断网也能出 `cl100k`（不走 fallback）、jieba 词典也能加载：
 
 ```bash
 docker run --rm --network none mc-librarian-api:local \
   python -c "from mc_librarian.indexing.text import warmup_token_counting; print(warmup_token_counting())"
 # token 计数：cl100k（tiktoken）
+docker run --rm --network none mc-librarian-api:local \
+  python -c "from mc_librarian.indexing.summarize import warmup_segmentation; print(warmup_segmentation())"
+# 中文分词：jieba 词典已加载（498113 个词）
 ```
 
 收尾：
@@ -96,9 +123,11 @@ docker compose -f deploy/compose.yaml down
 ### 3.1 构建并推送镜像
 
 节点只有 3.5 GiB 内存，**不要在节点上构建**（web 的 `vite build` 与 api 的 pip 安装都会吃内存）。
-在本地构建后推送到节点可达的镜像仓库，或 `docker save` / `docker load`：
+在本地构建后推送到节点可达的镜像仓库，或 `docker save` / `docker load`
+（下列命令都在**仓库根**执行：`-f` 的路径相对当前 shell，`build.context` 相对 compose 文件）：
 
 ```bash
+cd <仓库根>
 docker compose -f deploy/compose.yaml build
 docker tag mc-librarian-api:local <registry>/mc-librarian-api:<tag>
 docker tag mc-librarian-web:local <registry>/mc-librarian-web:<tag>
@@ -117,6 +146,13 @@ docker push <registry>/mc-librarian-web:<tag>
 ├─ control.sqlite        # 首次启动自动建表（schema 迁移幂等）
 ├─ src/<version>/        # 从本地工作站上传的源码树（可选，`outline`/`read` 用）
 └─ db/<version>.sqlite   # 从本地工作站上传的索引，服务以 mode=ro 打开
+```
+
+api 容器以非 root（uid 10001）运行（见 §5），数据根要能被该 uid 写，否则启动时建不了
+`control.sqlite`：
+
+```bash
+sudo install -d -o 10001 -g 10001 /opt/mc-librarian-data
 ```
 
 索引**不在节点上构建**（节点内存不够，实测反编译峰值 4.5 GiB）：在本地工作站跑
@@ -190,3 +226,22 @@ curl -s -X POST https://mc-librarian.belovedyaoo.top/v1/admin/versions \
 - tiktoken 词表已在**镜像内**预置（`TIKTOKEN_CACHE_DIR=/opt/mc-librarian/tiktoken-cache`），
   运行时不依赖 `openaipublic.blob.core.windows.net`；节点拉不到词表时才会退回「字符 ÷ 3.5」估算，
   那会让启动日志出现 `token 计数：字符估算 fallback（原因：…）` 并改变 `max_tokens` 的语义。
+
+## 5. 容器以非 root 运行
+
+两个镜像都显式切了非 root 用户，容器写入的文件不再归 root：
+
+| 镜像 | 用户 | 说明 |
+|---|---|---|
+| api | `app`（uid/gid 10001） | 数据根里的 `control.sqlite` / `db` / `src` / `cache` 都归这个 uid |
+| web | `caddy`（uid/gid 1000，镜像内自建） | 只提供静态文件与 `/api/*` 反代；`:80` 靠容器默认带的 `CAP_NET_BIND_SERVICE` 绑定 |
+
+落地要点：
+
+- 宿主数据根要能被 uid 10001 写（§2 / §3.2 的 `install -d -o 10001`）。数据根在仓库之外、
+  且是 bind mount：镜像里的 `chown` 会被挂载覆盖，只能在宿主上做。
+- api 镜像里预置了 `/data`（属主 `app`），不挂载数据根直接 `docker run` 时也能写。
+- web 的 `/data` / `/config` 是 **Caddy 自己的**存储目录（不是 mc-librarian 的数据根，那是 api 的），
+  已 `chown` 给 `caddy`；`auto_https off` + `admin off`，运行时不写证书、不做 autosave。
+- 两个镜像都不需要 root 能力：api 监听 8787（非特权端口），web 监听 80（Docker 默认给
+  `CAP_NET_BIND_SERVICE`，非 root 也能绑）。

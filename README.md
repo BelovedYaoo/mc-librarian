@@ -13,7 +13,7 @@ Minecraft 源码知识库与中文问答服务。
 apps/api          Python：FastAPI + JobRunner + 索引 CLI
 apps/web          React + Vite + MUI
 packages/         （计划中）生成的 API 客户端、精简版 UI 组件库
-deploy/           Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml
+deploy/           Dockerfile.api / Dockerfile.web / Caddyfile / compose.yaml（部署步骤见 deploy/README.md）
 docs/              openapi.yaml（契约）、01-api.md、00-overview.md
 scripts/          setup / dev / check / smoke（本地开发与校验入口）
 ```
@@ -26,6 +26,8 @@ scripts/          setup / dev / check / smoke（本地开发与校验入口）
   前端 `/setup`、`/login` 与带用户名/登出的受保护后台外壳。
 
 索引、检索、问答等能力见 `docs/00-overview.md` §8 里程碑与对应 issue。
+
+容器化部署（镜像 / compose / 节点侧步骤）见 [`deploy/README.md`](deploy/README.md)。
 
 ## 快速开始
 

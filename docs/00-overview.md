@@ -120,7 +120,7 @@ classes(id, file_id, fqn, simple, kind, superclass, interfaces, annotations, sta
 methods(id, class_id, name, signature, return_type, params, modifiers, annotations, start_line, end_line)
 fields(id, class_id, name, type, modifiers, annotations, start_line, end_line)
 refs(id, from_method_id, target_name, kind, line)   -- 启发式；行号 1-based 闭区间
-summaries(id, class_id, fqn, text_zh, keywords, content_hash, tokens, created_at)   -- 类级摘要（#7）
+summaries(id, class_id, fqn, text_zh, content_hash, tokens, created_at)   -- 类级摘要（#7）
 summaries_fts(fqn, text_zh)   -- FTS5（unicode61），存 jieba 预分词后的 text_zh
 ```
 

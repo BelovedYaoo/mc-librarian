@@ -21,6 +21,7 @@ from mc_librarian.api.v1.admin_versions import read_index_stats
 from mc_librarian.config import Settings, get_settings
 from mc_librarian.db import Database, transaction
 from mc_librarian.indexing.layout import index_path
+from mc_librarian.indexing.summarize import warmup_segmentation
 from mc_librarian.indexing.text import warmup_token_counting
 from mc_librarian.jobs import JobRunner, store
 from mc_librarian.problems import component_schema, install_exception_handlers
@@ -97,6 +98,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # token 口径预热：tiktoken 首次使用会联网拉 BPE 词表，生产节点拉不到时会阻塞到 HTTP 超时
     # 再静默退回常数估算。启动时预热一次并把口径写进 INFO 日志，让漂移可见。
     logger.info("%s", warmup_token_counting())
+
+    # jieba 词典预热：首次分词会同步加载词典（本机实测约 0.5 s），落在第一次摘要查询上就是
+    # 一次阻塞请求。与 token 口径一样，把「真的加载了」写进启动日志。
+    logger.info("%s", warmup_segmentation())
 
     # 一次性回填历史遗留的 `db_path`（NULL 行）：只在启动时跑，不建定时任务。
     # 回填失败（如 control 库 busy）不能拖垮启动：只记 error 日志，服务照常起来。

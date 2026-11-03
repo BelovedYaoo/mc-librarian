@@ -17,6 +17,16 @@ RUN apt-get update \
       ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
+# 非 root 运行（P2）：数据根里的 control.sqlite / db / src / cache 都归容器内 uid 所有，
+# 以 root 跑会让宿主上的这些文件全归 root，后续人工运维（上传索引、备份）都要 sudo。
+# uid/gid 固定成 10001，节点上的数据根按同一 uid 建（见 deploy/README.md §3.2）。
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --gid "${APP_GID}" app \
+ && useradd --uid "${APP_UID}" --gid "${APP_GID}" --home-dir /home/app --create-home \
+      --shell /usr/sbin/nologin app \
+ && install -d -o app -g app /data
+
 # 反编译 / remap 工具链。版本随镜像固定，运行时不下载（与 docs/00-overview.md §6 实测口径一致）。
 ARG VINEFLOWER_VERSION=1.12.0
 ARG SPECIALSOURCE_VERSION=1.11.5
@@ -53,6 +63,9 @@ ENV MC_LIBRARIAN_DATA_DIR=/data \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8787
+
+# 以 `app` 运行：镜像里已经预置了 /data（属主 app），实际宿主目录由 compose 的挂载覆盖。
+USER app
 
 # 走 `python -m mc_librarian`：监听地址与端口统一取自 Settings（`MC_LIBRARIAN_HOST` / `PORT`）。
 CMD ["python", "-m", "mc_librarian"]

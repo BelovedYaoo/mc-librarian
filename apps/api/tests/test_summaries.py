@@ -10,12 +10,14 @@ LLM 调用由 conftest 的 `fake_llm` fixture 换掉（不联网）；索引与�
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
+import jieba
 import pytest
 from fastapi.testclient import TestClient
 
@@ -40,6 +42,23 @@ WAIT_TIMEOUT_S = 10.0
 
 # 游戏机制词（规格 §1：摘要必须带上这些词，写成「X 是一个枚举类」就是失败）。
 MECHANIC_WORDS = ("刷怪", "生成", "掉落", "刻", "区块", "附魔", "红石")
+
+# 不合格摘要的典型形态（规格 §1 的三行格式）：每种形态各一条用例，断言该类的失败被记录、
+# 且不入库（`parse_batch_response` → `validate_summary`）。
+BAD_SUMMARIES: Final[dict[str, str]] = {
+    "行数不是 3": "刷怪上限：每区块生成预算\n关键成员：spawnInterval",
+    "第 2 行没有「机制」前缀": (
+        "刷怪上限：每区块生成预算\n实现方式：按刻调度\n关键成员：spawnInterval"
+    ),
+    "第 3 行没有「关键成员」前缀": (
+        "刷怪上限：每区块生成预算\n机制：按刻调度\n成员：spawnInterval"
+    ),
+    "没有中文": "Spawn budget: caps mob count per chunk\n机制：tick\n关键成员：spawnInterval",
+    "第 1 行太短": "刷怪\n机制：按刻调度\n关键成员：spawnInterval",
+    "第 1 行只是复述类名": (
+        "net.minecraft.world.Mob\n机制：按刻调度\n关键成员：spawnInterval"
+    ),
+}
 
 
 def silent(_level: str, _message: str) -> None:
@@ -200,6 +219,31 @@ def test_summary_is_three_lines_with_a_mechanic_word(
     assert mob.splitlines()[2].startswith("关键成员：")
 
 
+@pytest.mark.parametrize("shape", sorted(BAD_SUMMARIES))
+def test_malformed_summary_is_a_per_class_failure_and_is_not_stored(
+    shape: str, settings: Settings, fake_llm: Any, indexed: Path
+) -> None:
+    """格式不合格的摘要按单类失败处理：记失败原因、不入库、同批其余照常（规格 §1/§3）。"""
+    fake_llm.overrides = {"net.minecraft.world.Mob": BAD_SUMMARIES[shape]}
+
+    stats = run_summarize(settings, indexed)
+
+    assert stats.failed == 1, stats.failures
+    assert stats.generated == 5
+    assert any(
+        item.startswith("net.minecraft.world.Mob：摘要格式不合格") for item in stats.failures
+    ), stats.failures
+    assert "net.minecraft.world.Mob" not in read_summaries(indexed)
+    assert all(fqn != "net.minecraft.world.Mob" for fqn, _ in read_fts_rows(indexed))
+
+
+def test_valid_summary_passes_the_format_gate() -> None:
+    """合法三行摘要不被格式闸门拦住（否则就是闸门写得太紧）。"""
+    text = "刷怪上限：每区块生成预算\n机制：按 mob cap 与玩家距离调度\n关键成员：spawnInterval"
+
+    assert summarize.validate_summary(text, fqn="net.minecraft.world.Mob") is None
+
+
 def test_summaries_fts_stores_jieba_segmented_text(
     settings: Settings, fake_llm: Any, indexed: Path
 ) -> None:
@@ -220,6 +264,37 @@ def test_segment_keeps_two_char_words_together() -> None:
     tokens = summarize.segment("刷怪上限").split()
 
     assert "刷怪" in tokens
+
+
+def test_segment_does_not_reset_jieba_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`jieba.setLogLevel` 已移到模块导入时：`segment` 逐类调用，不再每次重设。"""
+    calls: list[Any] = []
+    monkeypatch.setattr(jieba, "setLogLevel", calls.append)
+
+    summarize.segment("刷怪上限")
+
+    assert calls == []
+
+
+def test_warmup_segmentation_loads_the_dictionary() -> None:
+    """启动预热把 jieba 词典加载掉，并返回可写进日志的描述（首次摘要查询不再阻塞）。"""
+    description = summarize.warmup_segmentation()
+
+    assert description.startswith("中文分词：jieba 词典已加载")
+    assert "0 个词" not in description
+
+
+def test_lifespan_logs_segmentation_warmup(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """jieba 词典预热与 token 口径一样出现在启动日志里。"""
+    with (
+        caplog.at_level(logging.INFO, logger="mc_librarian"),
+        TestClient(create_app(settings)),
+    ):
+        pass
+
+    assert "中文分词：jieba 词典已加载" in caplog.text
 
 
 def test_content_hash_changes_when_public_method_changes() -> None:
@@ -584,3 +659,47 @@ def test_write_summaries_is_idempotent_per_fqn(settings: Settings, indexed: Path
 
     assert list(summaries) == ["net.minecraft.world.Mob"]
     assert summaries["net.minecraft.world.Mob"].endswith("第二次\n机制：x\n关键成员：y")
+    assert len(read_fts_rows(indexed)) == 1, "FTS 行也只能留一行（旧行必须被删掉）"
+
+
+def test_insert_summary_deletes_the_fts_row_by_rowid(settings: Settings, indexed: Path) -> None:
+    """FTS 旧行按 `rowid` 精确定位：`WHERE fqn = ?` 在 FTS5 上是全表扫，5,000 个类时是 O(n²)。
+
+    `set_trace_callback` 拿到的就是实际执行的 SQL（参数已展开），所以这是对「按什么匹配」
+    的直接断言，而不是间接的耗时猜测。
+    """
+    # 先建表（`write_summaries` 的真实路径），再把 trace 回调挂上：只关心 FTS 同步那几句。
+    summarize.write_summaries(indexed, [])
+
+    connection = sqlite3.connect(indexed)
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+
+    try:
+        summarize._insert_summary(
+            connection,
+            class_id=_class_id(indexed, "net.minecraft.world.Mob"),
+            fqn="net.minecraft.world.Mob",
+            text_zh="刷怪上限：每区块生成预算\n机制：按 mob cap 调度\n关键成员：spawnInterval",
+            content_hash="h",
+            tokens=1,
+            created_at="t",
+        )
+        connection.commit()
+        rows = connection.execute(
+            "SELECT s.id AS id, f.rowid AS rowid FROM summaries s"
+            " JOIN summaries_fts f ON f.fqn = s.fqn"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    fts_statements = [sql for sql in statements if "summaries_fts" in sql]
+    deletes = [sql for sql in fts_statements if sql.startswith("DELETE")]
+    inserts = [sql for sql in fts_statements if sql.startswith("INSERT")]
+
+    assert len(deletes) == 1, fts_statements
+    assert "rowid" in deletes[0] and "fqn" not in deletes[0], deletes[0]
+    assert len(inserts) == 1 and "rowid" in inserts[0], inserts
+    # `summaries.id` 与 FTS 行的 `rowid` 对齐：按 rowid 删才删得准。
+    assert len(rows) == 1
+    assert rows[0][0] == rows[0][1]

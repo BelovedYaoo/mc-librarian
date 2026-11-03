@@ -25,4 +25,15 @@ FROM caddy:2.11-alpine
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
 COPY --from=build /src/apps/web/dist /srv
 
+# 非 root 运行（P2）：`caddy:2.11-alpine` 里没有现成的非 root 用户（官方镜像默认以 root 跑），
+# 这里自建一个固定 uid 的 `caddy` 用户。站点只监听 :80、`auto_https off`，不写证书；
+# 容器默认带 `CAP_NET_BIND_SERVICE`，非 root 也能绑 :80。
+# `/data` / `/config` 是 Caddy 自己的存储目录（不是 mc-librarian 的数据根，那是 api 的），
+# 交给 caddy 用户。
+RUN addgroup -S -g 1000 caddy \
+ && adduser -S -u 1000 -G caddy -H -s /sbin/nologin caddy \
+ && chown -R caddy:caddy /data /config
+
+USER caddy
+
 EXPOSE 80

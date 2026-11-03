@@ -3,8 +3,12 @@
 # 本地验证（非默认端口，避免与并行车道/本机服务冲突）：
 #   docker network create deploy-net          # 首次；生产节点上已存在
 #   MC_LIBRARIAN_ENV=dev MC_LIBRARIAN_COOKIE_SECURE=false \
-#   MC_LIBRARIAN_DATA_DIR=../mc-librarian-data \
+#   MC_LIBRARIAN_DATA_DIR=../../mc-librarian-data \
 #     docker compose -f deploy/compose.yaml up -d --build
+#
+# 注意：挂载源这类相对路径按**本文件所在目录**（deploy/）解析，不是按 shell 的工作目录；
+# 所以仓库根的同级数据根在这里写成 ../../mc-librarian-data。写成 ../mc-librarian-data
+# 会落到仓库内的 mc-librarian-data/（违反 D9，resolve_data_dir 会直接拒绝，容器启动即失败）。
 #
 # 生产（节点 47.122.113.116）：默认值即生产口径，直接
 #   docker compose -f deploy/compose.yaml up -d
@@ -31,6 +35,7 @@ services:
       MC_LIBRARIAN_INDEX_ENABLED: ${MC_LIBRARIAN_INDEX_ENABLED:-false}
     volumes:
       # 数据根：control.sqlite / db / src / cache（docs/00-overview.md §5）。
+      # 相对路径的基准是本文件所在目录（deploy/），不是 shell 的工作目录；生产上给绝对路径。
       - ${MC_LIBRARIAN_DATA_DIR:-../../mc-librarian-data}:/data
     ports:
       # 只绑回环：对外入口是网关，这里留给本地验证与节点上排障。

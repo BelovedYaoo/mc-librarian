@@ -7,8 +7,10 @@
 3. 剩下的按 **package** 分批（每批 `summary_batch_size` 个，建议 30–50），并发
    `summary_concurrency`（asyncio 信号量）调用 LLM，要求返回 JSON `{"<fqn>": "<三行摘要>"}`；
 4. 单类失败只记该类的失败原因，同批其余类照常入库；阶段结束时若仍有失败，由调用方
-   （`jobs.runner`）把任务标成 `failed`，但**已生成的摘要保留**；
+   （`jobs.runner`）把任务标成 `failed`，但**已生成的摘要保留**。摘要还要过 `validate_summary`
+   的三行格式闸门（规格 §1）：不合格的按单类失败处理，不进库（`parse_batch_response`）；
 5. 入库前用 `jieba` 把 `text_zh` 切成空格分隔的词写进 `summaries_fts`（FTS5，`unicode61`）。
+   FTS 行的 `rowid` 钉成 `summaries.id`：重写时按 `rowid` 删旧行，避开 FTS5 上的全表扫。
 
 **为什么预分词**：`trigram` 对两字词（「刷怪」）不友好，而 `unicode61` 又不切中文，两者单独用
 都会漏掉两字词；所以入库前 jieba 切好、查询时对 query 做同样切分。
@@ -41,8 +43,22 @@ from mc_librarian.schemas import LogLevel
 
 logger = logging.getLogger("mc_librarian.indexing.summarize")
 
+# jieba 首次使用会把「Building prefix dict…」之类的日志打到 stderr：在模块导入时设一次级别，
+# 而不是每次分词都设（`segment` 在摘要入库路径上被逐类调用）。
+jieba.setLogLevel(logging.WARNING)
+
 # 摘要固定 3 行（规格 §1）。
 SUMMARY_LINE_COUNT: Final = 3
+# 第 2/3 行的固定前缀（规格 §1）；不是这两个前缀就是没按格式写。
+MECHANIC_PREFIX: Final = "机制"
+MEMBERS_PREFIX: Final = "关键成员"
+# 第 1 行（职责）的最短长度：比这短的多半是「Mob」这类复述类名的垃圾。
+SUMMARY_MIN_HEAD_CHARS: Final = 8
+# 摘要必须用中文写：去掉「机制」「关键成员」两个固定标签后仍要有汉字，否则就是把类名 / 代码
+# 复述一遍（标签本身是中文，不先摘掉的话这项检查永远为真）。
+CJK_CHAR: Final = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+# FTS5 的 `unicode61` 分词器会把纯标点切成零个 token（`\w` 在 `str` 上含汉字）。
+FTS_WORD_CHAR: Final = re.compile(r"\w")
 # 摘要长度上限（字符）：超长响应多半是模型跑偏，截断入库。
 SUMMARY_MAX_CHARS: Final = 2000
 # 失败原因里最多列几个类，避免一条日志刷屏。
@@ -66,7 +82,6 @@ SUMMARIES_DDL: Final[tuple[str, ...]] = (
       class_id     INTEGER REFERENCES classes (id),
       fqn          TEXT NOT NULL UNIQUE,
       text_zh      TEXT NOT NULL,
-      keywords     TEXT NOT NULL DEFAULT '',
       content_hash TEXT NOT NULL,
       tokens       INTEGER NOT NULL DEFAULT 0,
       created_at   TEXT NOT NULL
@@ -169,10 +184,41 @@ def compute_content_hash(
 
 
 def segment(text: str) -> str:
-    """jieba 预分词：切成空格分隔的词，供 FTS5 的 `unicode61` 分词器逐词匹配。"""
-    jieba.setLogLevel(logging.WARNING)
+    """jieba 预分词：切成空格分隔的词，供 FTS5 的 `unicode61` 分词器逐词匹配。
 
+    这是**入库**口径（标点留在串里由 `unicode61` 自己丢掉）；查询侧要拼 `MATCH` 串，
+    用 `fts_match_query`。
+    """
     return " ".join(jieba.cut(text))
+
+
+def fts_match_query(text: str) -> str:
+    """把 query 的分词结果拼成 FTS5 的 `MATCH` 串：每个词加引号，丢掉零 token 的碎片。
+
+    jieba 会把标点单独切出来（「刷怪，掉落」→「刷怪」「，」「掉落」），而 `unicode61` 把纯标点
+    切成零个 token：这类碎片留在裸串里只会让整个 `MATCH` 报语法错（该路静默返回空）。
+    `"`、`*`、`-` 同理，加引号后按字面处理（串内的 `"` 按 FTS5 的写法翻倍转义）。
+    所有词都是标点时返回空串，调用方据此跳过这一路，不去执行注定报错的 SQL。
+    """
+    tokens = [
+        token.replace('"', '""') for token in jieba.cut(text) if FTS_WORD_CHAR.search(token)
+    ]
+
+    return " ".join(f'"{token}"' for token in tokens)
+
+
+def warmup_segmentation() -> str:
+    """启动时预热 jieba 词典，返回一句话描述（供 lifespan 记 INFO 日志）。
+
+    `jieba.cut` 首次调用会同步加载词典（本机实测约 0.5 s，49.8 万词条）：不预热的话这 0.5 s
+    落在第一次摘要查询上，就是一次无谓的阻塞请求。预热与 `warmup_token_counting` 同口径——
+    把「词典真的加载了」写进启动日志，而不是等第一次查询才暴露。
+
+    词典随 jieba 包一起安装（不联网），加载失败说明安装坏了：这里不兜底，让启动直接失败。
+    """
+    jieba.initialize()
+
+    return f"中文分词：jieba 词典已加载（{len(jieba.dt.FREQ)} 个词）"
 
 
 # ----------------------------------------------------------------------
@@ -387,13 +433,45 @@ def build_prompt(digests: Sequence[ClassDigest]) -> str:
 _CODE_FENCE: Final = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 
 
+def validate_summary(text: str, *, fqn: str) -> str | None:
+    """校验一条摘要是否满足规格 §1 的三行格式；合格返回 `None`，不合格返回原因。
+
+    只挡最明显的垃圾（行数 / 第 2、3 行前缀 / 是不是中文 / 第 1 行是不是在复述类名），
+    不做语义判断：「有没有游戏机制词」无法可靠校验，那是 prompt 的责任。
+    """
+    lines = [line.strip() for line in text.strip().splitlines()]
+
+    if len(lines) != SUMMARY_LINE_COUNT:
+        return f"必须是 {SUMMARY_LINE_COUNT} 行，实际 {len(lines)} 行"
+
+    if not lines[1].startswith(MECHANIC_PREFIX):
+        return f"第 2 行必须以「{MECHANIC_PREFIX}」开头"
+
+    if not lines[2].startswith(MEMBERS_PREFIX):
+        return f"第 3 行必须以「{MEMBERS_PREFIX}」开头"
+
+    if CJK_CHAR.search(text.replace(MECHANIC_PREFIX, "").replace(MEMBERS_PREFIX, "")) is None:
+        return "没有中文（必须用中文写，不是复述类名）"
+
+    head = lines[0].rstrip("：:").strip()
+
+    if len(head) < SUMMARY_MIN_HEAD_CHARS:
+        return f"第 1 行太短（少于 {SUMMARY_MIN_HEAD_CHARS} 个字符）"
+
+    if head in (fqn, fqn.rsplit(".", 1)[-1]):
+        return "第 1 行只是复述类名"
+
+    return None
+
+
 def parse_batch_response(
     raw: str, digests: Sequence[ClassDigest]
 ) -> tuple[dict[str, str], dict[str, str]]:
     """解析一批的响应 → (fqn → 摘要, fqn → 失败原因)。
 
     整体不是合法 JSON（或不是对象）时，**该批全部按单类失败**；JSON 合法但缺某个 fqn、
-    或值不是非空字符串时，只有那一个类失败（规格 §3）。
+    值不是非空字符串、或值不满足三行格式（`validate_summary`）时，只有那一个类失败
+    （规格 §1/§3）——不合格的摘要不进库，走调用方既有的失败/重试路径。
     """
     text = _CODE_FENCE.sub("", raw.strip())
 
@@ -415,6 +493,12 @@ def parse_batch_response(
 
         if not isinstance(value, str) or not value.strip():
             failures[digest.fqn] = "响应缺少该类的摘要"
+            continue
+
+        problem = validate_summary(value, fqn=digest.fqn)
+
+        if problem is not None:
+            failures[digest.fqn] = f"摘要格式不合格：{problem}"
             continue
 
         summaries[digest.fqn] = value.strip()[:SUMMARY_MAX_CHARS]
@@ -695,21 +779,31 @@ def _insert_summary(
     tokens: int,
     created_at: str,
 ) -> None:
-    """写入一行摘要并同步 FTS 表（`summaries.fqn` 是 UNIQUE，重写即覆盖）。"""
-    connection.execute(
+    """写入一行摘要并同步 FTS 表（`summaries.fqn` 是 UNIQUE，重写即覆盖）。
+
+    FTS 行的 `rowid` 显式钉成 `summaries.id`（`RETURNING id` 拿到），删旧行时就能按 `rowid`
+    精确定位：`DELETE ... WHERE fqn = ?` 在 FTS5 上是全表扫，5,000 个类时是 O(n²)。
+    """
+    row = connection.execute(
         "INSERT INTO summaries"
-        " (class_id, fqn, text_zh, keywords, content_hash, tokens, created_at)"
-        " VALUES (?, ?, ?, '', ?, ?, ?)"
+        " (class_id, fqn, text_zh, content_hash, tokens, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(fqn) DO UPDATE SET"
         " class_id = excluded.class_id, text_zh = excluded.text_zh,"
         " content_hash = excluded.content_hash, tokens = excluded.tokens,"
-        " created_at = excluded.created_at",
+        " created_at = excluded.created_at"
+        " RETURNING id",
         (class_id, fqn, text_zh, content_hash, tokens, created_at),
-    )
-    connection.execute("DELETE FROM summaries_fts WHERE fqn = ?", (fqn,))
+    ).fetchone()
+
+    if row is None:  # `RETURNING` 必定回一行；真没有说明库状态不对，别静默写坏 FTS
+        raise SummaryError(f"写入摘要失败（没有返回行）：{fqn}")
+
+    summary_id = int(row[0])
+    connection.execute("DELETE FROM summaries_fts WHERE rowid = ?", (summary_id,))
     connection.execute(
-        "INSERT INTO summaries_fts (fqn, text_zh) VALUES (?, ?)",
-        (fqn, segment(text_zh)),
+        "INSERT INTO summaries_fts (rowid, fqn, text_zh) VALUES (?, ?, ?)",
+        (summary_id, fqn, segment(text_zh)),
     )
 
 

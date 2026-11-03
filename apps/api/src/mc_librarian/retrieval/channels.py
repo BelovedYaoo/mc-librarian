@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from mc_librarian.indexing import query
-from mc_librarian.indexing.summarize import segment
+from mc_librarian.indexing.summarize import fts_match_query
 from mc_librarian.schemas import HitType, SymbolKind
 
 logger = logging.getLogger("mc_librarian.retrieval")
@@ -140,12 +140,19 @@ def summary_candidates(
 
     表不存在（老索引、#7 未跑）时返回空、不报错。query 与入库时一样先过 jieba 分词：
     FTS5 的 `unicode61` 不切中文，不预分词的话两字词（「刷怪」）永远命中不了（规格 §6）。
-    整路包 `try/except sqlite3.Error`：表不是 FTS5、或 query 分词后仍含 FTS 语法
-    （`"`、`*`、`-`、`AND`……）时 SQL 会抛 `OperationalError`，那是「这一路没结果」，
-    不是请求失败（规格 §8）。
+    分词结果由 `fts_match_query` 拼成 `"词1" "词2"`：标点碎片被丢掉、每个词加引号，
+    于是「刷怪，掉落」这种带中文标点的 query 照常命中，`"`/`*`/`-` 也不会把整路打成空。
+    整路包 `try/except sqlite3.Error`：表不是 FTS5 时 SQL 会抛 `OperationalError`，那是
+    「这一路没结果」，不是请求失败（规格 §8）。
     """
     try:
         if not query.has_table(connection, "summaries_fts"):
+            return []
+
+        match = fts_match_query(text)
+
+        if not match:
+            # query 全是标点：分词结果在 FTS5 里是零 token，这一路没有可匹配的词。
             return []
 
         sql = (
@@ -157,7 +164,7 @@ def summary_candidates(
             " JOIN files f ON f.id = c.file_id"
             " WHERE summaries_fts MATCH ?"
         )
-        params: list[object] = [segment(text)]
+        params: list[object] = [match]
 
         if path_prefix:
             sql += " AND substr(f.path, 1, length(?)) = ?"
@@ -169,10 +176,10 @@ def summary_candidates(
         # `fetchall()` 放在 try 里：游标是惰性的，迭代期间才真正执行 SQL。
         rows = connection.execute(sql, params).fetchall()
     except sqlite3.Error:
-        # 规格明确的正常降级（summaries_fts 不是 FTS5、query 含 FTS 语法）：用户随手输一个
-        # `-` 或 `"` 都会走到这里，打完整 traceback 的噪声大于信息量，只留 warn 与原因。
+        # 规格明确的正常降级（summaries_fts 不是 FTS5 表）：表被外部改过时才会走到这里，
+        # 打完整 traceback 的噪声大于信息量，只留 warn 与原因。
         logger.warning(
-            "摘要通道查询失败（summaries_fts 不是 FTS5 表，或 query 含 FTS 语法），该路返回空"
+            "摘要通道查询失败（summaries_fts 不是 FTS5 表），该路返回空"
         )
         return []
 
