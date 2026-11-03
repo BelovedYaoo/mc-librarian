@@ -83,14 +83,18 @@ summaries(fqn, text_zh, keywords, tokens)        -- FTS5, jieba 预分词
 | D2 | 核心是 HTTP API，MCP 只是适配器 | 已定 | 见 `01-api.md` §4 |
 | D3 | 一个版本一个索引，`version` 显式传 | 已定 | 无状态 |
 | D4 | 摘要行 = 中文 + 英文标识符混合 | 已定 | 替代跨语言 embedding |
-| D5 | 版本参数是否支持跨版本联合检索 | **待定** | 建议 v1 不支持 |
+| D5 | 版本参数是否支持跨版本联合检索 | 已定 | **仅单版本**，不提供 `latest` 别名 |
 | D6 | `/v1/ask` 是否进 v1 | 已定 | **必选**——前端问答页依赖它，且需流式 |
 | D7 | 鉴权形态 | 已定（细节待定） | 公网暴露 + 单 Bearer token |
-| D8 | 实现栈 | **待定** | 建议 Python 3.13 + FastAPI |
-| D9 | 索引产物与数据目录 | **待定** | 引入前端后需重估 |
+| D8 | 实现栈 | 已定 | Python 3.13 + FastAPI（后端） |
+| D9 | 索引产物与数据目录 | 已定 | 数据根 `mc-librarian-data/`：`src/ db/ jobs/ logs/`；服务只读索引 |
 | D10 | 项目名 | 已定 | **mc-librarian** |
 | D11 | 索引范围 | 已定 | `.java` + `data/`，排除 `assets/` |
-| D12 | 产品形态 | 已定 | 前后端分离，含管理后台；控制面待设计 |
+| D12 | 产品形态 | 已定 | monorepo，前后端完整集（管理后台 + 问答 + 检索调试台 + 任务队列 + 设置） |
+| D13 | 任务系统 | 已定 | 独立 worker 进程 + SQLite 控制面，并发 1 |
+| D14 | 写入模型 | 已定 | API 只写控制面 DB，`POST /admin/versions/{v}/index` → 202 + job_id |
+| D15 | 部署 | 已定（形态待定） | 公网 + 自有域名，Caddy 自动 TLS |
+| D16 | 前端栈 | **待定** | monorepo 已定，框架未定 |
 
 ## 7. 里程碑
 
