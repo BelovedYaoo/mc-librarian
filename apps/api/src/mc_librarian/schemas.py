@@ -14,7 +14,17 @@ from pydantic import BaseModel, Field
 
 Role = Literal["admin", "user"]
 
-__all__ = ["LoginRequest", "Role", "SetupRequest", "SetupStatus", "User"]
+__all__ = [
+    "LoginRequest",
+    "Role",
+    "SetupRequest",
+    "SetupStatus",
+    "TokenCreateRequest",
+    "TokenCreated",
+    "TokenInfo",
+    "TokenList",
+    "User",
+]
 
 
 class User(BaseModel):
@@ -43,3 +53,33 @@ class SetupRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str = Field(min_length=8, max_length=128)
+
+
+class TokenInfo(BaseModel):
+    """契约 `components.schemas.TokenInfo`：**不含** `token_hash`，列表与创建响应共用。"""
+
+    id: str
+    name: str
+    prefix: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class TokenCreateRequest(BaseModel):
+    name: str = Field(max_length=64)
+    expires_in_days: int = Field(default=365, ge=1, le=3650)
+
+
+class TokenCreated(BaseModel):
+    """`POST /v1/auth/tokens` 的 201：明文 `token` 仅此一次返回。"""
+
+    token: str
+    info: TokenInfo
+
+
+class TokenList(BaseModel):
+    """`GET /v1/auth/tokens` 的 200。"""
+
+    tokens: list[TokenInfo]

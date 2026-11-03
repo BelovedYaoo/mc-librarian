@@ -44,7 +44,8 @@ class Migration:
     statements: tuple[str, ...]
 
 
-# v1：首个 schema——账号与会话。#9 加 invites/pats、#4 加 jobs 时往后追加即可。
+# v1：首个 schema——账号与会话；v2：个人访问令牌（pats）。
+# 后续 ticket 加表（invites/jobs）时在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
         version=1,
@@ -75,6 +76,26 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             """,
             "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id)",
             "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)",
+        ),
+    ),
+    Migration(
+        version=2,
+        statements=(
+            # 只存明文 token 的 sha256；prefix 是明文前 8 位（辨认用，无法还原）。
+            """
+            CREATE TABLE IF NOT EXISTS pats (
+              id           TEXT PRIMARY KEY,
+              user_id      TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+              name         TEXT NOT NULL,
+              token_hash   TEXT NOT NULL UNIQUE,
+              prefix       TEXT NOT NULL,
+              created_at   TEXT NOT NULL,
+              expires_at   TEXT NOT NULL,
+              last_used_at TEXT,
+              revoked_at   TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_pats_user_id ON pats (user_id)",
         ),
     ),
 )

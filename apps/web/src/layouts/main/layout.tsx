@@ -46,6 +46,19 @@ export function MainLayout({ children }: MainLayoutProps) {
 
           <Box sx={{ flex: '1 1 auto' }} />
 
+          <Button size="small" color="inherit" onClick={() => navigate(paths.home)} sx={{ mr: 1 }}>
+            首页
+          </Button>
+
+          <Button
+            size="small"
+            color="inherit"
+            onClick={() => navigate(paths.settings)}
+            sx={{ mr: 2 }}
+          >
+            访问令牌
+          </Button>
+
           {user && (
             <>
               <Typography variant="body2" sx={{ color: 'text.secondary', mr: 1 }}>

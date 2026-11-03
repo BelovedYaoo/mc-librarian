@@ -5,23 +5,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 import sqlite3
 import uuid
 from typing import Final
 
+from mc_librarian.auth.hashing import hash_token as hash_token
 from mc_librarian.auth.users import row_to_user
 from mc_librarian.db import utc_after, utc_now
 from mc_librarian.schemas import User
 
 # 32 字节随机数 → 43 字符的 urlsafe base64，足够抗暴力猜测。
 TOKEN_BYTES: Final = 32
-
-
-def hash_token(raw_token: str) -> str:
-    """cookie 里的明文 token 落库前先做 sha256（hex）。"""
-    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
 def create(

@@ -13,7 +13,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
-from mc_librarian.auth import sessions
+from mc_librarian.auth import sessions, tokens
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import Database
 from mc_librarian.problems import ProblemException
@@ -53,10 +53,24 @@ def get_current_user(
     request: Request,
     conn: DbConn,
 ) -> User:
-    """从 cookie 解析当前用户；缺失/过期/已登出/被禁用统一 401。
+    """解析当前用户：优先 `Authorization: Bearer mcl_...`（脚本），其次 session cookie。
 
-    刻意写成同步 `def`：里面是同步 sqlite 查询，FastAPI 会把它也放进线程池。
+    缺失/过期/已登出/已吊销/被禁用统一 401。刻意写成同步 `def`：里面是同步 sqlite
+    查询，FastAPI 会把它也放进线程池。
     """
+    authorization = request.headers.get("authorization")
+
+    if authorization is not None:
+        scheme, _, credentials = authorization.partition(" ")
+
+        if scheme.lower() == "bearer" and credentials.startswith(tokens.TOKEN_PREFIX):
+            user = tokens.resolve(conn, credentials)
+
+            if user is None:
+                raise ProblemException(401, "未认证", "访问令牌无效、已过期或已吊销")
+
+            return user
+
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
 
     if not raw_token:
