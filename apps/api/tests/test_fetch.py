@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from mc_librarian.config import Settings
@@ -30,7 +31,6 @@ from mc_librarian.fetch.pipeline import (
     prune_empty_dirs,
     read_checkpoint,
     run_fetch,
-    source_dir_for,
 )
 from mc_librarian.fetch.tools import (
     HttpDownloader,
@@ -38,8 +38,11 @@ from mc_librarian.fetch.tools import (
     SpecialSourceRemapper,
     VineflowerDecompiler,
 )
+from mc_librarian.indexing.layout import source_root
+from mc_librarian.jobs import runner as runner_module
 from mc_librarian.jobs import store
-from mc_librarian.jobs.runner import JobRunner, stages_for
+from mc_librarian.jobs.runner import JobContext, JobRunner, StageError, run_stage, stages_for
+from mc_librarian.main import create_app
 
 TERMINAL = {"succeeded", "failed", "canceled"}
 WAIT_TIMEOUT_S = 10.0
@@ -203,13 +206,18 @@ def test_run_fetch_without_mappings_decompiles_directly(tmp_path: Path) -> None:
     assert [url for url, _ in downloader.calls] == [MODERN.client_url]
     assert decompiler.calls[0][0] == cache / "client.jar"
     # 只数 `.java`，`META-INF/MANIFEST.MF` 不计。
-    assert result.files == 2
-    assert result.source_size_bytes > 0
+    assert result.java_files == 2
+    assert result.java_bytes > 0
     assert result.checkpoint["obfuscated"] is False
     assert result.checkpoint["stages"] == ["download", "decompile"]
     assert result.checkpoint["jar_path"] == str(cache / "client.jar")
     assert result.checkpoint["source_dir"] == str(source)
     assert result.checkpoint["mappings_path"] is None
+    # `decompile` 用 `java_files`/`java_bytes`，不与 `parse` 的 `files`/`source_size_bytes` 撞名。
+    assert result.checkpoint["java_files"] == 2
+    assert result.checkpoint["java_bytes"] > 0
+    assert "files" not in result.checkpoint
+    assert "source_size_bytes" not in result.checkpoint
     assert read_checkpoint(cache / CHECKPOINT_FILE_NAME) == result.checkpoint
     assert any("无官方 mappings" in line for line in logs)
     # Vineflower 会建出空的 `assets/`，应被清理。
@@ -313,7 +321,7 @@ def test_run_fetch_resumes_from_checkpoint(tmp_path: Path) -> None:
     assert manifest.calls == ["26.3"]
     assert len(downloader.calls) == 1
     assert len(decompiler.calls) == 1
-    assert again.files == 2
+    assert again.java_files == 2
 
 
 def test_run_fetch_resumes_after_partial_run(tmp_path: Path) -> None:
@@ -494,10 +502,32 @@ def test_cli_reports_fetch_error(
 
 def test_stages_for_selects_sequence_by_source_dir() -> None:
     assert stages_for({"source_dir": "/tmp/x"}) == ("parse", "summarize", "finalize")
-    assert stages_for({}) == ("download", "decompile")
+    # 没给源目录：从官方 jar 起跑完整五段，不需要人工衔接三步。
+    assert stages_for({}) == ("download", "decompile", "parse", "summarize", "finalize")
+    assert stages_for({"source_dir": ""}) == (
+        "download",
+        "decompile",
+        "parse",
+        "summarize",
+        "finalize",
+    )
 
 
-def test_runner_runs_fetch_stages_without_source_dir(settings: Settings) -> None:
+def test_run_stage_rejects_unknown_stage(settings: Settings) -> None:
+    """未知阶段直接报错，而不是静默返回空产物（新增阶段漏改时不会产出残缺索引）。"""
+    context = JobContext(
+        version="26.3",
+        options={},
+        data_dir=settings.data_dir,
+        log=lambda level, message: None,
+    )
+
+    with pytest.raises(StageError, match="未知阶段"):
+        run_stage("bogus", context)
+
+
+def test_runner_runs_full_pipeline_without_source_dir(settings: Settings) -> None:
+    """没给 source_dir：一次任务从官方 jar 跑完五段，产出可检索索引并登记版本。"""
     database = Database.for_data_dir(settings.data_dir)
     database.initialize()
 
@@ -521,7 +551,7 @@ def test_runner_runs_fetch_stages_without_source_dir(settings: Settings) -> None
 
                 await asyncio.sleep(0.02)
 
-            raise AssertionError("fetch 任务未在超时内结束")
+            raise AssertionError("五段任务未在超时内结束")
         finally:
             await runner.stop()
 
@@ -534,13 +564,55 @@ def test_runner_runs_fetch_stages_without_source_dir(settings: Settings) -> None
 
     assert finished is not None
     assert finished.status == "succeeded"
-    assert finished.stage == "decompile"
+    assert finished.stage == "finalize"
     assert row is not None
 
     checkpoint = store.checkpoint_of(row)
-    assert checkpoint["stages"] == ["download", "decompile"]
-    assert checkpoint["source_dir"] == str(source_dir_for(settings.data_dir, "26.3"))
+    assert checkpoint["stages"] == ["download", "decompile", "parse", "summarize", "finalize"]
+    assert checkpoint["source_dir"] == str(source_root(settings.data_dir, "26.3"))
+    # decompile 的 .java 计数与 parse 的索引文件数各写各的，不互相覆盖。
+    assert checkpoint["java_files"] == 2
     assert checkpoint["files"] == 2
     assert len(decompiler.calls) == 1
-    # 纯 download/decompile 的任务产出源码树，不登记版本（登记要等 #13 接上 parse）。
-    assert version is None
+    # 跑过 parse：`db/<version>.sqlite` 产出且版本已登记。
+    assert (settings.data_dir / "db" / "26.3.sqlite").is_file()
+    assert version is not None
+    assert version.files == 2
+
+
+def test_create_job_without_options_runs_full_pipeline(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接口层放开 `options`：省略 options 的 26.3 任务一次跑完五段并登记版本。
+
+    用假工具链替换 `JobRunner` 的 `default_tools`，避免真去联网下载与反编译。
+    """
+    tools, *_ = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+
+    with TestClient(create_app(settings)) as client:
+        setup = client.post(
+            "/v1/setup", json={"username": "admin", "password": "admin-password-1"}
+        )
+        assert setup.status_code == 201, setup.text
+
+        created = client.post("/v1/admin/jobs", json={"kind": "index", "version": "26.3"})
+        assert created.status_code == 202, created.text
+        job_id = created.json()["id"]
+
+        deadline = time.monotonic() + WAIT_TIMEOUT_S
+
+        while time.monotonic() < deadline:
+            job = client.get(f"/v1/admin/jobs/{job_id}").json()
+
+            if job["status"] in TERMINAL:
+                break
+
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"五段任务未在超时内结束：{job}")
+
+        assert job["status"] == "succeeded"
+        assert job["stage"] == "finalize"
+        versions = client.get("/v1/versions").json()["versions"]
+        assert [item["version"] for item in versions] == ["26.3"]

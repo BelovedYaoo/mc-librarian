@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import gc
+import random
 import shutil
 import sqlite3
 from pathlib import Path
@@ -228,6 +230,52 @@ def test_parse_imports_reads_import_declarations() -> None:
         "static java.lang.Math.max",
         "java.util.*",
     ]
+
+
+def _synthetic_java(index: int, method_count: int, statements: int) -> str:
+    """生成一份形状可变的合成 Java；树的形状/大小差异才逼得出绑定层的内存问题。"""
+    lines = [f"package synth.p{index % 11};", "import java.util.List;", f"public class V{index} {{"]
+
+    for method in range(method_count):
+        lines.append(f"  public int m{method}(int a) {{")
+
+        for statement in range(statements):
+            lines.append(f"    int x{statement} = {statement} * {index} + helper({statement});")
+
+        lines.append("    return a + x0;")
+        lines.append("  }")
+
+    lines.append("  private int helper(int v) { return v + 1; }")
+    lines.append("}")
+
+    return "\n".join(lines) + "\n"
+
+
+def test_parse_java_walks_many_synthetic_files_without_corruption() -> None:
+    """回归网：解析大量合成源码时不得出现内存损坏（进程必须活着且结果正确）。
+
+    防的是「遍历 `Node` 时不持有 `Tree` 引用」这类不安全写法：小 fixture 触发不了，
+    真实大源码树（或这里的合成大树）才会暴露为随机段错误 / 脏数据。**不**覆盖
+    tree-sitter 0.26.0 绑定自身的堆损坏——那由 `pyproject.toml` 的 `<0.26` 钉版挡住
+    （见 issue #22），所以本测试全绿不代表 0.26 没问题。
+    """
+    rng = random.Random(20261103)
+    cases = [(index, rng.randint(1, 12), rng.randint(1, 300)) for index in range(400)]
+
+    for position, (index, method_count, statements) in enumerate(cases):
+        parsed = java.parse_java(
+            _synthetic_java(index, method_count, statements), path=f"V{index}.java"
+        )
+
+        assert parsed.package == f"synth.p{index % 11}"
+        assert [item.fqn for item in parsed.classes] == [f"synth.p{index % 11}.V{index}"]
+        # 每个方法 + `helper`。
+        assert len(parsed.classes[0].methods) == method_count + 1
+        # `parse_imports` 是同一个遍历模式，一并覆盖。
+        assert java.parse_imports("import java.util.List;\n") == ["java.util.List"]
+
+        if position % 20 == 0:
+            gc.collect()
 
 
 # ----------------------------------------------------------------------

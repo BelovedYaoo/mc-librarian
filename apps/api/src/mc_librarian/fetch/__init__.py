@@ -28,7 +28,6 @@ from mc_librarian.fetch.pipeline import (
     read_checkpoint,
     run_fetch,
     run_fetch_stage,
-    source_dir_for,
     write_checkpoint,
 )
 from mc_librarian.fetch.tools import (
@@ -68,6 +67,5 @@ __all__ = [
     "read_checkpoint",
     "run_fetch",
     "run_fetch_stage",
-    "source_dir_for",
     "write_checkpoint",
 ]

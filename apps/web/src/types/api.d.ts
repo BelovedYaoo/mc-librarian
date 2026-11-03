@@ -402,9 +402,9 @@ export interface paths {
         /**
          * 创建索引任务
          * @description 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
-         *     只接受带 `options.source_dir` 的任务，阶段序列 `parse → summarize → finalize`；
-         *     缺 `options.source_dir` 返回 422（不带源目录的 `download`/`decompile` 两段由 #21 实现，
-         *     `#13` 才会放开可选，见 `JobCreate`）。
+         *     阶段序列由 `options.source_dir` 决定：给了源目录走 `parse → summarize → finalize`；
+         *     省略 `options` 则从官方 jar 起跑完整五段 `download → decompile → parse → summarize → finalize`；
+         *     给了 `options` 但 `source_dir` 为空返回 422。见 `JobCreate`。
          */
         post: operations["createJob"];
         delete?: never;
@@ -786,8 +786,9 @@ export interface components {
             status: "queued" | "running" | "succeeded" | "failed" | "canceled";
             /**
              * @description 任务当前阶段。阶段序列由 `options.source_dir` 决定：给了源目录走
-             *     `parse → summarize → finalize`（#4），否则先走 `download → decompile`（#21，产物是源码树）。
-             *     `#13` 会把两者接成完整五段。
+             *     `parse → summarize → finalize`（#4），否则从官方 jar 起跑完整五段
+             *     `download → decompile → parse → summarize → finalize`（#21 的下载与反编译是前两段，
+             *     产物就是 `parse` 消费的源码树）。
              * @enum {string}
              */
             stage?: "download" | "decompile" | "parse" | "summarize" | "finalize";
@@ -810,15 +811,16 @@ export interface components {
             version: string;
             options?: {
                 /**
-                 * @description 源码根目录；相对路径按数据根解析。**必填**：
+                 * @description 源码根目录；相对路径按数据根解析。**可省略**：
                  *
-                 *     - 有 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始；
-                 *     - 缺 `source_dir` → 422。不带源目录的 `download`/`decompile` 两段由 #21 实现，
-                 *       `#13` 才会把它改成可选并接成完整五段。
+                 *     - 给 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始；
+                 *     - 省略 `options`（或不给 `source_dir`）→ 阶段序列
+                 *       `download → decompile → parse → summarize → finalize`，从官方 jar 一路产出索引；
+                 *     - 给了 `options` 但 `source_dir` 为空字符串 → 422（空值属于笔误）。
                  *
                  *     `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */
-                source_dir: string;
+                source_dir?: string;
                 /** @default false */
                 force: boolean;
             };

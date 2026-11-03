@@ -9,7 +9,10 @@ dependencies = [
   "fastapi>=0.118",
   "pydantic>=2.12",
   "pydantic-settings>=2.11",
-  "tree-sitter>=0.24",
+  # 钉在 <0.26：0.26.0 的 Python 绑定在遍历成员（读 `member.type` /
+  # `child_by_field_name`）时会堆损坏，真实大源码树上随机段错误，且无法在代码层规避
+  # （不是 Tree 生命周期问题）。见 issue #22，上游修复后再解除。
+  "tree-sitter>=0.24,<0.26",
   "tree-sitter-java>=0.23",
   "uvicorn[standard]>=0.37",
 ]

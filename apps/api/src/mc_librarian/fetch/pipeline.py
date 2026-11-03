@@ -22,7 +22,6 @@ from mc_librarian.fetch.tools import PipelineTools
 from mc_librarian.schemas import LogLevel
 
 CACHE_DIR_NAME: Final = "cache"
-SOURCES_DIR_NAME: Final = "src"
 CHECKPOINT_FILE_NAME: Final = "fetch.json"
 
 CLIENT_JAR_NAME: Final = "client.jar"
@@ -46,19 +45,14 @@ class FetchContext:
 @dataclass(frozen=True)
 class FetchResult:
     source_dir: Path
-    files: int
-    source_size_bytes: int
+    java_files: int
+    java_bytes: int
     checkpoint: dict[str, Any]
 
 
 def cache_dir_for(data_dir: Path, version: str) -> Path:
     """jar / mappings / checkpoint 的缓存目录。"""
     return data_dir / CACHE_DIR_NAME / version
-
-
-def source_dir_for(data_dir: Path, version: str) -> Path:
-    """反编译产出的默认源码树目录（`--out` 可覆盖）。"""
-    return data_dir / SOURCES_DIR_NAME / version
 
 
 def read_checkpoint(path: Path) -> dict[str, Any]:
@@ -143,7 +137,11 @@ def download_stage(context: FetchContext, tools: PipelineTools) -> dict[str, Any
 
 
 def decompile_stage(context: FetchContext, tools: PipelineTools) -> dict[str, Any]:
-    """反编译 `download` 产出的 jar，返回源码树路径、文件数与字节数。"""
+    """反编译 `download` 产出的 jar，返回源码树路径、`.java` 文件数与字节数。
+
+    checkpoint 用 `java_files`/`java_bytes`，与 `parse` 的 `files`/`source_size_bytes` 区分，
+    避免接成完整五段后互相覆盖。
+    """
     raw = context.checkpoint.get("jar_path")
 
     if not isinstance(raw, str) or not raw:
@@ -166,8 +164,8 @@ def decompile_stage(context: FetchContext, tools: PipelineTools) -> dict[str, An
 
     return {
         "source_dir": str(context.source_dir),
-        "files": files,
-        "source_size_bytes": size_bytes,
+        "java_files": files,
+        "java_bytes": size_bytes,
     }
 
 
@@ -238,7 +236,7 @@ def run_fetch(
 
     return FetchResult(
         source_dir=source_dir,
-        files=int(state.get("files", 0)),
-        source_size_bytes=int(state.get("source_size_bytes", 0)),
+        java_files=int(state.get("java_files", 0)),
+        java_bytes=int(state.get("java_bytes", 0)),
         checkpoint=state,
     )

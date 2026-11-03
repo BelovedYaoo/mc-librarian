@@ -151,7 +151,9 @@ def _parser() -> Parser:
 
 def parse_java(text: str, *, path: str) -> ParsedFile:
     """解析一份 Java 源码；语法树里有 ERROR 节点时抛 `JavaParseError`（规格 §4）。"""
-    root = _parser().parse(text.encode("utf-8")).root_node
+    # 遍历 Node 期间必须持有 Tree 引用（tree-sitter 绑定的要求）。
+    tree = _parser().parse(text.encode("utf-8"))
+    root = tree.root_node
 
     if root.has_error:
         raise JavaParseError("tree-sitter 在语法树上留下了 ERROR 节点")
@@ -168,7 +170,10 @@ def parse_java(text: str, *, path: str) -> ParsedFile:
 
 def parse_imports(text: str) -> list[str]:
     """只取 import 列表（`/v1/outline` 用）。语法有错也照样返回已读到的部分。"""
-    return _imports(_parser().parse(text.encode("utf-8")).root_node)
+    # 同上：遍历 Node 期间必须持有 Tree 引用。
+    tree = _parser().parse(text.encode("utf-8"))
+
+    return _imports(tree.root_node)
 
 
 # ----------------------------------------------------------------------

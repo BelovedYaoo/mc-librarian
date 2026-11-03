@@ -260,21 +260,17 @@ def test_create_job_rejects_retired_kinds(admin_client: TestClient) -> None:
         assert response.headers["content-type"].startswith("application/problem+json")
 
 
-def test_create_job_requires_source_dir(admin_client: TestClient) -> None:
-    """`#4` 只支持带源目录的任务：缺 `options.source_dir` 一律 422，不承诺五段路径。"""
-    missing = admin_client.post("/v1/admin/jobs", json={"kind": "index", "version": "26.3"})
+def test_create_job_rejects_empty_source_dir(admin_client: TestClient) -> None:
+    """`options` 可省略（走五段）；给了 options 但 `source_dir` 为空属于笔误，仍 422。"""
+    for options in ({}, {"source_dir": ""}):
+        response = admin_client.post(
+            "/v1/admin/jobs",
+            json={"kind": "index", "version": "26.3", "options": options},
+        )
 
-    assert missing.status_code == 422
-    assert missing.headers["content-type"].startswith("application/problem+json")
-    assert "#13" in missing.json()["detail"]
-
-    empty = admin_client.post(
-        "/v1/admin/jobs",
-        json={"kind": "index", "version": "26.3", "options": {}},
-    )
-
-    assert empty.status_code == 422
-    assert empty.headers["content-type"].startswith("application/problem+json")
+        assert response.status_code == 422
+        assert response.headers["content-type"].startswith("application/problem+json")
+        assert "source_dir" in response.json()["detail"]
 
 
 def test_source_dir_job_starts_at_parse(
@@ -837,6 +833,30 @@ def test_fallback_failure_does_not_overwrite_succeeded(
     assert fail_called.wait(timeout=WAIT_TIMEOUT_S), "兜底失败路径应该被触发"
 
     assert admin_client.get(f"/v1/admin/jobs/{job_id}").json()["status"] == "succeeded"
+
+
+def test_finish_message_reflects_actual_stages(settings: Settings) -> None:
+    """没跑 `parse` 的任务不该说「索引完成」：终态描述按实际完成的阶段生成。"""
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    with database.connect() as conn, transaction(conn):
+        job = store.create(conn, kind="index", version="26.3", options={}, created_by=None)
+        conn.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (job.id,))
+
+    JobRunner(settings, database, poll_interval=0.01)._finish(
+        job.id, "26.3", {"stages": ["download", "decompile"]}
+    )
+
+    with database.connect() as conn:
+        finished = store.find(conn, job.id)
+        version = store.find_version(conn, "26.3")
+
+    assert finished is not None
+    assert finished.status == "succeeded"
+    assert finished.message == "源码树就绪"
+    # 没跑 parse：不产索引，也不登记版本。
+    assert version is None
 
 
 def test_create_job_records_audit(

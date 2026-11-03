@@ -187,9 +187,13 @@ class AuditList(BaseModel):
 
 
 class JobOptions(BaseModel):
-    """创建任务时的 `options`；`source_dir` 见 docs/openapi.yaml 的 `JobCreate`。"""
+    """创建任务时的 `options`；`source_dir` 见 docs/openapi.yaml 的 `JobCreate`。
 
-    source_dir: str = Field(min_length=1)
+    `source_dir` 可省略：省略（或不传 `options`）走完整五段；给了 `options` 但 `source_dir`
+    为空由接口层返回 422（空值属于笔误）。
+    """
+
+    source_dir: str | None = None
     force: bool = False
 
 

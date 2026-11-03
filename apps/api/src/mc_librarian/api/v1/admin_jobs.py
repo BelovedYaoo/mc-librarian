@@ -23,9 +23,10 @@ NOT_FOUND_TITLE = "资源不存在"
 CONFLICT_TITLE = "冲突"
 BAD_REQUEST_TITLE = "请求不合法"
 
-# `#4` 只实现带源目录的任务；不带 `source_dir` 的下载/反编译流水线待 #13。
+# `options` 可省略：省略即从官方 jar 跑完整五段；给了 `options` 但 `source_dir` 为空属于笔误。
 MISSING_SOURCE_DIR_DETAIL = (
-    "本版本只支持带 options.source_dir 的任务，download/decompile 待 #13 引入"
+    "options.source_dir 不能为空：要么省略 options（从官方 jar 跑 download→decompile→parse→"
+    "summarize→finalize 五段），要么给一个非空的源码目录"
 )
 
 
@@ -44,8 +45,10 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     summary="创建索引任务",
     description=(
         "立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。"
-        "只接受带 options.source_dir 的任务，阶段序列 parse → summarize → finalize；"
-        "缺 options.source_dir 返回 422（download/decompile 待 #13 引入）。"
+        "阶段序列由 options.source_dir 决定：给了源目录走 parse → summarize → finalize；"
+        "省略 options 则从官方 jar 起跑完整五段 "
+        "download → decompile → parse → summarize → finalize；"
+        "给了 options 但 source_dir 为空返回 422。"
     ),
     operation_id="createJob",
     responses={
@@ -55,15 +58,17 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     },
 )
 def create_job(payload: JobCreate, request: Request, conn: DbConn, admin: CurrentAdmin) -> Job:
+    options = payload.options
+
     with transaction(conn):
-        # `#4` 只支持带源目录的任务：校验与入队同一事务，缺 source_dir 一律 422。
-        if payload.options is None:
+        # 校验与入队同一事务。`options` 可省略（走五段）；给了但 `source_dir` 为空则 422。
+        if options is not None and not options.source_dir:
             raise ProblemException(422, BAD_REQUEST_TITLE, MISSING_SOURCE_DIR_DETAIL)
 
-        options = payload.options
+        force = options.force if options is not None else False
 
         # 判定与入队同一事务：同版本并发提交只有一个能成功。
-        if not options.force and store.has_active_job(conn, payload.version):
+        if not force and store.has_active_job(conn, payload.version):
             raise ProblemException(
                 409, CONFLICT_TITLE, f"版本 {payload.version} 已有任务在排队或运行"
             )
@@ -72,7 +77,7 @@ def create_job(payload: JobCreate, request: Request, conn: DbConn, admin: Curren
             conn,
             kind=payload.kind,
             version=payload.version,
-            options=options.model_dump(),
+            options={} if options is None else options.model_dump(),
             created_by=admin.id,
         )
         audit.record(

@@ -29,7 +29,7 @@ Terms currently in use and their meanings — until `CONTEXT.md` exists, treat t
 
 - **version** — a Minecraft release being indexed (e.g. `1.20.1`, `26.3`). Always explicit; there is no `latest`.
 - **index** — the per-version SQLite artifact produced by an indexing job.
-- **job** — one indexing run. Stages are `parse → summarize → finalize` in `#4`; `#13` adds `download` and `decompile` in front for versions indexed from a jar.
+- **job** — one indexing run. Stages are `download → decompile → parse → summarize → finalize`; `#21` supplies `download`/`decompile` (official jar → source tree) and `#4` the indexing three. A job with an explicit `source_dir` skips the first two and starts at `parse`.
 - **stage** — a checkpointed phase of a job; a restart resumes at the next unfinished stage.
 - **registered version** — a version row written by an administrator via `POST /v1/admin/versions`; its fields are authoritative and are never overwritten by a job.
 - **job version** — a version row inserted by a job when no registered version exists yet; later replaced by an administrator registration.

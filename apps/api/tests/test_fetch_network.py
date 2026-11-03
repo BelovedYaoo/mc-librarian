@@ -48,7 +48,7 @@ def test_fetch_produces_java_tree(
     result = run_fetch(version, source, cache, tools, lambda level, message: None)
 
     low, high = int(expected * 0.95), int(expected * 1.05)
-    assert low <= result.files <= high
+    assert low <= result.java_files <= high
 
     files = [path for path in source.rglob("*") if path.is_file()]
     assert files

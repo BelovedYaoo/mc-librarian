@@ -108,7 +108,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `POST /v1/admin/versions` | 注册已上传的索引文件（节点侧不构建索引） |
 | `GET/POST /v1/admin/users`、`PATCH /v1/admin/users/{id}` | 建号（返回一次性邀请链接）、升降角色、启停；最后一个启用的 admin 受保护 |
 | `POST /v1/admin/jobs` | 创建索引任务（`kind` 目前仅 `index`），立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
-| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize（`#4` 三段，`#21` 补 download/decompile），`progress` 0–1 |
+| `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize（`#4` 后三段，`#21` 前两段），`progress` 0–1 |
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
@@ -123,10 +123,10 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 入参 | 阶段序列 | 说明 |
 |---|---|---|
 | 带 `source_dir` | `parse → summarize → finalize` | `#4` 的真实路径：扫描源码目录、统计文件数与 token 估算 |
-| 不带 `source_dir` | `download → decompile` | `#21` 的下载+反编译流水线：解析版本清单、下载 jar（≤ 1.21.11 先 remap）、反编译出源码树 |
-| 不带 `source_dir`（接口层） | — | 仍返回 422：`#13` 才会放开可选并把两段接成完整五段 |
+| 省略 `options` | `download → decompile → parse → summarize → finalize` | `#21` 的下载+反编译在前，接着 `#4` 的索引三段：解析版本清单、下载 jar（≤ 1.21.11 先 remap）、反编译出源码树，再就地解析成可检索索引 |
+| 给了 `options` 但 `source_dir` 为空 | — | 422：空值属于笔误（要么省略 `options`，要么给非空目录） |
 
-`download` / `decompile` 两段由 `#21` 实现（`mc-librarian fetch --version <v> --out <dir>` 是它的独立入口），产物（jar 路径、源码树路径、文件数、字节数）写进 `jobs.checkpoint`，续跑时跳过已完成阶段；纯 fetch 任务不登记版本（产出的是源码树，不是可检索索引）。接口层暂时仍要求 `options.source_dir`，所以这两段目前只能由 CLI 或直接建任务触发；`#13` 落地后再把 `source_dir` 改为可选。这样不存在「阶段永不推进」或「必在 `parse` 失败且重试永久卡死」的路径。
+`download` / `decompile` 两段由 `#21` 实现（`mc-librarian fetch --version <v> --out <dir>` 是它的独立入口），产物（jar 路径、`.java` 文件数与字节数）写进 `jobs.checkpoint`（键为 `java_files`/`java_bytes`，与 `parse` 的 `files`/`source_size_bytes` 区分），续跑时跳过已完成阶段。省略 `options` 的任务从官方 jar 一路产出 `db/<version>.sqlite` 并登记版本，不需要人工衔接三步；`decompile` 产出的源码树就在 `parse` 消费的 `<data_dir>/src/<version>/`，`place_source_tree` 在源根相同时是 no-op。
 
 **版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
@@ -160,3 +160,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.2.0 | issue #21：迁移 v5 把 `jobs.stage` 的 CHECK 扩出 `download`/`decompile`，`STAGES` 扩为五段（阶段序列仍由 `options.source_dir` 选择，`parse`/`summarize`/`finalize` 行为不变）；新增 `mc-librarian fetch --version <v> --out <dir>`（Mojang 版本清单解析、下载 jar、≤ 1.21.11 用 SpecialSource 应用官方 mappings、Vineflower 反编译出只含 `.java` 的源码树，阶段产物写 checkpoint 供续跑）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 复审修复（#4 收尾）：迁移 v4 的 `jobs.kind`/`stage` CHECK 收窄到接口层取值域（`kind` 仅 `index`；`stage` 为 NULL 或 `parse`/`summarize`/`finalize`），读取路径不再可能读到投影外的值而 500；取消时 `stage` 列补写当前阶段（重排会清空它），与 `message` 对齐；契约文档去掉内部函数名与「存储层保留历史值」的过期说法。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | issue #5：`parse` 阶段真正落地——tree-sitter 解析 `.java`，把源码树就位到 `<data_dir>/src/<version>/`，并原子写出 `db/<version>.sqlite`（`files`/`classes`/`methods`/`fields`/`refs` 五表 + 索引；单文件失败跳过、失败率 > 20% 整体失败）；实现 `GET /v1/symbol`（fqn → simple → 后缀 → 编辑距离四级降级）、`GET /v1/references`（启发式引用反查，标出所在方法）、`GET /v1/outline`（包名 / imports / 类与方法签名与行号）、`GET /v1/read`（1-based 闭区间，超出 `max_tokens` 按行从尾部截断）；契约补四个端点的 401/404/422 并把 `Outline.package` 标为可空；前端加 `/browse` 检索调试台与侧边导航入口。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | 集成修复（#21 × #5）：省略 `options` 的任务从官方 jar 跑完整五段 `download → decompile → parse → summarize → finalize`（不再只跑前两段），一次任务即产出可检索索引；`JobCreate.options.source_dir` 改为可选（给了 `options` 但值为空仍 422）；`decompile` 的 checkpoint 键改为 `java_files`/`java_bytes`，与 `parse` 的 `files`/`source_size_bytes` 区分；`run_stage` 对未知阶段报错而非静默产出空结果；源码根常量收敛到 `indexing.layout.source_root`。属 v0.2 设计内的增量补齐，`info.version` 不变 |

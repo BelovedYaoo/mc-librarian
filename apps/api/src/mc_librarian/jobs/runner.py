@@ -4,7 +4,8 @@
 
 - 进程内单任务串行消费，没有独立 worker；一次只跑一个任务（并发 1）。
 - 阶段序列由 `options.source_dir` 决定：给了源目录走 `#4` 的 `parse → summarize → finalize`；
-  没给则先跑 `download → decompile`（`#21` 的下载+反编译流水线，产物是源码树）。
+  没给则从官方 jar 起跑完整五段 `download → decompile → parse → summarize → finalize`
+  （`#21` 的下载+反编译产物就是 `parse` 消费的源码树）。
   每完成一个阶段就把阶段名与产物写进 `jobs.checkpoint`；认领任务时跳过已完成的阶段，
   失败后重排即可续跑。
 - `cancel` 只在**阶段边界**生效：阶段内部不中断，跑完当前阶段后检查标志再收尾；终态写入
@@ -34,10 +35,10 @@ from mc_librarian.config import Settings
 from mc_librarian.db import Database, transaction
 from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.pipeline import (
+    FETCH_STAGES,
     FetchContext,
     cache_dir_for,
     run_fetch_stage,
-    source_dir_for,
 )
 from mc_librarian.fetch.tools import PipelineTools, default_tools
 from mc_librarian.indexing.build import BuildError, build_index, place_source_tree
@@ -48,11 +49,10 @@ from mc_librarian.schemas import LogLevel
 logger = logging.getLogger("mc_librarian.jobs")
 
 # 全部阶段的规范顺序；`stages_for` 按任务参数选子集。
-# `#4` 只支持带 `options.source_dir` 的任务，走 `SOURCE_STAGES`；不带源目录的任务先跑
-# `FETCH_STAGES`（`#21`），`#13` 落地真实版本流水线时再把它们接成完整五段。
+# 给了 `options.source_dir` 的任务从 `parse` 开始（`SOURCE_STAGES`）；不给则从官方 jar 起跑
+# 完整五段（`STAGES`）。
 STAGES: Final[tuple[str, ...]] = ("download", "decompile", "parse", "summarize", "finalize")
 SOURCE_STAGES: Final[tuple[str, ...]] = STAGES[2:]
-FETCH_STAGES: Final[tuple[str, ...]] = STAGES[:2]
 # 收尾阶段，取消时用来描述停在哪（五段全跑时）。
 FINAL_STAGE: Final = "finalize"
 
@@ -93,8 +93,8 @@ class JobContext:
 
 
 def stages_for(options: Mapping[str, Any]) -> tuple[str, ...]:
-    """按任务参数选阶段序列：给了 `source_dir` 走三段，否则先跑 `download/decompile`。"""
-    return SOURCE_STAGES if options.get("source_dir") else FETCH_STAGES
+    """按任务参数选阶段序列：给了 `source_dir` 走索引三段，否则从官方 jar 起跑完整五段。"""
+    return SOURCE_STAGES if options.get("source_dir") else STAGES
 
 
 def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
@@ -102,7 +102,8 @@ def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
 
     `parse` 由 `mc_librarian.indexing` 实现（就位源码树 → 解析 → 写 `db/<version>.sqlite`）；
     `download`/`decompile` 交给 `mc_librarian.fetch.pipeline`；
-    `summarize`/`finalize` 待 #7 / #13 接真正的流水线，这里只标记完成。
+    `summarize`/`finalize` 待 #7 接真正的流水线，这里只标记完成。
+    未知阶段直接报错，而不是静默返回空产物——否则新增阶段时漏改会产出残缺索引。
     """
     if stage == "parse":
         return _parse_stage(context)
@@ -110,7 +111,10 @@ def run_stage(stage: str, context: JobContext) -> dict[str, Any]:
     if stage in FETCH_STAGES:
         return _fetch_stage(stage, context)
 
-    return {}
+    if stage in ("summarize", "finalize"):
+        return {}
+
+    raise StageError(f"未知阶段：{stage}")
 
 
 def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
@@ -121,7 +125,7 @@ def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
     fetch_context = FetchContext(
         version=context.version,
         cache_dir=cache_dir_for(context.data_dir, context.version),
-        source_dir=source_dir_for(context.data_dir, context.version),
+        source_dir=source_root(context.data_dir, context.version),
         log=context.log,
         checkpoint=context.checkpoint,
     )
@@ -136,17 +140,14 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
     """就位源码树并把它解析成 `db/<version>.sqlite`（规格补充 §1/§3/§4/§14）。
 
     源码根固定为 `<data_dir>/src/<version>/`：`options.source_dir` 已经是它就直接解析，
-    否则先复制过去——数据根因此是服务侧唯一的事实来源。
+    否则先复制过去。没给 `options.source_dir` 时直接用它——完整五段里 `decompile` 已经把
+    源码树写在那里，`place_source_tree` 在源根相同时是 no-op。
     """
-    root = context.source_dir
-
-    if root is None:
-        raise StageError("index 任务缺少 options.source_dir")
+    dest = source_root(context.data_dir, context.version)
+    root = context.source_dir or dest
 
     if not root.is_dir():
         raise StageError(f"source_dir 不存在或不是目录：{root}")
-
-    dest = source_root(context.data_dir, context.version)
 
     if root.resolve() != dest.resolve():
         context.log("info", f"parse：源码树就位到 {dest}")
@@ -357,24 +358,25 @@ class JobRunner:
         `succeeded` 时登记版本行：**仅当版本未注册时插入一行**，已注册版本不动；
         真的插入了才写 `version.recorded` 审计。`canceled` 时不碰版本表。这样 finalize
         执行期间到达的取消不会被吞掉。只有跑过 `parse`（索引阶段）的任务才登记：
-        `download/decompile` 两段产出的是源码树，不是可检索索引。
+        没跑 `parse` 的任务产出的是源码树，不是可检索索引。
 
-        取消描述用 checkpoint 里最后一个已完成阶段，而不是写死的 `finalize`——
-        `download/decompile` 两段的任务最后一站是 `decompile`。
+        终态描述按 checkpoint 里实际完成的阶段生成：跑了 `parse` 才说「索引完成」，
+        否则只说源码树就绪。取消描述用最后一个已完成阶段，而不是写死的 `finalize`。
         """
         completed = [str(name) for name in checkpoint.get("stages", [])]
         final_stage = completed[-1] if completed else FINAL_STAGE
+        indexed = "parse" in completed
 
         with self._database.connect() as conn, transaction(conn):
             status = store.finish_succeeded_or_canceled(
                 conn,
                 job_id,
-                succeeded_message="索引完成",
+                succeeded_message="索引完成" if indexed else "源码树就绪",
                 canceled_message=f"已取消（停在 {final_stage}）",
             )
 
             if status == "succeeded":
-                if "parse" in completed:
+                if indexed:
                     inserted = store.insert_version_if_absent(
                         conn,
                         version=version,

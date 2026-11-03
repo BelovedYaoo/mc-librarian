@@ -76,6 +76,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fetch 失败：{error}", file=sys.stderr)
         return 1
 
-    print(f"{result.source_dir}：{result.files} 个 .java、{result.source_size_bytes} 字节")
+    print(f"{result.source_dir}：{result.java_files} 个 .java、{result.java_bytes} 字节")
 
     return 0

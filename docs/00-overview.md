@@ -45,10 +45,12 @@ mc-librarian/
                     │  线程池（tree-sitter） │
                     └───────┬───────────────┘
                             │
-              ┌─────────────┴──────────────┐
-              │ control.sqlite (WAL, 读写)  │
-              │ db/<version>.sqlite (只读)  │
-              └────────────────────────────┘
+              ┌─────────────┴──────────────────────┐
+              │ control.sqlite (WAL, 读写)          │
+              │ db/<version>.sqlite (只读)          │
+              │ src/<version>/ (源码树, 只读)        │
+              │ cache/<version>/ (jar / mappings)   │
+              └────────────────────────────────────┘
 ```
 
 TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书，反代到 `deploy-net` 内的容器端口；
@@ -73,6 +75,16 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 
 ## 5. 数据模型
 
+数据根（默认 `<repo 的父目录>/mc-librarian-data`，`MC_LIBRARIAN_DATA_DIR` 可改）下的目录：
+
+| 路径 | 内容 |
+|---|---|
+| `control.sqlite` | 控制面数据库（账号、任务、版本注册表、审计……） |
+| `db/<version>.sqlite` | 单版本索引库，服务以 `mode=ro` 打开 |
+| `src/<version>/` | 反编译 / 就位后的源码树，`outline`/`read` 实时读取 |
+| `cache/<version>/` | 下载与反编译的中间产物（client jar、官方 mappings、fetch checkpoint） |
+| `jobs/`、`logs/` | 规格预留的任务工作目录与日志目录 |
+
 ### 5.1 控制面 `control.sqlite`
 
 | 表 | 关键字段 |
@@ -82,7 +94,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `pats` | id, user_id, name, token_hash, prefix, expires_at, last_used_at, revoked_at |
 | `invites` | id, user_id, token_hash, expires_at, used_at |
 | `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
-| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；`#4` 用后三段，`#21` 补前两段） |
+| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；省略 `options` 的任务从官方 jar 跑完整五段，给了 `source_dir` 则从 `parse` 起） |
 | `job_logs` | id, job_id, ts, level, message |
 | `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，不改已注册行） |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
