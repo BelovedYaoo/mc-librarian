@@ -8,6 +8,7 @@ export const paths = {
   users: '/users',
   versions: '/versions',
   jobs: '/jobs',
+  usage: '/usage',
   audit: '/audit',
   browse: '/browse',
   ask: '/ask',

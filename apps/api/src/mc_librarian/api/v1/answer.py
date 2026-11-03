@@ -5,7 +5,8 @@
 1. 前置检查：全局开关 / 并发上限（429）、版本索引（404）、模型配置（503）；
 2. 把 `AskRun` 的事件流编码成 SSE（**手写 `StreamingResponse` + `text/event-stream`**，
    不引入 `sse-starlette` 之类的新依赖）；`Accept: application/json` 时退化成一次性 `AskResponse`；
-3. 每次请求写**一行** `usage`（含降级的情况）；
+3. 每次请求写**一行** `usage`（含降级的情况），写完在后台检查一次当日告警阈值（`#12`，
+   不阻断响应）；
 4. 并发槽位在任何退出路径上都归还（含客户端中途断开）——收尾绑在 ASGI 响应的 `__call__` 上，
    不依赖 async generator 被正确关闭（见 `_AskStreamResponse`）。
 
@@ -25,6 +26,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
+from mc_librarian import alerts
 from mc_librarian import usage as usage_store
 from mc_librarian.answer import AskLimiter, AskRun, OpenAiCompatChatClient
 from mc_librarian.answer.tools import ToolBox
@@ -32,6 +34,7 @@ from mc_librarian.api.v1.retrieval import require_index
 from mc_librarian.auth.deps import CurrentUser, DatabaseDep, DbConn, SettingsDep
 from mc_librarian.config import (
     LlmConfigError,
+    Settings,
     resolve_llm_config,
     resolve_llm_pricing,
 )
@@ -165,12 +168,22 @@ async def ask(
         raise
 
     if _wants_json(request):
-        return await _json_answer(run, database, user, config.model, body.version, index, limiter)
+        return await _json_answer(
+            run, database, user, config.model, body.version, index, limiter, settings
+        )
 
     return _AskStreamResponse(
         _sse_stream(run),
         on_close=partial(
-            _close_ask, run, database, user, config.model, body.version, index, limiter
+            _close_ask,
+            run,
+            database,
+            user,
+            config.model,
+            body.version,
+            index,
+            limiter,
+            settings,
         ),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
@@ -185,13 +198,14 @@ async def _json_answer(
     version: str,
     index: sqlite3.Connection,
     limiter: AskLimiter,
+    settings: Settings,
 ) -> JSONResponse:
     """`Accept: application/json`：把事件流跑完，一次性返回 `AskResponse`。"""
     try:
         async for _event in run.stream():
             pass
     finally:
-        _close_ask(run, database, user, model, version, index, limiter)
+        _close_ask(run, database, user, model, version, index, limiter, settings)
 
     payload = AskResponse(
         answer=run.answer,
@@ -237,12 +251,13 @@ def _close_ask(
     version: str,
     index: sqlite3.Connection,
     limiter: AskLimiter,
+    settings: Settings,
 ) -> None:
     """一次问答的收尾：还槽位、关索引、记一行用量。任何退出路径都必须走到这里一次。"""
     # 槽位先还：后面两步即使失败，槽位也不会漏（漏了就没有任何补救路径）。
     limiter.release()
     index.close()
-    _record_usage(database, run, user, model, version)
+    _record_usage(database, run, user, model, version, settings)
 
 
 def _encode(event: dict[str, Any]) -> bytes:
@@ -258,7 +273,12 @@ def _wants_json(request: Request) -> bool:
 
 
 def _record_usage(
-    database: Database, run: AskRun, user: User, model: str, version: str
+    database: Database,
+    run: AskRun,
+    user: User,
+    model: str,
+    version: str,
+    settings: Settings,
 ) -> None:
     """每次 `/v1/ask` 写一行用量（含降级）；写失败只记日志，不影响已经发出去的响应。"""
     try:
@@ -276,3 +296,6 @@ def _record_usage(
             )
     except Exception:  # 记账失败不该把一次成功的问答变成 500
         logger.exception("写入 usage 失败（%s）", version)
+
+    # #12：写入之后检查一次当日阈值。后台线程里跑，响应不等它；Webhook 失败只 warn。
+    alerts.schedule(database, settings)

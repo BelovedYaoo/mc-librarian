@@ -181,7 +181,7 @@ def insert_job_row(
 def test_migration_creates_job_tables(tmp_path: Path) -> None:
     database = Database.for_data_dir(tmp_path / "data")
 
-    assert database.initialize() == LATEST_VERSION == 6
+    assert database.initialize() == LATEST_VERSION == 7
 
     with database.connect() as conn:
         tables = {
@@ -214,7 +214,7 @@ def test_v5_migration_preserves_existing_jobs_and_logs(tmp_path: Path) -> None:
             ("legacy", "2026-11-03T00:00:00Z", "旧日志"),
         )
 
-    assert database.initialize() == LATEST_VERSION == 6
+    assert database.initialize() == LATEST_VERSION == 7
 
     with database.connect() as conn:
         assert conn.execute("SELECT count(*) AS c FROM job_logs").fetchone()["c"] == 1

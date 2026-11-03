@@ -7,7 +7,7 @@ FastAPI 会声明成 `type: string, format: date-time`。
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
@@ -500,6 +500,35 @@ class Usage(BaseModel):
     completion_tokens: int = 0
     cost_usd: float = 0
     latency_ms: int = 0
+
+
+class UsageBucket(BaseModel):
+    """契约 `UsageReport.buckets` 的一项：一个分组（天/用户/版本/模型）的合计。"""
+
+    key: str
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float
+
+
+class UsageReport(BaseModel):
+    """契约 `components.schemas.UsageReport`（`GET /v1/admin/usage`，issue #12）。
+
+    `totals` 是区间合计、`buckets` 是分组明细，两者同源（用量页直接用这里的数字，
+    不再在前端算一遍）；`requests` 是区间请求数（顶部卡片的第四个数字）。
+    `cost_configured` 为 false 时 `cost_usd` 恒为 0（未配单价），页面必须标注成本口径。
+
+    `from` 是 Python 关键字，字段写成 `from_` + `serialization_alias`：对外的 JSON 与
+    OpenAPI 属性名仍是 `from`，构造时用 `from_=`（mypy 也认这个签名）。
+    """
+
+    from_: date = Field(serialization_alias="from")
+    to: date
+    requests: int
+    cost_configured: bool
+    totals: Usage
+    buckets: list[UsageBucket]
 
 
 class Citation(BaseModel):
