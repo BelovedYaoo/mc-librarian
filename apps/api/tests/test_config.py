@@ -112,3 +112,41 @@ def test_session_ttl_defaults_and_override(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setenv("MC_LIBRARIAN_SESSION_TTL_HOURS", "24")
     assert Settings().session_ttl_hours == 24
+
+
+def test_env_defaults_to_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MC_LIBRARIAN_ENV", raising=False)
+
+    assert Settings().env == "dev"
+
+
+def test_production_with_insecure_cookie_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """生产护栏：忘了开 Secure，启动就该直接挂掉，而不是静默跑 http。"""
+    monkeypatch.setenv("MC_LIBRARIAN_ENV", "production")
+    monkeypatch.delenv("MC_LIBRARIAN_COOKIE_SECURE", raising=False)
+
+    with pytest.raises(ValidationError) as excinfo:
+        Settings()
+
+    assert "MC_LIBRARIAN_COOKIE_SECURE=true" in str(excinfo.value)
+
+
+def test_production_with_insecure_cookie_fails_fast_as_kwargs(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="Secure"):
+        Settings(data_dir=tmp_path / "data", env="production", cookie_secure=False)
+
+
+def test_production_with_secure_cookie_is_accepted(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        env="production",
+        cookie_secure=True,
+    )
+
+    assert settings.env == "production"
+    assert settings.cookie_secure is True
+
+
+def test_unknown_env_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        Settings(data_dir=tmp_path / "data", env="staging")  # type: ignore[arg-type]

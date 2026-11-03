@@ -25,8 +25,13 @@ cd apps/api
 | `MC_LIBRARIAN_DATA_DIR` | `<repo 的父目录>/mc-librarian-data`（无仓库哨兵时 `~/mc-librarian-data`） | 数据根（源码 / 索引产物 / 控制面 `control.sqlite`），永远在仓库之外；启动日志会打印最终路径 |
 | `MC_LIBRARIAN_HOST` | `127.0.0.1` | 监听地址 |
 | `MC_LIBRARIAN_PORT` | `8787` | 监听端口（与 `docs/openapi.yaml` 的本地 server 一致） |
-| `MC_LIBRARIAN_COOKIE_SECURE` | `false` | 会话 cookie 的 `Secure` 属性。本地是 http，置 true 会让浏览器直接丢弃 cookie；生产（HTTPS 边界后面）必须置 true |
+| `MC_LIBRARIAN_ENV` | `dev` | `dev` / `production`。`production` 下会启用 cookie 硬性护栏（见下） |
+| `MC_LIBRARIAN_COOKIE_SECURE` | `false` | 会话 cookie 的 `Secure` 属性。本地是 http，置 true 会让浏览器直接丢弃 cookie；**生产必须 true** |
 | `MC_LIBRARIAN_SESSION_TTL_HOURS` | `168` | 会话有效期（小时） |
+
+生产护栏：`MC_LIBRARIAN_ENV=production` 而 `MC_LIBRARIAN_COOKIE_SECURE` 仍为 false 时，
+进程**启动即失败**并提示需要开 `Secure`——避免公网部署把会话 cookie 裸跑在 http 上。
+本地开发不要设 `MC_LIBRARIAN_ENV=production`。
 
 ## 接口
 

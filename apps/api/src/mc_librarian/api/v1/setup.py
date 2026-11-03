@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 from fastapi import APIRouter, Request, Response
 
 from mc_librarian.auth import cookies, sessions, users
@@ -25,7 +23,7 @@ SETUP_COMPLETED_DETAIL = "管理员已存在，setup 已永久关闭"
     operation_id="getSetupStatus",
     openapi_extra={"security": []},
 )
-async def get_setup_status(conn: DbConn) -> SetupStatus:
+def get_setup_status(conn: DbConn) -> SetupStatus:
     return SetupStatus(required=not users.any_user(conn))
 
 
@@ -44,34 +42,33 @@ async def get_setup_status(conn: DbConn) -> SetupStatus:
         422: problem_response("请求不合法"),
     },
 )
-async def create_first_admin(
+def create_first_admin(
     payload: SetupRequest,
     request: Request,
     response: Response,
     conn: DbConn,
     settings: SettingsDep,
 ) -> User:
-    try:
-        # 判定与写入在同一个写事务里，两个并发 setup 只会有一个成功。
-        with transaction(conn):
-            if users.any_user(conn):
-                raise ProblemException(410, SETUP_COMPLETED_TITLE, SETUP_COMPLETED_DETAIL)
+    """同步 def：argon2 哈希与 sqlite 写入都是阻塞调用，交给 FastAPI 的线程池跑。"""
+    # 判定与写入在同一个写事务里：`BEGIN IMMEDIATE` 先拿写锁，两个并发 setup
+    # 会串行执行，后到的那个看到 users 非空 → 410。因此事务内的 IntegrityError
+    # 不再当作「已初始化」，而是真正的数据异常，原样向上抛（500）。
+    with transaction(conn):
+        if users.any_user(conn):
+            raise ProblemException(410, SETUP_COMPLETED_TITLE, SETUP_COMPLETED_DETAIL)
 
-            user = users.create_admin(
-                conn,
-                username=payload.username,
-                password=payload.password,
-            )
-            token = sessions.create(
-                conn,
-                user.id,
-                ttl_hours=settings.session_ttl_hours,
-                ip=client_ip(request),
-                user_agent=request.headers.get("user-agent"),
-            )
-    except sqlite3.IntegrityError as error:
-        # 并发下由 UNIQUE(username) 兜底：语义同样是「已经初始化过了」。
-        raise ProblemException(410, SETUP_COMPLETED_TITLE, SETUP_COMPLETED_DETAIL) from error
+        user = users.create_admin(
+            conn,
+            username=payload.username,
+            password=payload.password,
+        )
+        token = sessions.create(
+            conn,
+            user.id,
+            ttl_hours=settings.session_ttl_hours,
+            ip=client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
 
     cookies.set_session_cookie(response, token, settings)
 

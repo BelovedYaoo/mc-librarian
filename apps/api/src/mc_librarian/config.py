@@ -10,13 +10,17 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DATA_DIR_ENV: Final = "MC_LIBRARIAN_DATA_DIR"
 DATA_DIR_NAME: Final = "mc-librarian-data"
+
+# 运行环境。`production` 下会给会话 cookie 加硬性护栏（见 `Settings._guard_production`）。
+ENV_DEV: Final = "dev"
+ENV_PRODUCTION: Final = "production"
 
 # 会话 cookie 名，与 docs/openapi.yaml 的 `components.securitySchemes.cookieAuth` 一致。
 SESSION_COOKIE_NAME: Final = "mc_librarian_session"
@@ -80,6 +84,8 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8787
 
+    # `MC_LIBRARIAN_ENV`：dev / production。只有 production 会启用 cookie 硬性护栏。
+    env: Literal["dev", "production"] = "dev"
     # 会话 cookie 的 `Secure` 属性：本地 http 下给 true 会让浏览器直接丢弃 cookie，
     # 所以默认 false（dev）；生产在 HTTPS 边界后面部署时设 `MC_LIBRARIAN_COOKIE_SECURE=true`。
     cookie_secure: bool = False
@@ -90,6 +96,21 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve(cls, value: Path) -> Path:
         return resolve_data_dir(value)
+
+    @model_validator(mode="after")
+    def _guard_production(self) -> Settings:
+        """生产护栏：公网部署忘了开 `Secure`，会话 cookie 会明文跑在 HTTP 上。
+
+        dev（默认）下不动，因为本地是 http，`Secure` 会让浏览器直接丢弃 cookie。
+        """
+        if self.env == ENV_PRODUCTION and not self.cookie_secure:
+            raise ValueError(
+                "生产环境必须给会话 cookie 加 Secure：请设置 MC_LIBRARIAN_COOKIE_SECURE=true。"
+                f"（当前 MC_LIBRARIAN_ENV={self.env}、cookie_secure=false；"
+                f" 仅本地调试时才把 MC_LIBRARIAN_ENV 设回 {ENV_DEV}）"
+            )
+
+        return self
 
     @property
     def repo_root(self) -> Path | None:

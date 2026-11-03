@@ -18,8 +18,8 @@
 
 - **无状态**：检索接口不自带会话，`version` 每个请求显式传，**不支持 `latest`**。
 - **预算控制**：`max_tokens` 由调用方给，服务端按 score 降序截断。
-- **错误格式**：RFC 7807 `application/problem+json`。
-- **认证**：两种并列——浏览器用 `mc_librarian_session` cookie（HttpOnly + SameSite=Lax，`Secure` 由服务端 `MC_LIBRARIAN_COOKIE_SECURE` 控制），脚本用 `mcl_` 前缀的个人 access token。本地开发走 http，`Secure` 必须为 false，否则浏览器会直接丢弃 cookie；生产在 HTTPS 边界后面部署时置为 true。
+- **错误格式**：RFC 7807 `application/problem+json`。业务错误与框架自己抛的 404 / 405 走同一套格式（405 保留 `Allow` 头）。
+- **认证**：两种并列——浏览器用 `mc_librarian_session` cookie（HttpOnly + SameSite=Lax，`Secure` 由服务端 `MC_LIBRARIAN_COOKIE_SECURE` 控制），脚本用 `mcl_` 前缀的个人 access token。本地开发走 http，`Secure` 必须为 false，否则浏览器会直接丢弃 cookie；生产在 HTTPS 边界后面部署时必须为 true——`MC_LIBRARIAN_ENV=production` 而 `Secure` 为 false 时进程启动即失败。
 - **授权**：`user` 可用检索与问答；`admin` 额外可用 `/v1/admin/*`。前端隐藏菜单只是体验，后端每个端点独立校验。
 
 ## 3. 端点总览

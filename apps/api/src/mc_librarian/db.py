@@ -87,8 +87,12 @@ def connect(path: Path) -> sqlite3.Connection:
 
     `isolation_level=None` 关掉隐式事务，写操作由 `transaction()` 显式 `BEGIN IMMEDIATE`，
     这样「先查再写」的判定（例如 setup 只能成功一次）不会是两步非原子的操作。
+
+    `check_same_thread=False`：路由与依赖都是同步函数，被 FastAPI 丢到线程池里跑，
+    而连接是由 async 生成器依赖建在事件循环线程上的；一个请求内连接只被顺序使用、
+    不跨请求共享，所以放开线程检查是安全的（并且才能不阻塞事件循环）。
     """
-    conn = sqlite3.connect(path, isolation_level=None, timeout=5.0)
+    conn = sqlite3.connect(path, isolation_level=None, timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

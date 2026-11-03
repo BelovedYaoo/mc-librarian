@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from conftest import ADMIN_PASSWORD, ADMIN_USERNAME, session_cookie
@@ -12,6 +13,7 @@ from mc_librarian.auth import passwords, sessions
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import LATEST_VERSION, Database, migrate, schema_version, transaction
 from mc_librarian.main import create_app
+from mc_librarian.schemas import User
 
 
 def test_setup_is_required_on_fresh_database(client: TestClient) -> None:
@@ -176,3 +178,26 @@ def test_cookie_secure_flag_follows_config(tmp_path: Path) -> None:
         )
 
     assert "secure" in response.headers["set-cookie"].lower()
+
+
+def test_setup_integrity_error_is_not_reported_as_initialized(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """事务内已经查过 users：其余 IntegrityError 是真异常（500），不能扮成 410。"""
+
+    def boom(*_args: object, **_kwargs: object) -> User:
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: users.id")
+
+    monkeypatch.setattr("mc_librarian.api.v1.setup.users.create_admin", boom)
+
+    with TestClient(create_app(settings), raise_server_exceptions=False) as raw_client:
+        response = raw_client.post(
+            "/v1/setup",
+            json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+        )
+
+        assert response.status_code == 500
+        assert response.status_code != 410
+
+        # 事务已回滚：库仍然是空的，setup 还能重试。
+        assert raw_client.get("/v1/setup").json() == {"required": True}

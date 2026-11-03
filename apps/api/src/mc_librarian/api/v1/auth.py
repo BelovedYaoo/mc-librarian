@@ -30,13 +30,14 @@ NOT_AUTHENTICATED_TITLE = "未认证"
     openapi_extra={"security": []},
     responses={401: problem_response("凭据不正确")},
 )
-async def login(
+def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
     conn: DbConn,
     settings: SettingsDep,
 ) -> User:
+    """同步 def：argon2 校验（故意很慢）与 sqlite 读写都不能占着事件循环。"""
     row = users.find_by_username(conn, payload.username)
 
     if row is None:
@@ -72,7 +73,7 @@ async def login(
     operation_id="logout",
     responses={401: problem_response("未认证")},
 )
-async def logout(request: Request, conn: DbConn, settings: SettingsDep) -> Response:
+def logout(request: Request, conn: DbConn, settings: SettingsDep) -> Response:
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
 
     if not raw_token:
@@ -96,5 +97,5 @@ async def logout(request: Request, conn: DbConn, settings: SettingsDep) -> Respo
     operation_id="getMe",
     responses={401: problem_response("未认证")},
 )
-async def get_me(user: CurrentUser) -> User:
+def get_me(user: CurrentUser) -> User:
     return user

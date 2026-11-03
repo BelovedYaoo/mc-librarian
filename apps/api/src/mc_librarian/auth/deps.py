@@ -1,7 +1,8 @@
 """FastAPI 依赖：控制面连接、当前用户、进程配置。
 
-连接用 `async` 生成器依赖，保证「建连接 / 用连接 / 关连接」都在事件循环同一线程里完成，
-不触发 sqlite3 的跨线程限制。
+`get_db` 是 async 生成器（建/关连接在事件循环线程），其余依赖与路由都是同步函数，
+由 FastAPI 丢进线程池执行——它们里面有 argon2 与 sqlite 这类阻塞调用，
+放事件循环里会卡住所有并发请求。连接本身已开 `check_same_thread=False`（见 `db.connect`）。
 """
 
 from __future__ import annotations
@@ -48,11 +49,14 @@ DbConn = Annotated[sqlite3.Connection, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 
 
-async def get_current_user(
+def get_current_user(
     request: Request,
     conn: DbConn,
 ) -> User:
-    """从 cookie 解析当前用户；缺失/过期/已登出/被禁用统一 401。"""
+    """从 cookie 解析当前用户；缺失/过期/已登出/被禁用统一 401。
+
+    刻意写成同步 `def`：里面是同步 sqlite 查询，FastAPI 会把它也放进线程池。
+    """
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
 
     if not raw_token:

@@ -1,4 +1,4 @@
-import type { paths } from 'src/types/api';
+import type { components, paths } from 'src/types/api';
 
 import { CONFIG } from 'src/global-config';
 
@@ -22,16 +22,19 @@ export type LoginRequest =
 
 export type SetupRequest = paths['/v1/setup']['post']['requestBody']['content']['application/json'];
 
-type Problem =
-  paths['/v1/auth/login']['post']['responses'][401]['content']['application/problem+json'];
+/** RFC 7807 错误体，直接取契约的 `Problem`，不从某一条响应里反推。 */
+export type Problem = components['schemas']['Problem'];
 
 export class ApiError extends Error {
   readonly status: number;
 
-  constructor(status: number, message: string) {
+  readonly title: string | null;
+
+  constructor(status: number, message: string, title: string | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.title = title;
   }
 }
 
@@ -42,23 +45,56 @@ async function toApiError(response: Response): Promise<ApiError> {
 
     return new ApiError(
       response.status,
-      problem.detail ?? problem.title ?? `${response.status} ${response.statusText}`
+      problem.detail ?? problem.title ?? `${response.status} ${response.statusText}`,
+      problem.title ?? null
     );
   } catch {
     return new ApiError(response.status, `${response.status} ${response.statusText}`);
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// ----------------------------------------------------------------------
+// 统一的 401 处理：会话失效时由 AuthProvider 注册回调，清空会话并跳登录页。
+// 用注册回调而不是在这里 import auth，是为了避免 api-client ↔ auth 的循环依赖。
+// ----------------------------------------------------------------------
+
+export type UnauthorizedHandler = () => void;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
+function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
+}
+
+type RequestOptions = RequestInit & {
+  /** 登录 / setup 自身返回的 401 是业务结果，不该触发「会话失效」跳转。 */
+  skipUnauthorizedHandler?: boolean;
+};
+
+async function request<T>(
+  path: string,
+  { skipUnauthorizedHandler = false, ...init }: RequestOptions = {}
+): Promise<T> {
   const response = await fetch(`${CONFIG.serverUrl}${path}`, {
-    // 会话靠 cookie，同源请求必须带上凭据。
-    credentials: 'same-origin',
+    // 会话靠 cookie。用 include 而不是 same-origin：`VITE_SERVER_URL` 指绝对地址
+    // （跨源部署 / 独立 API 域名）时，same-origin 不会带上 cookie。
+    credentials: 'include',
     ...init,
     headers: { Accept: 'application/json', ...init.headers },
   });
 
   if (!response.ok) {
-    throw await toApiError(response);
+    const error = await toApiError(response);
+
+    if (response.status === 401 && !skipUnauthorizedHandler) {
+      notifyUnauthorized();
+    }
+
+    throw error;
   }
 
   // 204 没有响应体（登出）。
@@ -69,8 +105,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
-function postJson<T>(path: string, body: unknown): Promise<T> {
+function postJson<T>(path: string, body: unknown, options: RequestOptions = {}): Promise<T> {
   return request<T>(path, {
+    ...options,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -92,11 +129,11 @@ export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
 
 /** 创建唯一管理员；成功后后端直接下发会话 cookie，因此返回即已登录。 */
 export function createFirstAdmin(body: SetupRequest): Promise<User> {
-  return postJson<User>('/v1/setup', body);
+  return postJson<User>('/v1/setup', body, { skipUnauthorizedHandler: true });
 }
 
 export function login(body: LoginRequest): Promise<User> {
-  return postJson<User>('/v1/auth/login', body);
+  return postJson<User>('/v1/auth/login', body, { skipUnauthorizedHandler: true });
 }
 
 export function logout(): Promise<void> {

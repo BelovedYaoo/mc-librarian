@@ -9,12 +9,26 @@ from __future__ import annotations
 import sys
 
 import uvicorn
+from pydantic import ValidationError
 
 from mc_librarian.config import get_settings
 
 
 def main() -> None:
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValidationError as error:
+        # 配置不合法（例如生产环境没给会话 cookie 开 Secure）时给一句人话就退出，
+        # 不要甩一整个 pydantic traceback 让人猜哪里错了。
+        print("配置错误，服务未启动：", file=sys.stderr)
+
+        for detail in error.errors():
+            message = str(detail["msg"]).removeprefix("Value error, ")
+            location = ".".join(str(part) for part in detail["loc"])
+            print(f"  - {location or 'settings'}：{message}", file=sys.stderr)
+
+        raise SystemExit(2) from None
+
     uvicorn.run(
         "mc_librarian.main:app",
         host=settings.host,
