@@ -8,7 +8,7 @@ FastAPI 会声明成 `type: string, format: date-time`。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,11 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
 JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
 
+# 版本号允许的字符（契约 `JobCreate.version` / `RegisterVersionRequest.version` 的 pattern）。
+# 版本号会进文件路径（`db/<version>.sqlite`、`cache/<version>/`），带 `/` 会跑出数据根，
+# 所以 `mc-librarian index` 的 CLI 也用同一条正则先校验一次。
+VERSION_PATTERN: Final = r"^[A-Za-z0-9._-]+$"
+
 # 检索/阅读端点的枚举（契约 `SymbolKind` 与 `SymbolDetail`/`Outline` 的 `kind`）。
 SymbolKind = Literal["any", "class", "method", "field"]
 SymbolDetailKind = Literal["class", "method", "field"]
@@ -26,6 +31,7 @@ ReferenceKind = Literal["call", "field", "type", "other"]
 MemberKind = Literal["method", "field"]
 
 __all__ = [
+    "VERSION_PATTERN",
     "AcceptInviteRequest",
     "AuditEntry",
     "AuditList",
@@ -205,7 +211,7 @@ class JobOptions(BaseModel):
 
 class JobCreate(BaseModel):
     kind: JobKind
-    version: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    version: str = Field(min_length=1, max_length=64, pattern=VERSION_PATTERN)
     options: JobOptions | None = None
 
 
@@ -258,7 +264,7 @@ class VersionList(BaseModel):
 
 
 class RegisterVersionRequest(BaseModel):
-    version: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    version: str = Field(min_length=1, max_length=64, pattern=VERSION_PATTERN)
     obfuscated: bool = True
 
 

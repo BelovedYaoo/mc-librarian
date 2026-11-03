@@ -25,12 +25,14 @@ from mc_librarian.fetch.manifest import HttpManifestResolver, VersionDownloads
 from mc_librarian.fetch.pipeline import (
     CHECKPOINT_FILE_NAME,
     FetchContext,
+    cache_dir_for,
     count_java_files,
     decompile_stage,
     download_stage,
     prune_empty_dirs,
     read_checkpoint,
     run_fetch,
+    write_checkpoint,
 )
 from mc_librarian.fetch.tools import (
     HttpDownloader,
@@ -613,6 +615,131 @@ def test_runner_runs_full_pipeline_without_source_dir(settings: Settings) -> Non
     assert Path(version_row["db_path"]).is_file()
     assert version_row["obfuscated"] == int(checkpoint["obfuscated"])
     assert version_row["source_size_bytes"] == checkpoint["source_size_bytes"]
+
+
+# ----------------------------------------------------------------------
+# 复用已就绪的源码树（#13 规格补充 §2）
+# ----------------------------------------------------------------------
+
+
+def run_one_job(settings: Settings, version: str, options: dict[str, Any]) -> str:
+    """建一个空 checkpoint 的新 job 并跑完，返回 job id（等价于 `index` CLI 的一次执行）。"""
+    database = Database.for_data_dir(settings.data_dir)
+    database.initialize()
+
+    with database.connect() as conn, transaction(conn):
+        job = store.create(conn, kind="index", version=version, options=options, created_by=None)
+
+    asyncio.run(JobRunner(settings, database).run_job(job.id))
+
+    return job.id
+
+
+def job_checkpoint(settings: Settings, job_id: str) -> dict[str, Any]:
+    with Database.for_data_dir(settings.data_dir).connect() as conn:
+        row = store.find_row(conn, job_id)
+
+    assert row is not None
+
+    return store.checkpoint_of(row)
+
+
+def write_fetch_marker(settings: Settings, version: str, *, java_files: int) -> Path:
+    """模拟上一个入口（`mc-librarian fetch` 或上一次 `index`）留下的完成标记。"""
+    cache = cache_dir_for(settings.data_dir, version)
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / CHECKPOINT_FILE_NAME
+    write_checkpoint(
+        path,
+        {
+            "stages": ["download", "decompile"],
+            "jar_path": str(cache / "client.jar"),
+            "obfuscated": False,
+            "java_files": java_files,
+            "java_bytes": 2048,
+            "source_dir": str(source_root(settings.data_dir, version)),
+        },
+    )
+
+    return path
+
+
+def plant_source_tree(settings: Settings, version: str, files: int) -> Path:
+    """在数据根里放一棵「已反编译」的源码树（每个文件一个独立类名，便于 parse）。"""
+    root = source_root(settings.data_dir, version)
+    package = root / "net" / "minecraft"
+    package.mkdir(parents=True, exist_ok=True)
+
+    for index in range(files):
+        (package / f"Planted{index}.java").write_text(
+            f"package net.minecraft;\n\npublic class Planted{index} {{}}\n", encoding="utf-8"
+        )
+
+    return root
+
+
+def test_new_job_skips_decompile_when_fetch_checkpoint_done(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新 job（空 checkpoint）+ 已完成标记 → 不重复反编译，统计取自标记（#13 规格补充 §2）。"""
+    tools, _, _, _, decompiler = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    write_fetch_marker(settings, "26.3", java_files=2)
+    plant_source_tree(settings, "26.3", files=1)
+
+    checkpoint = job_checkpoint(settings, run_one_job(settings, "26.3", {"force": False}))
+
+    assert decompiler.calls == []
+    assert "decompile" in checkpoint["stages"]
+    # 标记是权威记录：即使目录里只有 1 个 .java，也沿用它记下的 2 个。
+    assert checkpoint["java_files"] == 2
+    assert checkpoint["java_bytes"] == 2048
+
+
+def test_new_job_recompiles_when_source_tree_missing(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """标记为真但源码树不在：照样重跑反编译（不用「目录里有 .java」这种弱判据）。"""
+    tools, _, _, _, decompiler = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    write_fetch_marker(settings, "26.3", java_files=2)
+
+    run_one_job(settings, "26.3", {"force": False})
+
+    assert len(decompiler.calls) == 1
+
+
+def test_force_recompiles_even_with_fetch_checkpoint(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--force`（`options.force=true`）绕过跳过，即使标记与源码树都在。"""
+    tools, _, _, _, decompiler = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+    write_fetch_marker(settings, "26.3", java_files=2)
+    plant_source_tree(settings, "26.3", files=1)
+
+    run_one_job(settings, "26.3", {"force": True})
+
+    assert len(decompiler.calls) == 1
+
+
+def test_runner_persists_fetch_checkpoint_for_next_run(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`JobRunner` 跑完 `download`/`decompile` 也写 `cache/<version>/fetch.json`，
+    因此下一个 job（或 `mc-librarian fetch`）能据此跳过反编译。"""
+    tools, _, _, _, decompiler = fake_tools({"26.3": MODERN})
+    monkeypatch.setattr(runner_module, "default_tools", lambda settings: tools)
+
+    run_one_job(settings, "26.3", {})
+    persisted = read_checkpoint(cache_dir_for(settings.data_dir, "26.3") / CHECKPOINT_FILE_NAME)
+
+    assert persisted["stages"] == ["download", "decompile"]
+    assert persisted["java_files"] == 2
+
+    run_one_job(settings, "26.3", {})
+
+    assert len(decompiler.calls) == 1
 
 
 def test_full_pipeline_index_is_queryable_without_manual_registration(

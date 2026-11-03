@@ -190,6 +190,30 @@ def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return find_row(conn, str(row["id"]))
 
 
+def claim(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+    """认领**指定**的 queued 任务并置为 running；它不在排队状态返回 None。
+
+    与 `claim_next` 的区别：只认领给定 id，不碰队列里其它任务。`mc-librarian index` 用它
+    跑自己刚建的那一个任务。同样要求调用方用 `db.transaction()` 包住。
+    """
+    row = conn.execute(
+        f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ? AND status = 'queued'"
+        " AND cancel_requested = 0",
+        (job_id,),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    conn.execute(
+        "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?), message = ?"
+        " WHERE id = ?",
+        (utc_now(), "任务已开始", job_id),
+    )
+
+    return find_row(conn, job_id)
+
+
 def request_cancel(conn: sqlite3.Connection, job_id: str) -> Job | None:
     """请求取消：queued 直接转 canceled，running 置标志由 runner 在阶段边界收尾。
 
