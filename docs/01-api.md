@@ -1,6 +1,6 @@
 # MC Librarian API · v0.2
 
-> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（24 条路径 / 29 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
+> 机器可读契约见 [`openapi.yaml`](./openapi.yaml)（26 条路径 / 31 个操作，已通过 `openapi-spec-validator` 校验）。本文解释「为什么这么设计」。
 
 ## 1. 定位
 
@@ -31,10 +31,10 @@
 | retrieve | `POST /v1/search`、`GET /v1/symbol`、`GET /v1/references` | user |
 | read | `GET /v1/outline`、`GET /v1/read` | user |
 | answer | `POST /v1/ask`（SSE） | user |
-| auth | `POST /v1/auth/login`、`POST /v1/auth/logout`、`GET /v1/auth/me`、`GET /v1/auth/tokens`、`POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}` | 公开 / 本人 |
+| auth | `POST /v1/auth/login`、`POST /v1/auth/logout`、`GET /v1/auth/me`、`GET /v1/auth/tokens`、`POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}`、`GET /v1/invites/{token}`、`POST /v1/invites/{token}/accept` | 公开 / 本人 |
 | admin | `POST /v1/admin/versions`、`GET /v1/admin/users`、`POST /v1/admin/users`、`PATCH /v1/admin/users/{userId}`、`GET /v1/admin/jobs`、`POST /v1/admin/jobs`、`GET /v1/admin/jobs/{jobId}`、`GET /v1/admin/jobs/{jobId}/logs`、`POST /v1/admin/jobs/{jobId}/cancel`、`GET /v1/admin/settings`、`PUT /v1/admin/settings`、`GET /v1/admin/usage`、`GET /v1/admin/audit` | admin |
 
-合计 24 条路径 / 29 个操作，与 `openapi.yaml` 一一对应。
+合计 26 条路径 / 31 个操作，与 `openapi.yaml` 一一对应。
 
 ## 4. 检索接口
 
@@ -90,10 +90,14 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
   成功后更新 `last_login_at`。
 - **会话**：`GET /v1/auth/me` 读当前用户，`POST /v1/auth/logout` 删服务端会话行并清 cookie；
   登出后旧 cookie 再用即 `401`——不是靠前端删 cookie 实现的。有效期默认 168 小时（`MC_LIBRARIAN_SESSION_TTL_HOURS`）。
-- **建号**：管理员创建用户，返回**一次性邀请链接**（48 小时有效），用户自行设置密码——管理员不需要也不应该知道别人的密码。
-- **角色**：`admin` / `user`，可提升可降级；**最后一个 admin 不允许降级或停用**。
+- **建号**：管理员创建用户（`POST /v1/admin/users`，只给用户名与角色），返回**一次性邀请链接**（`/invite/<token>`，48 小时有效）；
+  用户通过 `POST /v1/invites/{token}/accept` 自设密码并直接登录——管理员不需要也不应该知道别人的密码。
+  未接受邀请的账号存的是占位哈希，任何密码都登录不进；链接用过即废，过期或账号被禁用同样返回 `404`。
+- **角色**：`admin` / `user`，可提升可降级；**最后一个启用的 admin 不允许降级或停用**（`409`）。
+  禁用账号会同时删除其全部会话，旧 cookie 立刻失效。
 - **PAT**：每人可签发多个，单独吊销，展示 `last_used_at` 与前缀。
-- **审计**：角色变更、禁用、PAT 签发/吊销、设置修改、任务创建全部落 `audit` 表。
+- **审计**：角色变更、禁用、创建用户、邀请创建/接受、PAT 签发/吊销、设置修改、任务创建全部落 `audit` 表
+  （`GET /v1/admin/audit` 可按 `actor` 用户名筛选）。
 
 密码用 **argon2id** 哈希存库（argon2-cffi 默认参数），接口与日志里都不会出现明文。
 
@@ -102,6 +106,7 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 端点 | 说明 |
 |---|---|
 | `POST /v1/admin/versions` | 注册已上传的索引文件（节点侧不构建索引） |
+| `GET/POST /v1/admin/users`、`PATCH /v1/admin/users/{id}` | 建号（返回一次性邀请链接）、升降角色、启停；最后一个启用的 admin 受保护 |
 | `POST /v1/admin/jobs` | 创建索引任务，立即返回 `202 + job`，由 `JobRunner` 串行消费（并发 1） |
 | `GET /v1/admin/jobs/{id}` | 任务状态：`stage` ∈ download/decompile/parse/summarize/finalize，`progress` 0–1 |
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；`Accept: text/event-stream` 可增量跟随 |
@@ -129,3 +134,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-03 | 0.1.0 | 初稿：search / symbol / references / outline / read / ask |
 | 2026-11-03 | 0.2.0 | 加账号体系、PAT、admin（users/jobs/settings/usage/audit）、ask 改 SSE、`latest` 移除 |
 | 2026-11-03 | 0.2.0 | issue #3：契约补 `GET/POST /v1/setup`、`Session` 相关错误响应（`Unauthorized`/`Forbidden`/`SetupCompleted`）；实现 setup 与 login/logout/me，控制面 SQLite 落地 `users`/`sessions` + `schema_version`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-03 | 0.2.0 | issue #9：契约补 `GET /v1/invites/{token}`、`POST /v1/invites/{token}/accept`，并把 `createUser` 的 `invite_url` 标为必填、给 `patchUser` 补 `404`；实现 users/audit/invites 与迁移 v2（`invites`/`audit` 两表）。属 v0.2 设计内的增量补齐，`info.version` 不变 |

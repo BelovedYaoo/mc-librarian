@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,6 +59,16 @@ def admin_client(client: TestClient) -> TestClient:
     return client
 
 
+@pytest.fixture
+def other_client(settings: Settings) -> Iterator[TestClient]:
+    """第二个「浏览器」：同一数据根上的独立 cookie jar。
+
+    用来验证「禁用即踢下线」与多账号场景（同一 client 的 cookie 会被后一次登录覆盖）。
+    """
+    with TestClient(create_app(settings)) as test_client:
+        yield test_client
+
+
 def session_cookie(client: TestClient) -> str:
     """取当前 client 手上的会话 cookie 明文（等价于浏览器里的 cookie）。"""
     value = client.cookies.get(SESSION_COOKIE_NAME)
@@ -65,3 +76,33 @@ def session_cookie(client: TestClient) -> str:
     assert value, "应该已经下发会话 cookie"
 
     return str(value)
+
+
+def invite_token(invite_url: str) -> str:
+    """从 `invite_url`（`/invite/<token>`）里取出明文 token。"""
+    return invite_url.rsplit("/", 1)[-1]
+
+
+def join_via_invite(
+    admin_client: TestClient,
+    browser: TestClient,
+    *,
+    username: str,
+    password: str,
+    role: str = "user",
+) -> dict[str, Any]:
+    """管理员建号 → 被邀请人在 `browser` 上接受邀请并登录；返回创建响应的 JSON。"""
+    created = admin_client.post("/v1/admin/users", json={"username": username, "role": role})
+
+    assert created.status_code == 201, created.text
+
+    accepted = browser.post(
+        f"/v1/invites/{invite_token(created.json()['invite_url'])}/accept",
+        json={"password": password},
+    )
+
+    assert accepted.status_code == 201, accepted.text
+
+    payload: dict[str, Any] = created.json()
+
+    return payload

@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     # 会话有效期（小时），与 `settings.security.session_ttl_hours` 的默认值保持一致。
     session_ttl_hours: int = Field(default=168, ge=1, le=24 * 365)
+    # 一次性邀请链接的有效期（小时），与 `settings.security.invite_ttl_hours` 一致。
+    invite_ttl_hours: int = Field(default=48, ge=1, le=24 * 365)
 
     @field_validator("data_dir")
     @classmethod

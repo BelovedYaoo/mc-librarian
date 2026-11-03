@@ -98,6 +98,39 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             "CREATE INDEX IF NOT EXISTS idx_pats_user_id ON pats (user_id)",
         ),
     ),
+    # v3：用户管理所需的邀请与审计（issue #9）。
+    Migration(
+        version=3,
+        statements=(
+            # 一次性邀请：明文 token 只在创建时返回一次，库里只存 sha256（同 sessions）。
+            """
+            CREATE TABLE IF NOT EXISTS invites (
+              id         TEXT PRIMARY KEY,
+              user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+              token_hash TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL,
+              used_at    TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_invites_user_id ON invites (user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_invites_token_hash ON invites (token_hash)",
+            # 审计：actor 可为空（系统动作），detail 是 JSON 文本。
+            """
+            CREATE TABLE IF NOT EXISTS audit (
+              id          TEXT PRIMARY KEY,
+              actor_id    TEXT REFERENCES users (id),
+              action      TEXT NOT NULL,
+              target      TEXT,
+              detail_json TEXT,
+              ip          TEXT,
+              created_at  TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit (created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_actor_id ON audit (actor_id)",
+        ),
+    ),
 )
 
 LATEST_VERSION: Final = MIGRATIONS[-1].version

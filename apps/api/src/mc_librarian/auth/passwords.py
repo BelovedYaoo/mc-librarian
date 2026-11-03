@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
 _hasher = PasswordHasher()
+
+# 管理员建号时用户还没设密码：占位值不是合法 argon2 哈希，任何密码都校验不过，
+# 直到用户通过邀请链接自设密码（`users.set_password`）。
+UNUSABLE_PASSWORD_HASH: Final = "!"
 
 # 用户不存在时也拿它跑一次校验，抹平「查不到用户」与「密码错」的时序差。
 _DUMMY_HASH = _hasher.hash("mc-librarian-dummy-password-for-timing")

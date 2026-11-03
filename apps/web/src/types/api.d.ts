@@ -271,6 +271,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/invites/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 校验邀请链接
+         * @description 链接仍可用时 `valid: true` 并给出对应的用户名；不存在、已使用、已过期或账号被禁用
+         *     一律 `valid: false`（不区分具体原因）。公开端点，无需会话。
+         */
+        get: operations["getInvite"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/invites/{token}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 接受邀请（设置密码并登录）
+         * @description 被邀请人自设密码，成功后激活账号并**直接下发会话 cookie**（与 `POST /v1/auth/login`
+         *     同一套 cookie），因此设完密码即已登录。链接一次性：成功即标记已用，再用返回 `404`。
+         *     公开端点，无需会话。
+         */
+        post: operations["acceptInvite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/versions": {
         parameters: {
             query?: never;
@@ -662,6 +705,14 @@ export interface components {
             username: string;
             password: string;
         };
+        InviteStatus: {
+            valid: boolean;
+            /** @description 邀请对应的用户名；链接无效时为空 */
+            username?: string;
+        };
+        AcceptInviteRequest: {
+            password: string;
+        };
         User: {
             id: string;
             username: string;
@@ -859,6 +910,8 @@ export interface components {
         /** @description 相对仓库根的路径 */
         Path: string;
         JobId: string;
+        /** @description 邀请链接里的明文 token */
+        InviteToken: string;
     };
     requestBodies: never;
     headers: never;
@@ -1283,6 +1336,63 @@ export interface operations {
             };
         };
     };
+    getInvite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 邀请链接里的明文 token */
+                token: components["parameters"]["InviteToken"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InviteStatus"];
+                };
+            };
+        };
+    };
+    acceptInvite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 邀请链接里的明文 token */
+                token: components["parameters"]["InviteToken"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description 已设置密码并登录 */
+            201: {
+                headers: {
+                    /**
+                     * @description `mc_librarian_session`，HttpOnly + SameSite=Lax；`Secure` 由服务端配置
+                     *     `MC_LIBRARIAN_COOKIE_SECURE` 控制（本地 http 为 false，生产为 true）
+                     */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["BadRequest"];
+        };
+    };
     registerVersion: {
         parameters: {
             query?: never;
@@ -1363,8 +1473,8 @@ export interface operations {
                 content: {
                     "application/json": {
                         user: components["schemas"]["User"];
-                        /** @description 一次性邀请链接，48 小时有效 */
-                        invite_url?: string;
+                        /** @description 一次性邀请链接（站点根下的相对路径），48 小时有效 */
+                        invite_url: string;
                     };
                 };
             };
@@ -1405,6 +1515,7 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
+            404: components["responses"]["NotFound"];
             /** @description 违反最后管理员保护 */
             409: {
                 headers: {

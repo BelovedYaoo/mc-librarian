@@ -33,6 +33,26 @@ export type TokenCreateRequest =
 
 export type TokenCreated =
   paths['/v1/auth/tokens']['post']['responses'][201]['content']['application/json'];
+/** `GET /v1/admin/users` 的响应体。 */
+export type UserList =
+  paths['/v1/admin/users']['get']['responses'][200]['content']['application/json'];
+
+/** `POST /v1/admin/users` 的响应体：用户 + **仅此一次**返回的邀请链接。 */
+export type CreatedUser =
+  paths['/v1/admin/users']['post']['responses'][201]['content']['application/json'];
+
+export type CreateUserRequest =
+  paths['/v1/admin/users']['post']['requestBody']['content']['application/json'];
+
+export type PatchUserRequest =
+  paths['/v1/admin/users/{userId}']['patch']['requestBody']['content']['application/json'];
+
+/** `GET /v1/invites/{token}` 的响应体：链接是否仍可用。 */
+export type InviteStatus =
+  paths['/v1/invites/{token}']['get']['responses'][200]['content']['application/json'];
+
+export type AcceptInviteRequest =
+  paths['/v1/invites/{token}/accept']['post']['requestBody']['content']['application/json'];
 
 /** RFC 7807 错误体，直接取契约的 `Problem`，不从某一条响应里反推。 */
 export type Problem = components['schemas']['Problem'];
@@ -126,6 +146,15 @@ function postJson<T>(path: string, body: unknown, options: RequestOptions = {}):
   });
 }
 
+function patchJson<T>(path: string, body: unknown, options: RequestOptions = {}): Promise<T> {
+  return request<T>(path, {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * 存活探针。开发期 `CONFIG.serverUrl` 是 `/api`，由 vite 代理到后端；
  * 生产期由反向代理转发，前端代码不需要区分环境。
@@ -169,4 +198,31 @@ export function createToken(body: TokenCreateRequest): Promise<TokenCreated> {
 /** 吊销访问令牌；吊销后下一次用该令牌请求立即 401。 */
 export function revokeToken(tokenId: string): Promise<void> {
   return request<void>(`/v1/auth/tokens/${tokenId}`, { method: 'DELETE' });
+}
+
+/** 用户列表（仅 admin；非 admin 由后端返回 403）。 */
+export function listUsers(signal?: AbortSignal): Promise<UserList> {
+  return request<UserList>('/v1/admin/users', { signal });
+}
+
+/** 建号：管理员不设密码，后端返回仅此一次可见的邀请链接。 */
+export function createUser(body: CreateUserRequest): Promise<CreatedUser> {
+  return postJson<CreatedUser>('/v1/admin/users', body);
+}
+
+/** 改角色 / 启停（仅 admin）；违反最后管理员保护时后端返回 409。 */
+export function patchUser(userId: string, body: PatchUserRequest): Promise<User> {
+  return patchJson<User>(`/v1/admin/users/${encodeURIComponent(userId)}`, body);
+}
+
+/** 校验邀请链接是否仍可用（公开）。 */
+export function getInvite(token: string, signal?: AbortSignal): Promise<InviteStatus> {
+  return request<InviteStatus>(`/v1/invites/${encodeURIComponent(token)}`, { signal });
+}
+
+/** 接受邀请：设密码 + 激活 + 直接登录（后端下发会话 cookie）。 */
+export function acceptInvite(token: string, body: AcceptInviteRequest): Promise<User> {
+  return postJson<User>(`/v1/invites/${encodeURIComponent(token)}/accept`, body, {
+    skipUnauthorizedHandler: true,
+  });
 }

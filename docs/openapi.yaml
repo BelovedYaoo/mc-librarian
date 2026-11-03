@@ -364,6 +364,56 @@ paths:
       responses:
         "204": { description: 已吊销 }
 
+  /v1/invites/{token}:
+    get:
+      tags: [auth]
+      summary: 校验邀请链接
+      description: |
+        链接仍可用时 `valid: true` 并给出对应的用户名；不存在、已使用、已过期或账号被禁用
+        一律 `valid: false`（不区分具体原因）。公开端点，无需会话。
+      security: []
+      operationId: getInvite
+      parameters:
+        - $ref: "#/components/parameters/InviteToken"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InviteStatus" }
+
+  /v1/invites/{token}/accept:
+    post:
+      tags: [auth]
+      summary: 接受邀请（设置密码并登录）
+      description: |
+        被邀请人自设密码，成功后激活账号并**直接下发会话 cookie**（与 `POST /v1/auth/login`
+        同一套 cookie），因此设完密码即已登录。链接一次性：成功即标记已用，再用返回 `404`。
+        公开端点，无需会话。
+      security: []
+      operationId: acceptInvite
+      parameters:
+        - $ref: "#/components/parameters/InviteToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcceptInviteRequest" }
+      responses:
+        "201":
+          description: 已设置密码并登录
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: |
+                `mc_librarian_session`，HttpOnly + SameSite=Lax；`Secure` 由服务端配置
+                `MC_LIBRARIAN_COOKIE_SECURE` 控制（本地 http 为 false，生产为 true）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/BadRequest" }
+
   /v1/admin/versions:
     post:
       tags: [admin]
@@ -428,10 +478,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [user]
+                required: [user, invite_url]
                 properties:
                   user: { $ref: "#/components/schemas/User" }
-                  invite_url: { type: string, description: 一次性邀请链接，48 小时有效 }
+                  invite_url:
+                    type: string
+                    description: 一次性邀请链接（站点根下的相对路径），48 小时有效
         "409": { description: 用户名已存在 }
 
   /v1/admin/users/{userId}:
@@ -460,6 +512,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: 违反最后管理员保护 }
 
   /v1/admin/jobs:
@@ -666,6 +719,12 @@ components:
       in: path
       required: true
       schema: { type: string }
+    InviteToken:
+      name: token
+      in: path
+      required: true
+      schema: { type: string }
+      description: 邀请链接里的明文 token
 
   responses:
     BadRequest:
@@ -942,6 +1001,21 @@ components:
           minLength: 3
           maxLength: 32
           pattern: "^[a-zA-Z0-9_.-]+$"
+        password: { type: string, minLength: 8, maxLength: 128 }
+
+    InviteStatus:
+      type: object
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+        username:
+          type: string
+          description: 邀请对应的用户名；链接无效时为空
+
+    AcceptInviteRequest:
+      type: object
+      required: [password]
+      properties:
         password: { type: string, minLength: 8, maxLength: 128 }
 
     User:
