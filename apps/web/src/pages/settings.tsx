@@ -1,3 +1,4 @@
+import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 
@@ -20,22 +21,25 @@ export default function SettingsPage() {
     <>
       <title>{metadata.title}</title>
 
-      <Stack spacing={3}>
-        <div>
-          <Typography variant="h4" sx={{ mb: 1 }}>
-            设置
-          </Typography>
-          <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-            {isAdmin
-              ? '实例设置（模型 / 问答 / 索引 / 会话 / 告警）与当前账号的个人访问令牌。保存后立即生效。'
-              : `管理当前账号（${user?.username ?? '—'}）的个人访问令牌。`}
-          </Typography>
-        </div>
+      {/* 本页全是表单：外壳给到 `xl`，内容列自己收到 720，输入框不会被拉成长条。 */}
+      <Box sx={{ maxWidth: 720 }}>
+        <Stack spacing={3}>
+          <div>
+            <Typography variant="h4" sx={{ mb: 1 }}>
+              设置
+            </Typography>
+            <Typography variant="body1" sx={{ color: 'text.secondary' }}>
+              {isAdmin
+                ? '实例设置（模型 / 问答 / 索引 / 会话 / 告警）与当前账号的个人访问令牌。保存后立即生效。'
+                : `管理当前账号（${user?.username ?? '—'}）的个人访问令牌。`}
+            </Typography>
+          </div>
 
-        {isAdmin && <SettingsView />}
+          {isAdmin && <SettingsView />}
 
-        <TokensView />
-      </Stack>
+          <TokensView />
+        </Stack>
+      </Box>
     </>
   );
 }

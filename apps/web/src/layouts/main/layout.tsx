@@ -17,13 +17,19 @@ import { HeaderSection, LayoutSection, MainSection, NavSection } from 'src/layou
 
 export type MainLayoutProps = {
   children: React.ReactNode;
+  /**
+   * 内容列宽：`'xl'`（1536px，默认）留给表单/列表/表格页；`false` = 全宽，由页面自己排布。
+   * 问答页用 `false`：它要的是聊天工作台（左栏 + 消息区 + 钉底输入区），不是文档页的窄栏。
+   */
+  maxWidth?: 'md' | 'xl' | false;
 };
 
 /** 受保护的后台外壳：左侧导航 + 顶部当前用户与登出入口。 */
-export function MainLayout({ children }: MainLayoutProps) {
+export function MainLayout({ children, maxWidth = 'xl' }: MainLayoutProps) {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const [signingOut, setSigningOut] = useState(false);
+  const fullWidth = maxWidth === false;
 
   const handleSignOut = async () => {
     setSigningOut(true);
@@ -54,6 +60,8 @@ export function MainLayout({ children }: MainLayoutProps) {
 
   return (
     <LayoutSection
+      // 全宽页（问答）自己管滚动：外壳钉在视口高度上，滚动条只出现在页面内部。
+      sx={fullWidth ? { height: '100dvh', overflow: 'hidden' } : undefined}
       headerSection={
         <HeaderSection>
           <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
@@ -96,17 +104,28 @@ export function MainLayout({ children }: MainLayoutProps) {
         </HeaderSection>
       }
     >
-      <MainSection>
+      <MainSection sx={fullWidth ? { minHeight: 0, overflow: 'hidden' } : undefined}>
         <Box
           sx={{
             display: 'flex',
             flex: '1 1 auto',
             flexDirection: { xs: 'column', md: 'row' },
+            // 固定高度的外壳里，flex 子项必须能收缩，否则会溢出被裁掉。
+            minHeight: 0,
           }}
         >
           <NavSection items={navItems} />
 
-          <Container maxWidth="md" sx={{ py: { xs: 5, md: 8 }, flex: '1 1 auto', minWidth: 0 }}>
+          <Container
+            maxWidth={maxWidth}
+            sx={{
+              flex: '1 1 auto',
+              minWidth: 0,
+              ...(fullWidth
+                ? { p: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }
+                : { py: { xs: 5, md: 8 } }),
+            }}
+          >
             {children}
           </Container>
         </Box>

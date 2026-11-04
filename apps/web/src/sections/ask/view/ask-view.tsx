@@ -5,8 +5,6 @@ import { useSearchParams } from 'react-router';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Card from '@mui/material/Card';
-import CardContent from '@mui/material/CardContent';
 import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import Collapse from '@mui/material/Collapse';
@@ -29,8 +27,26 @@ import { ConversationList } from './conversation-list';
 
 /** 左栏宽度（宽屏常驻）。 */
 const SIDEBAR_WIDTH = 260;
+/** 距底多少像素以内算「用户还在底部」：只有这时新内容才自动滚到底。 */
+const STICK_TO_BOTTOM_PX = 120;
 /** URL 里当前会话的参数名（`?c=<id>`），刷新与分享链接靠它回到同一个会话。 */
 const CONVERSATION_PARAM = 'c';
+
+/**
+ * 空态的示例问题（硬编码，不读后端）。
+ *
+ * 取自评测集 `apps/api/eval/questions.json`，只挑机制 / 数值 / 定位三类的通用题：
+ * 机制 mech-01/mech-02、数值 num-01/num-05、定位 loc-01/loc-02；不含「版本差异」那类
+ * （空态下还没选版本，跨版本问题会把新用户带沟里）。
+ */
+const EXAMPLE_QUESTIONS = [
+  '刷怪上限是怎么算的',
+  '随机刻是怎么驱动作物生长的',
+  '默认的 mob cap 是多少',
+  '玩家的基础移动速度是多少',
+  '处理甘蔗生长的类在哪',
+  '解析掉落表 JSON 的类在哪',
+];
 
 /** 工具轨迹里的一步：调用前只有 `args`，返回后补上 `ok` / `hits`；`context_budget` 只有 `args`。 */
 type StepTrace = {
@@ -156,7 +172,10 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
 // ----------------------------------------------------------------------
 
 /**
- * `/ask` 聊天页：左栏历史会话 + 主区「输入框 → 工具轨迹 → 增量答案 → 可点击引用」。
+ * `/ask` 聊天页：顶栏 + 左栏历史会话 + 右侧「消息区（内部滚动）+ 输入区（钉底）」。
+ *
+ * 页面自己占满视口高度且不滚动（外壳 `MainLayout maxWidth={false}`），滚动条只出现在左栏与
+ * 消息区内部；新内容只在用户已贴着底（< 120px）时自动跟随，往上翻历史不会被拽回去。
  *
  * 当前会话以 `?c=<id>` 为准：刷新页面后左栏与主区都还在，链接也能分享给自己。
  * 首轮提问时后端自动建会话，`done` 事件回传 id，这里把它写进 URL（`displayed` ref 保证
@@ -185,6 +204,10 @@ export function AskView() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   // 主区当前展示的是哪个会话：写 URL 时先同步它，避免自己触发的「载入历史」。
   const displayed = useRef<string | null>(null);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const questionInputRef = useRef<HTMLTextAreaElement | null>(null);
+  // 是否跟随新内容滚到底：用户往上翻历史时置 false，滚回底部附近再置 true。
+  const stickToBottom = useRef(true);
 
   const versions = useMemo(
     () => (versionsState.status === 'ready' ? versionsState.versions : []),
@@ -216,7 +239,11 @@ export function AskView() {
 
     getConversation(conversationId)
       .then((detail) => {
-        if (!cancelled) setTurns(turnsFromDetail(detail));
+        if (cancelled) return;
+
+        // 换会话时从头看：重新贴底，别沿用上一个会话里「用户翻到中间」的状态。
+        stickToBottom.current = true;
+        setTurns(turnsFromDetail(detail));
       })
       .catch((cause: unknown) => {
         if (!cancelled) setLoadError(errorText(cause));
@@ -240,6 +267,7 @@ export function AskView() {
 
   const startNewConversation = () => {
     displayed.current = null;
+    stickToBottom.current = true;
     setTurns([]);
     setLoadError(null);
     setNavOpen(false);
@@ -258,9 +286,47 @@ export function AskView() {
     }
   };
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
+  /**
+   * 输入框的键盘约定：`Enter` 提交、`Shift+Enter` 换行。
+   *
+   * 中文输入法组合期间（拼音还在候选框里）按 Enter 是「上屏选词」，`isComposing` 为 true，
+   * 必须先放行给输入法——否则中文用户选词就误提交。
+   */
+  const handleQuestionKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    if (event.nativeEvent.isComposing) return;
 
+    event.preventDefault();
+    void submit();
+  };
+
+  /** 点示例问题：填进输入框并聚焦，让用户可以改完再发。 */
+  const pickExample = (example: string) => {
+    setQuestion(example);
+    questionInputRef.current?.focus();
+  };
+
+  /** 只有用户还在底部附近（< 120px）才跟随新内容；往上翻看历史时不得被拽回底部。 */
+  const handleMessagesScroll = () => {
+    const element = messagesRef.current;
+
+    if (element === null) return;
+
+    stickToBottom.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight < STICK_TO_BOTTOM_PX;
+  };
+
+  useEffect(() => {
+    if (!stickToBottom.current) return;
+
+    const element = messagesRef.current;
+
+    if (element !== null) element.scrollTop = element.scrollHeight;
+  }, [turns]);
+
+  const submit = async () => {
     if (busy || version === '' || question.trim() === '') return;
 
     const asked = question.trim();
@@ -271,6 +337,8 @@ export function AskView() {
     setQuestion('');
     setBusy(true);
     setLoadError(null);
+    // 自己发的问题必须看到：无论刚才翻到哪儿，都滚到底。
+    stickToBottom.current = true;
     setTurns((current) => [...current, emptyTurn(asked, askedVersion)]);
 
     try {
@@ -314,6 +382,11 @@ export function AskView() {
     }
   };
 
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    void submit();
+  };
+
   const sidebar = (
     <ConversationList
       conversations={conversations}
@@ -328,8 +401,23 @@ export function AskView() {
   );
 
   return (
-    <Stack spacing={3}>
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }}>
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          flexShrink: 0,
+          alignItems: 'center',
+          px: { xs: 2, md: 3 },
+          py: 1.5,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+        }}
+      >
+        <Typography variant="h6" sx={{ flex: '1 1 auto' }}>
+          问答
+        </Typography>
+
         <Button
           size="small"
           sx={{ display: { xs: 'inline-flex', md: 'none' } }}
@@ -337,10 +425,6 @@ export function AskView() {
         >
           会话
         </Button>
-
-        <Typography variant="h4" sx={{ flex: '1 1 auto' }}>
-          问答
-        </Typography>
 
         <Button
           size="small"
@@ -351,16 +435,18 @@ export function AskView() {
         </Button>
       </Stack>
 
-      <Stack direction="row" spacing={2} sx={{ alignItems: 'flex-start' }}>
+      <Box sx={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
         {sidebarOpen && (
           <Box
             sx={{
-              display: { xs: 'none', md: 'block' },
+              display: { xs: 'none', md: 'flex' },
+              flexDirection: 'column',
               width: SIDEBAR_WIDTH,
               flexShrink: 0,
-              position: 'sticky',
-              top: 16,
-              maxHeight: 'calc(100vh - 32px)',
+              minHeight: 0,
+              p: 2,
+              borderRight: '1px solid',
+              borderColor: 'divider',
             }}
           >
             {sidebar}
@@ -376,81 +462,112 @@ export function AskView() {
           <Box sx={{ width: 280, height: '100%', p: 2 }}>{sidebar}</Box>
         </Drawer>
 
-        <Stack spacing={3} sx={{ flex: '1 1 auto', minWidth: 0 }}>
-          <Card variant="outlined">
-            <CardContent>
-              <Box component="form" onSubmit={handleSubmit}>
-                <Stack spacing={2}>
-                  <TextField
-                    select
-                    label="版本"
-                    value={version}
-                    onChange={(event) => setVersion(event.target.value)}
-                    sx={{ maxWidth: 220 }}
-                    disabled={versions.length === 0}
-                    helperText="问答只在单个版本上检索（不支持「全部版本」）"
-                  >
-                    {versions.map((item) => (
-                      <MenuItem key={item.version} value={item.version}>
-                        {item.version}
-                      </MenuItem>
-                    ))}
-                  </TextField>
+        <Box
+          sx={{
+            display: 'flex',
+            flexDirection: 'column',
+            flex: '1 1 auto',
+            minWidth: 0,
+            minHeight: 0,
+          }}
+        >
+          {/* 消息区：只有它滚，页面不滚。`minHeight: 0` 必须有，否则 flex 子项不会收缩。 */}
+          <Box
+            ref={messagesRef}
+            onScroll={handleMessagesScroll}
+            sx={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', px: { xs: 2, md: 3 }, py: 2 }}
+          >
+            {loadingConversation && (
+              <Stack sx={{ alignItems: 'center', py: 2 }}>
+                <CircularProgress size={24} />
+              </Stack>
+            )}
 
-                  <TextField
-                    label="问题"
-                    value={question}
-                    onChange={(event) => setQuestion(event.target.value)}
-                    placeholder="刷怪上限在哪定义？"
-                    multiline
-                    minRows={2}
-                    fullWidth
+            {loadError !== null && <Alert severity="error">{loadError}</Alert>}
+
+            {turns.length === 0 && !loadingConversation ? (
+              <EmptyState onPick={pickExample} />
+            ) : (
+              <Stack spacing={3}>
+                {turns.map((turn, index) => (
+                  <TurnBlock
+                    key={`${index}:${turn.question}`}
+                    turn={turn}
+                    currentVersion={version}
+                    onOpenCitation={(citation) => {
+                      // 历史轮次按当时版本打开；版本未知（v10 之前落库）才用当前选中的版本。
+                      setActiveCitation({ citation, version: turn.version || version });
+                      setDrawerOpen(true);
+                    }}
                   />
+                ))}
+              </Stack>
+            )}
+          </Box>
 
-                  <Stack direction="row" spacing={2}>
-                    <Box sx={{ flex: '1 1 auto' }} />
+          {/* 输入区：钉底，不随消息滚动。版本选择器属于这里——它是「这次提问的选择」。 */}
+          <Box
+            component="form"
+            onSubmit={handleSubmit}
+            sx={{
+              flexShrink: 0,
+              px: { xs: 2, md: 3 },
+              py: 2,
+              borderTop: '1px solid',
+              borderColor: 'divider',
+            }}
+          >
+            {versionsState.status === 'ready' && versions.length === 0 && (
+              <Alert severity="info" sx={{ mb: 2 }}>
+                还没有已索引版本。管理员在「版本」页提交一次索引任务后再回来。
+              </Alert>
+            )}
 
-                    <Button
-                      type="submit"
-                      variant="contained"
-                      disabled={busy || version === '' || question.trim() === ''}
-                    >
-                      {busy ? '回答中…' : '提问'}
-                    </Button>
-                  </Stack>
-                </Stack>
-              </Box>
-            </CardContent>
-          </Card>
+            <Stack spacing={1.5}>
+              <TextField
+                select
+                size="small"
+                label="版本"
+                value={version}
+                onChange={(event) => setVersion(event.target.value)}
+                sx={{ width: 160 }}
+                disabled={versions.length === 0}
+                helperText="只在选中的版本上检索"
+              >
+                {versions.map((item) => (
+                  <MenuItem key={item.version} value={item.version}>
+                    {item.version}
+                  </MenuItem>
+                ))}
+              </TextField>
 
-          {versionsState.status === 'ready' && versions.length === 0 && (
-            <Alert severity="info">
-              还没有已索引版本。管理员在「版本」页提交一次索引任务后再回来。
-            </Alert>
-          )}
+              <Stack direction="row" spacing={2} sx={{ alignItems: 'flex-end' }}>
+                <TextField
+                  label="问题"
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  placeholder="刷怪上限在哪定义？"
+                  multiline
+                  minRows={1}
+                  maxRows={8}
+                  fullWidth
+                  inputRef={questionInputRef}
+                  slotProps={{ htmlInput: { onKeyDown: handleQuestionKeyDown } }}
+                />
 
-          {loadingConversation && (
-            <Stack sx={{ alignItems: 'center', py: 2 }}>
-              <CircularProgress size={24} />
+                <Button
+                  type="submit"
+                  variant="contained"
+                  disabled={busy || version === '' || question.trim() === ''}
+                  sx={{ flexShrink: 0 }}
+                >
+                  {busy ? '回答中…' : '提问'}
+                </Button>
+              </Stack>
             </Stack>
-          )}
-
-          {loadError !== null && <Alert severity="error">{loadError}</Alert>}
-
-          {turns.map((turn, index) => (
-            <TurnBlock
-              key={`${index}:${turn.question}`}
-              turn={turn}
-              currentVersion={version}
-              onOpenCitation={(citation) => {
-                // 历史轮次按当时版本打开；版本未知（v10 之前落库）才用当前选中的版本。
-                setActiveCitation({ citation, version: turn.version || version });
-                setDrawerOpen(true);
-              }}
-            />
-          ))}
-        </Stack>
-      </Stack>
+          </Box>
+        </Box>
+      </Box>
 
       <CitationDrawer
         open={drawerOpen}
@@ -458,6 +575,44 @@ export function AskView() {
         version={activeCitation?.version ?? ''}
         onClose={() => setDrawerOpen(false)}
       />
+    </Box>
+  );
+}
+
+// ----------------------------------------------------------------------
+
+/** 空态：还没有任何消息时居中给一句说明 + 几个可点的示例问题（点了填进输入框并聚焦）。 */
+function EmptyState({ onPick }: { onPick: (question: string) => void }) {
+  return (
+    <Stack
+      spacing={3}
+      sx={{
+        minHeight: '100%',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center',
+        px: 2,
+      }}
+    >
+      <Typography variant="body1" sx={{ color: 'text.secondary', maxWidth: 520 }}>
+        先选版本，再提问。回答会带上源码位置，点引用可看整文件。
+      </Typography>
+
+      <Stack spacing={1.5} sx={{ alignItems: 'center' }}>
+        <Typography variant="subtitle2" sx={{ color: 'text.secondary' }}>
+          试试这些
+        </Typography>
+
+        <Box
+          sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, justifyContent: 'center', maxWidth: 640 }}
+        >
+          {EXAMPLE_QUESTIONS.map((example) => (
+            <Button key={example} size="small" variant="outlined" onClick={() => onPick(example)}>
+              {example}
+            </Button>
+          ))}
+        </Box>
+      </Stack>
     </Stack>
   );
 }

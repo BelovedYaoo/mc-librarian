@@ -102,13 +102,13 @@ export const routesSection: RouteObject[] = [
     ),
   },
 
-  // 问答：服务端检索循环 + SSE（所有登录用户可用）
+  // 问答：服务端检索循环 + SSE（所有登录用户可用）。全宽 + 满屏：聊天布局自己做滚动。
   {
     path: paths.ask,
     element: (
       <RequireAuth>
         <Suspense fallback={<SplashScreen />}>
-          <MainLayout>
+          <MainLayout maxWidth={false}>
             <AskPage />
           </MainLayout>
         </Suspense>

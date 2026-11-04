@@ -115,9 +115,10 @@ const markdownSx = {
   '& h2': { fontSize: '1.3rem' },
   '& h3': { fontSize: '1.15rem' },
   '& h4, & h5, & h6': { fontSize: '1rem' },
-  '& p': { my: 1, lineHeight: 1.7 },
+  // 段落与列表项限宽提升可读性；表格/代码块**不限**（答案里的宽表与长代码行靠可用宽度）。
+  '& p': { my: 1, lineHeight: 1.7, maxWidth: 900 },
   '& ul, & ol': { my: 1, pl: 3 },
-  '& li': { my: 0.5, lineHeight: 1.7 },
+  '& li': { my: 0.5, lineHeight: 1.7, maxWidth: 900 },
   '& li > p': { my: 0 },
   '& blockquote': {
     my: 1,
