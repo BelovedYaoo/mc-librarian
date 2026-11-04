@@ -225,10 +225,45 @@ class Settings(BaseSettings):
         return DATA_DIR_ENV in os.environ
 
 
+ENV_FILE_ENV: Final = "MC_LIBRARIAN_ENV_FILE"
+ENV_FILE_NAME: Final = ".env"
+
+
+def env_file_path() -> Path | None:
+    """定位启动时要读的 `.env`：先看 `MC_LIBRARIAN_ENV_FILE`，再找 cwd 与仓库根。
+
+    只在 `get_settings()`（服务与 CLI 入口）里用；测试里直接构造 `Settings(...)` 的路径
+    不经过这里，所以开发者的 `.env` 不会污染测试（否则「未配置 LLM」这类断言会随机失效）。
+    """
+    explicit = os.environ.get(ENV_FILE_ENV)
+
+    if explicit:
+        return Path(explicit).expanduser()
+
+    candidates = [Path.cwd() / ENV_FILE_NAME]
+    root = find_repo_root(Path.cwd())
+
+    if root is not None:
+        candidates.append(root / ENV_FILE_NAME)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """进程级单例，便于在路由中注入。"""
-    return Settings()
+    """进程级单例，便于在路由中注入。启动时顺带读仓库根的 `.env`（若存在）。"""
+    env_file = env_file_path()
+
+    if env_file is None:
+        return Settings()
+
+    # `_env_file` 是 pydantic-settings 的运行时参数，不在 `Settings` 的类型签名里，
+    # mypy 看不到它，所以这里必须显式忽略。
+    return Settings(_env_file=env_file)  # type: ignore[call-arg]
 
 
 def legacy_env_warnings() -> list[str]:

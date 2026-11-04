@@ -10,7 +10,18 @@
 	# 前端只认 `/api` 前缀（apps/web/vite.config.ts 的 dev/preview 代理同构），
 	# 转发前把前缀剥掉：`/api/v1/health` → api 容器的 `/v1/health`。
 	handle_path /api/* {
-		reverse_proxy api:8787
+		reverse_proxy api:8787 {
+			# SSE：不要让 Caddy 攒内容，否则 /api/v1/ask 的增量事件会被延迟。
+			flush_interval -1
+		}
+	}
+
+	# 公开 API 表面：契约（docs/openapi.yaml）里的 servers 是根域名，
+	# 所以 `/v1/*` 必须原样转发到 api，不能落进下面的 SPA 回退。
+	handle /v1/* {
+		reverse_proxy api:8787 {
+			flush_interval -1
+		}
 	}
 
 	# 其余走静态站点；react-router 的前端路由（/login、/browse…）回退到 index.html。

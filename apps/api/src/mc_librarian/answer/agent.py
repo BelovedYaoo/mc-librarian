@@ -43,6 +43,12 @@ CONTEXT_BUDGET_TOOL: Final = "context_budget"
 DEGRADED_NOTICE: Final = "模型暂不可用，以下是相关代码位置"
 # 达到步数上限时答案开头的说明（规格 §2）。
 MAX_STEPS_NOTICE: Final = "已达检索步数上限，以下基于已获取的信息"
+# 收尾时追加给模型的指令：光撤掉工具不够——模型会继续「想调工具」而给出空文本，
+# 必须明确要求它现在就答（实测 deepseek 这类推理模型在无工具时会返回空 content）。
+FORCE_ANSWER_PROMPT: Final = (
+    "已达到检索步数上限。请立即基于上面已经获取到的信息直接给出最终答案，"
+    "不要再请求任何工具。如果信息不足，请明确指出还缺什么。"
+)
 # 引用去重后的条数上限：一次问答最多给前端这么多可点击位置。
 MAX_CITATIONS: Final = 20
 # 截断到剩余预算时，单个工具结果至少留这么多 token（否则模型看不到任何内容）。
@@ -182,15 +188,24 @@ class AskRun:
             return
 
         try:
-            completion = await self._call(messages, [])
+            completion = await self._call(
+                [*messages, {"role": "user", "content": FORCE_ANSWER_PROMPT}], []
+            )
         except (ChatError, TimeoutError, OSError) as error:
             async for event in self._degrade(f"模型调用失败：{error}"):
                 yield event
 
             return
 
-        # 强制收尾这一次就算模型还想调工具也不执行：拿它的文本作答（可能是空）。
+        # 强制收尾这一次就算模型还想调工具也不执行：拿它的文本作答。
         body = completion.content.strip()
+
+        if not body:
+            # 模型仍然没给文本（例如推理预算全花在思考上）：退化成「只给位置」，不要交一片空白。
+            async for event in self._degrade("检索步数用尽且模型未给出文本答案"):
+                yield event
+
+            return
         self.answer = f"{MAX_STEPS_NOTICE}。\n{body}".strip()
         async for event in self._finish("max_steps"):
             yield event

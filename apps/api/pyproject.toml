@@ -15,6 +15,8 @@ dependencies = [
   "jieba>=0.42",
   "pydantic>=2.12",
   "pydantic-settings>=2.11",
+  # 读仓库根的 .env（`get_settings()` 用；显式声明，否则新环境上会静默失效）。
+  "python-dotenv>=1.0",
   # token 计数口径：`#13` 的验收标准（26.3 约 7.5M token）是用 cl100k 真分词器实测的，
   # 常数估算在同一批源码上偏 13%–27%，两个口径不可比。装不上时退回常数估算并写 warn。
   "tiktoken>=0.14",
