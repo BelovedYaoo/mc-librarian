@@ -10,8 +10,13 @@ import Drawer from '@mui/material/Drawer';
 import Stack from '@mui/material/Stack';
 import Switch from '@mui/material/Switch';
 import Typography from '@mui/material/Typography';
+import { useTheme } from '@mui/material/styles';
 
 import { ApiError, readFile } from 'src/lib/api-client';
+
+import type { HighlightLanguage, HighlightedLine, HighlightTheme } from './shiki-highlighter';
+
+import { highlightLines, languageForPath, themeForMode } from './shiki-highlighter';
 
 // ----------------------------------------------------------------------
 
@@ -19,6 +24,8 @@ import { ApiError, readFile } from 'src/lib/api-client';
 const LINE_HEIGHT = 20;
 /** 可视区上下各多渲染的行数，滚动时留出缓冲，避免白屏闪烁。 */
 const OVERSCAN = 200;
+/** 高亮前的防抖窗口：连续滚动时不为每一帧都跑一次 tokenizer。 */
+const HIGHLIGHT_DEBOUNCE_MS = 80;
 
 type LoadState =
   | { status: 'idle' }
@@ -214,6 +221,7 @@ function FileViewer({
   const lines = useMemo(() => (slice.content === '' ? [] : slice.content.split('\n')), [slice]);
   const startLine = slice.start;
 
+  const { palette } = useTheme();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const frame = useRef<number | null>(null);
   const [view, setView] = useState({ top: 0, height: 0 });
@@ -274,6 +282,14 @@ function FileViewer({
     Math.min(total, from + 1)
   );
 
+  // 只把**可视窗口**那段交给 Shiki：整文件 `codeToHtml` 会在每次滚动时全量重排。
+  const code = lines.slice(from, to).join('\n');
+  const highlighted = useHighlightedLines(
+    code,
+    languageForPath(slice.path),
+    themeForMode(palette.mode)
+  );
+
   return (
     <Box
       ref={scrollRef}
@@ -327,7 +343,7 @@ function FileViewer({
                 pr: 1,
               }}
             >
-              {line === '' ? ' ' : line}
+              <CodeText line={line} tokens={highlighted?.[index] ?? null} />
             </Box>
           </Box>
         );
@@ -336,4 +352,60 @@ function FileViewer({
       <Box sx={{ height: Math.max(0, (total - to) * LINE_HEIGHT) }} />
     </Box>
   );
+}
+
+// ----------------------------------------------------------------------
+
+/**
+ * 可视窗口的异步高亮。
+ *
+ * 返回的 token 只在 `code` 与当前窗口一致时才有效，否则回退纯文本（首帧）——窗口一变就
+ * 立即失效，避免把上一段的着色套到新的一段上。防抖 `HIGHLIGHT_DEBOUNCE_MS` 保证连续滚动
+ * 不会为每一帧都跑一次 tokenizer。着色只改前景色、不改字符与字重，因此换行与行高都不变，
+ * 高亮落地时不会跳位。
+ */
+function useHighlightedLines(
+  code: string,
+  lang: HighlightLanguage | 'text',
+  theme: HighlightTheme
+): HighlightedLine[] | null {
+  const [state, setState] = useState<{ code: string; lines: HighlightedLine[] } | null>(null);
+
+  useEffect(() => {
+    if (lang === 'text') return undefined;
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      highlightLines(code, lang, theme)
+        .then((lines) => {
+          if (!cancelled) setState({ code, lines });
+        })
+        .catch(() => {
+          // 高亮失败退回纯文本即可，不影响阅读，也不必打断用户。
+        });
+    }, HIGHLIGHT_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [code, lang, theme]);
+
+  return state !== null && state.code === code ? state.lines : null;
+}
+
+/**
+ * 一行的内容：高亮未就绪时是纯文本，就绪后是逐段着色的 `span`。
+ *
+ * 只写 `color`（不写字重/斜体）：字符与字宽与纯文本完全一致，高亮替换时不会重新换行，
+ * 因此 `LINE_HEIGHT` 恒定、滚动不跳位。
+ */
+function CodeText({ line, tokens }: { line: string; tokens: HighlightedLine | null }) {
+  if (tokens === null || tokens.length === 0) return line === '' ? ' ' : line;
+
+  return tokens.map((token) => (
+    <span key={token.offset} style={{ color: token.color }}>
+      {token.content}
+    </span>
+  ));
 }
