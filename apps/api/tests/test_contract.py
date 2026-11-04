@@ -985,6 +985,7 @@ def test_conversation_schemas_match() -> None:
             "content",
             "citations",
             "usage",
+            "version",
             "created_at",
         }
         assert message["properties"]["role"]["enum"] == ["user", "assistant"]

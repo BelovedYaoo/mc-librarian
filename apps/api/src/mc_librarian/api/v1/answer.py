@@ -264,7 +264,11 @@ def _open_conversation(conn: sqlite3.Connection, user: User, body: AskRequest) -
                 conn, user_id=user.id, title=conversations.title_from_question(body.question)
             )
             conversations.append_message(
-                conn, conversation_id=conversation_id, role="user", content=body.question
+                conn,
+                conversation_id=conversation_id,
+                role="user",
+                content=body.question,
+                version=body.version,
             )
             conversations.prune(conn, user_id=user.id)
 
@@ -279,7 +283,11 @@ def _open_conversation(conn: sqlite3.Connection, user: User, body: AskRequest) -
             raise ProblemException(404, "资源不存在", "会话不存在")
 
         conversations.append_message(
-            conn, conversation_id=body.conversation_id, role="user", content=body.question
+            conn,
+            conversation_id=body.conversation_id,
+            role="user",
+            content=body.question,
+            version=body.version,
         )
         conversations.touch(conn, conversation_id=body.conversation_id)
 
@@ -304,6 +312,7 @@ def _record_answer(database: Database, run: AskRun) -> None:
                 content=run.answer,
                 citations=run.citations,
                 usage=run.usage,
+                version=run.version,
             )
             conversations.touch(connection, conversation_id=run.conversation_id)
     except Exception:  # 写历史失败不该把一次成功的问答变成 500

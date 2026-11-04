@@ -711,12 +711,15 @@ class ConversationMessage(BaseModel):
     """`ConversationDetail.messages` 的一项。
 
     `usage` 只有助手消息有（用户消息为 `null`）；`citations` 用户消息为空数组。
+    `version` 是这一轮提问用的版本（迁移 v10 之前落库的历史行为 `null`，前端回退到当前选中的
+    版本）——引用的 `path` 是版本相关的，历史引用必须按当时版本打开。
     """
 
     role: ConversationRole
     content: str
     citations: list[Citation]
     usage: Usage | None = None
+    version: str | None = None
     created_at: datetime
 
 

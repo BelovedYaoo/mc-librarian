@@ -867,6 +867,11 @@ export interface components {
             citations: components["schemas"]["Citation"][];
             /** @description 只有助手消息有；用户消息为 null */
             usage?: components["schemas"]["Usage"] | null;
+            /**
+             * @description 这一轮提问用的版本。引用的 `path` 是版本相关的，历史引用按它打开。
+             *     迁移 v10 之前落库的历史行为 null，前端回退到当前选中的版本并提示。
+             */
+            version?: string | null;
             /** Format: date-time */
             created_at: string;
         };

@@ -55,7 +55,8 @@ class Migration:
 # v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile；
 # v6：用量（usage，issue #8 建表、`#12` 只读聚合）；
 # v7：告警去重（alert_events，issue #12）；v8：实例设置（settings，issue #11）；
-# v9：历史会话（conversations/messages，问答页左栏）。
+# v9：历史会话（conversations/messages，问答页左栏）；
+# v10：`messages.version`（历史引用的版本口径）。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -344,6 +345,14 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             "CREATE INDEX IF NOT EXISTS idx_messages_conversation"
             " ON messages (conversation_id, created_at)",
         ),
+    ),
+    # v10：`messages.version`（问答页历史引用的版本口径）。v9 的 `messages` 漏了版本，而引用的
+    # `path` 是版本相关的（同一路径在 1.20.1 与 26.3 内容不同，甚至可能不存在），历史引用必须
+    # 按当时的版本打开。**追加迁移**而不是回头改 v9：v9 可能已在生产库应用过。v9 期间落库的
+    # 历史行为 NULL，前端遇到 null 回退到当前选中版本并在界面上明确提示。
+    Migration(
+        version=10,
+        statements=("ALTER TABLE messages ADD COLUMN version TEXT",),
     ),
 )
 

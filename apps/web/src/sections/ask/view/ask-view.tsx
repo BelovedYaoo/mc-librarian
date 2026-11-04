@@ -88,7 +88,8 @@ function turnsFromDetail(detail: ConversationDetail): Turn[] {
 
     turns.push({
       question: message.content,
-      version: '',
+      // 每轮记下当时用的版本（迁移 v10 之前落库的历史行为 null → 回退到当前选择）。
+      version: assistant?.version ?? '',
       steps: [],
       answer: assistant?.content ?? '',
       citations: assistant?.citations ?? [],
@@ -440,8 +441,9 @@ export function AskView() {
             <TurnBlock
               key={`${index}:${turn.question}`}
               turn={turn}
+              currentVersion={version}
               onOpenCitation={(citation) => {
-                // 历史轮次没记版本，用当前选中的版本打开（见 `turnsFromDetail`）。
+                // 历史轮次按当时版本打开；版本未知（v10 之前落库）才用当前选中的版本。
                 setActiveCitation({ citation, version: turn.version || version });
                 setDrawerOpen(true);
               }}
@@ -464,16 +466,22 @@ export function AskView() {
 
 function TurnBlock({
   turn,
+  currentVersion,
   onOpenCitation,
 }: {
   turn: Turn;
+  currentVersion: string;
   onOpenCitation: (citation: Citation) => void;
 }) {
   return (
     <Stack spacing={2} divider={<Divider flexItem />}>
-      <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-        问 · {turn.question}
-      </Typography>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+          问 · {turn.question}
+        </Typography>
+
+        <VersionBadge version={turn.version} current={currentVersion} />
+      </Stack>
 
       {turn.steps.length > 0 && <StepTraceBlock steps={turn.steps} />}
 
@@ -514,6 +522,30 @@ function TurnBlock({
       )}
     </Stack>
   );
+}
+
+/**
+ * 这一轮的版本标记。
+ *
+ * 引用的 `path` 是版本相关的：历史轮次的版本与当前下拉框不一致时给出提示，让用户知道这轮问的
+ * 是哪个版本（不偷偷用另一个版本打开文件）；版本未知（迁移 v10 之前落库的历史行）时明说会用
+ * 当前选中的版本打开。
+ */
+function VersionBadge({ version, current }: { version: string; current: string }) {
+  if (version === '') {
+    return (
+      <Chip
+        size="small"
+        variant="outlined"
+        color="warning"
+        label={current === '' ? '此轮版本未知' : `此轮版本未知，按当前选择的 ${current} 打开`}
+      />
+    );
+  }
+
+  if (version === current) return null;
+
+  return <Chip size="small" variant="outlined" label={`此轮版本 ${version}`} />;
 }
 
 function StepTraceBlock({ steps }: { steps: StepTrace[] }) {

@@ -75,12 +75,16 @@ def append_message(
     content: str,
     citations: tuple[Citation, ...] | list[Citation] = (),
     usage: Usage | None = None,
+    version: str | None = None,
 ) -> None:
-    """追加一条消息（用户问题或助手答案）。流式增量不落库，助手消息只在收尾时写一次。"""
+    """追加一条消息（用户问题或助手答案）。流式增量不落库，助手消息只在收尾时写一次。
+
+    `version` 是这一轮提问用的版本（引用的 `path` 是版本相关的，历史引用要按它打开）。
+    """
     conn.execute(
         "INSERT INTO messages"
-        " (id, conversation_id, role, content, citations_json, usage_json, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " (id, conversation_id, role, content, citations_json, usage_json, version, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             uuid.uuid4().hex,
             conversation_id,
@@ -88,6 +92,7 @@ def append_message(
             content,
             json.dumps([item.model_dump() for item in citations], ensure_ascii=False),
             None if usage is None else json.dumps(usage.model_dump(), ensure_ascii=False),
+            version,
             utc_now(),
         ),
     )
@@ -139,7 +144,7 @@ def list_summaries(
 def messages(conn: sqlite3.Connection, *, conversation_id: str) -> list[ConversationMessage]:
     """一个会话的全部消息，按写入顺序（`created_at` 再按 `rowid`）。"""
     rows = conn.execute(
-        "SELECT role, content, citations_json, usage_json, created_at FROM messages"
+        "SELECT role, content, citations_json, usage_json, version, created_at FROM messages"
         " WHERE conversation_id = ? ORDER BY created_at, rowid",
         (conversation_id,),
     ).fetchall()
@@ -158,6 +163,7 @@ def _row_to_message(row: sqlite3.Row) -> ConversationMessage:
         content=str(row["content"]),
         citations=_load_citations(row["citations_json"]),
         usage=_load_usage(row["usage_json"]),
+        version=row["version"],
         created_at=row["created_at"],
     )
 

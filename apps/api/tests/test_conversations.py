@@ -19,6 +19,7 @@ from mc_librarian import conversations
 from mc_librarian.answer.agent import DEGRADED_NOTICE
 from mc_librarian.answer.client import ChatError
 from mc_librarian.config import Settings
+from mc_librarian.db import LATEST_VERSION, MIGRATIONS, Database, schema_version
 from mc_librarian.indexing.build import build_index, place_source_tree
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
@@ -33,15 +34,15 @@ def silent(_level: str, _message: str) -> None:
     pass
 
 
-def register_version(settings: Settings, conn: sqlite3.Connection) -> Path:
+def register_version(settings: Settings, conn: sqlite3.Connection, version: str = VERSION) -> Path:
     """就位 fixture 源码 → 建索引 → 直接注册版本。"""
-    root = source_root(settings.data_dir, VERSION)
+    root = source_root(settings.data_dir, version)
     place_source_tree(FIXTURE_SOURCE, root)
-    index = index_path(settings.data_dir, VERSION)
+    index = index_path(settings.data_dir, version)
     result = build_index(root, index, log=silent)
     store.register_version(
         conn,
-        version=VERSION,
+        version=version,
         files=result.files,
         tokens=result.tokens,
         obfuscated=False,
@@ -114,9 +115,38 @@ def test_ask_creates_a_conversation_and_returns_its_id(
     assert detail["messages"][1]["content"] == "Mob 定义了刷怪实体的基类。"
     assert detail["messages"][1]["citations"], "助手消息要带上引用"
     assert detail["messages"][1]["usage"]["prompt_tokens"] == 11 * 2
+    # 每轮都记下当时用的版本（引用的 path 是版本相关的）。
+    assert detail["messages"][0]["version"] == VERSION
+    assert detail["messages"][1]["version"] == VERSION
     # 用户消息没有引用与用量。
     assert detail["messages"][0]["citations"] == []
     assert detail["messages"][0]["usage"] is None
+
+
+def test_each_turn_keeps_its_own_version(
+    admin_client: TestClient,
+    indexed: Path,
+    settings: Settings,
+    conn: sqlite3.Connection,
+    fake_chat: FakeChat,
+) -> None:
+    """同一会话里两轮用不同版本：重载后各自的消息按各自版本落库。"""
+    register_version(settings, conn, "1.20.1")
+
+    fake_chat.script = [final_answer("26.3 的回答。")]
+    conversation_id = done_event(ask(admin_client).text)["conversation_id"]
+
+    fake_chat.script = [final_answer("1.20.1 的回答。")]
+    ask(admin_client, version="1.20.1", conversation_id=conversation_id)
+
+    detail = admin_client.get(f"/v1/conversations/{conversation_id}").json()
+
+    assert [message["version"] for message in detail["messages"]] == [
+        VERSION,
+        VERSION,
+        "1.20.1",
+        "1.20.1",
+    ]
 
 
 def test_ask_continues_an_existing_conversation(
@@ -290,3 +320,42 @@ def test_prune_keeps_only_the_newest(
 
 def test_max_per_user_is_two_hundred() -> None:
     assert conversations.MAX_PER_USER == 200
+
+
+def test_v10_adds_the_version_column_to_existing_messages(tmp_path: Path) -> None:
+    """已应用 v9 的库升到 v10：`messages.version` 以**追加列**补上，历史行保留（值为 NULL）。"""
+    database = Database.for_data_dir(tmp_path / "data")
+
+    with database.connect() as conn:
+        schema_version(conn)
+
+        for migration in MIGRATIONS[:9]:
+            for statement in migration.statements:
+                conn.execute(statement)
+
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (migration.version, "2026-11-03T00:00:00Z"),
+            )
+
+        # v9 的 `messages` 没有 version 列：插一行历史数据。
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, role, enabled, created_at)"
+            " VALUES ('u1', 'old', 'x', 'user', 1, '2026-11-03T00:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at)"
+            " VALUES ('c1', 'u1', '旧会话', '2026-11-03T00:00:00Z', '2026-11-03T00:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, created_at)"
+            " VALUES ('m1', 'c1', 'assistant', '旧答案', '2026-11-03T00:00:00Z')"
+        )
+
+    assert database.initialize() == LATEST_VERSION == 10
+
+    with database.connect() as conn:
+        loaded = conversations.messages(conn, conversation_id="c1")
+
+    assert [message.content for message in loaded] == ["旧答案"]
+    assert loaded[0].version is None
