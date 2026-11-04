@@ -54,7 +54,8 @@ class Migration:
 # v1：账号与会话；v2：个人访问令牌（pats）；v3：邀请与审计（invites/audit）；
 # v4：索引任务框架（jobs/job_logs/versions）；v5：`jobs.stage` 扩出 download/decompile；
 # v6：用量（usage，issue #8 建表、`#12` 只读聚合）；
-# v7：告警去重（alert_events，issue #12）；v8：实例设置（settings，issue #11）。
+# v7：告警去重（alert_events，issue #12）；v8：实例设置（settings，issue #11）；
+# v9：历史会话（conversations/messages，问答页左栏）。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -311,6 +312,37 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
               updated_by TEXT REFERENCES users (id)
             )
             """,
+        ),
+    ),
+    # v9：历史会话（问答页左栏）。会话严格按用户隔离（`user_id`），消息 `ON DELETE CASCADE`。
+    # 每用户最多保留 200 个会话（新建时删最旧的，见 `conversations.prune`）。
+    Migration(
+        version=9,
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+              id         TEXT PRIMARY KEY,
+              user_id    TEXT NOT NULL REFERENCES users (id),
+              title      TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+              id              TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+              role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+              content         TEXT NOT NULL,
+              citations_json  TEXT NOT NULL DEFAULT '[]',
+              usage_json      TEXT,
+              created_at      TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_conversations_user"
+            " ON conversations (user_id, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_conversation"
+            " ON messages (conversation_id, created_at)",
         ),
     ),
 )

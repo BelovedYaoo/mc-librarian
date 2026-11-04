@@ -1,27 +1,36 @@
-import type { AskEvent, AskReason, AskUsage, Citation } from 'src/lib/api-client';
+import type { AskEvent, AskReason, AskUsage, Citation, ConversationDetail } from 'src/lib/api-client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import Chip from '@mui/material/Chip';
+import CircularProgress from '@mui/material/CircularProgress';
 import Collapse from '@mui/material/Collapse';
 import Divider from '@mui/material/Divider';
+import Drawer from '@mui/material/Drawer';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 
-import { useVersions } from 'src/hooks';
+import { useConversations, useVersions } from 'src/hooks';
 
-import { ApiError, streamAsk } from 'src/lib/api-client';
+import { ApiError, deleteConversation, getConversation, streamAsk } from 'src/lib/api-client';
 
 import { AnswerMarkdown } from './answer-markdown';
 import { CitationDrawer } from './citation-drawer';
+import { ConversationList } from './conversation-list';
 
 // ----------------------------------------------------------------------
+
+/** 左栏宽度（宽屏常驻）。 */
+const SIDEBAR_WIDTH = 260;
+/** URL 里当前会话的参数名（`?c=<id>`），刷新与分享链接靠它回到同一个会话。 */
+const CONVERSATION_PARAM = 'c';
 
 /** 工具轨迹里的一步：调用前只有 `args`，返回后补上 `ok` / `hits`；`context_budget` 只有 `args`。 */
 type StepTrace = {
@@ -33,6 +42,7 @@ type StepTrace = {
 
 type Turn = {
   question: string;
+  /** 该轮提问用的版本；历史会话载入的轮次为 `''`（用当前选中的版本打开引用）。 */
   version: string;
   steps: StepTrace[];
   answer: string;
@@ -61,6 +71,37 @@ function emptyTurn(question: string, version: string): Turn {
     status: 'streaming',
     error: null,
   };
+}
+
+/** 历史会话 → 消息流：用户问题 + 紧跟的助手答案配成一轮（历史里没有工具轨迹）。 */
+function turnsFromDetail(detail: ConversationDetail): Turn[] {
+  const turns: Turn[] = [];
+  const messages = detail.messages;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+
+    if (message.role !== 'user') continue;
+
+    const next = messages[index + 1];
+    const assistant = next?.role === 'assistant' ? next : null;
+
+    turns.push({
+      question: message.content,
+      version: '',
+      steps: [],
+      answer: assistant?.content ?? '',
+      citations: assistant?.citations ?? [],
+      reason: null,
+      usage: assistant?.usage ?? null,
+      status: 'done',
+      error: null,
+    });
+
+    if (assistant) index += 1;
+  }
+
+  return turns;
 }
 
 /** 把一个 SSE 事件落到当前这一轮上（规格 §4 的 5 种事件）。 */
@@ -113,20 +154,36 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
 
 // ----------------------------------------------------------------------
 
-/** `/ask` 聊天页：输入框 + 版本选择 → 工具轨迹 → 增量答案 → 可点击引用。 */
+/**
+ * `/ask` 聊天页：左栏历史会话 + 主区「输入框 → 工具轨迹 → 增量答案 → 可点击引用」。
+ *
+ * 当前会话以 `?c=<id>` 为准：刷新页面后左栏与主区都还在，链接也能分享给自己。
+ * 首轮提问时后端自动建会话，`done` 事件回传 id，这里把它写进 URL（`displayed` ref 保证
+ * 写 URL 不会反过来触发一次「载入历史」把刚流出来的内容冲掉）。
+ */
 export function AskView() {
   const { state: versionsState } = useVersions();
+  const { conversations, loading: conversationsLoading, error: conversationsError, refresh } =
+    useConversations();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const conversationId = searchParams.get(CONVERSATION_PARAM);
 
   const [version, setVersion] = useState('');
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [navOpen, setNavOpen] = useState(false);
   // 抽屉的 `open` 与内容分开：关闭时保留内容，退场动画里不会闪空白。
   const [activeCitation, setActiveCitation] = useState<{
     citation: Citation;
     version: string;
   } | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // 主区当前展示的是哪个会话：写 URL 时先同步它，避免自己触发的「载入历史」。
+  const displayed = useRef<string | null>(null);
 
   const versions = useMemo(
     () => (versionsState.status === 'ready' ? versionsState.versions : []),
@@ -138,26 +195,99 @@ export function AskView() {
     if (!version && versions.length > 0) setVersion(versions[0].version);
   }, [version, versions]);
 
+  // `?c=<id>` 变化时载入该会话；主区已经是它（首轮提问刚写入 URL）就跳过。
+  useEffect(() => {
+    if (conversationId === null) {
+      if (displayed.current !== null) {
+        displayed.current = null;
+        setTurns([]);
+      }
+
+      return undefined;
+    }
+
+    if (conversationId === displayed.current) return undefined;
+
+    let cancelled = false;
+    displayed.current = conversationId;
+    setLoadingConversation(true);
+    setLoadError(null);
+
+    getConversation(conversationId)
+      .then((detail) => {
+        if (!cancelled) setTurns(turnsFromDetail(detail));
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setLoadError(errorText(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingConversation(false);
+      });
+
+    return () => {
+      cancelled = true;
+      // StrictMode 会「挂载 → 卸载 → 再挂载」把 effect 跑两遍：第一遍被取消时要把标记退回去，
+      // 否则第二遍会以为「主区已经是这个会话」而跳过载入，主区永远空着（只有转圈）。
+      if (displayed.current === conversationId) displayed.current = null;
+    };
+  }, [conversationId]);
+
+  const openConversation = (id: string) => {
+    setNavOpen(false);
+    setSearchParams({ [CONVERSATION_PARAM]: id });
+  };
+
+  const startNewConversation = () => {
+    displayed.current = null;
+    setTurns([]);
+    setLoadError(null);
+    setNavOpen(false);
+    setSearchParams({});
+  };
+
+  const removeConversation = async (id: string) => {
+    try {
+      await deleteConversation(id);
+
+      if (id === conversationId) startNewConversation();
+
+      refresh();
+    } catch (cause) {
+      setLoadError(errorText(cause));
+    }
+  };
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
 
     if (busy || version === '' || question.trim() === '') return;
 
     const asked = question.trim();
+    const askedVersion = version;
     const index = turns.length;
+    let activeConversation = conversationId;
 
     setQuestion('');
     setBusy(true);
-    setTurns((current) => [...current, emptyTurn(asked, version)]);
+    setLoadError(null);
+    setTurns((current) => [...current, emptyTurn(asked, askedVersion)]);
 
     try {
       await streamAsk(
         {
           question: asked,
-          version,
+          version: askedVersion,
+          // 已有会话就续聊；没有就留空，后端首次提问时自动建会话。
+          conversation_id: activeConversation ?? undefined,
           // `max_steps` / `max_answer_tokens` 不传：用服务端设置（设置页可改）。
         },
         (incoming) => {
+          if (incoming.type === 'done' && activeConversation === null) {
+            activeConversation = incoming.conversation_id;
+            displayed.current = activeConversation;
+            setSearchParams({ [CONVERSATION_PARAM]: activeConversation }, { replace: true });
+          }
+
           setTurns((current) =>
             current.map((turn, position) =>
               position === index ? applyEvent(turn, incoming) : turn
@@ -174,82 +304,151 @@ export function AskView() {
     } catch (cause) {
       setTurns((current) =>
         current.map((turn, position) =>
-          position === index
-            ? { ...turn, status: 'error', error: errorText(cause) }
-            : turn
+          position === index ? { ...turn, status: 'error', error: errorText(cause) } : turn
         )
       );
     } finally {
       setBusy(false);
+      refresh();
     }
   };
 
+  const sidebar = (
+    <ConversationList
+      conversations={conversations}
+      activeId={conversationId}
+      loading={conversationsLoading}
+      error={conversationsError}
+      onSelect={openConversation}
+      onCreate={startNewConversation}
+      onDelete={removeConversation}
+      onRefresh={refresh}
+    />
+  );
+
   return (
     <Stack spacing={3}>
-      <Typography variant="h4">问答</Typography>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+        <Button
+          size="small"
+          sx={{ display: { xs: 'inline-flex', md: 'none' } }}
+          onClick={() => setNavOpen(true)}
+        >
+          会话
+        </Button>
 
-      <Card variant="outlined">
-        <CardContent>
-          <Box component="form" onSubmit={handleSubmit}>
-            <Stack spacing={2}>
-              <TextField
-                select
-                label="版本"
-                value={version}
-                onChange={(event) => setVersion(event.target.value)}
-                sx={{ maxWidth: 220 }}
-                disabled={versions.length === 0}
-                helperText="问答只在单个版本上检索（不支持「全部版本」）"
-              >
-                {versions.map((item) => (
-                  <MenuItem key={item.version} value={item.version}>
-                    {item.version}
-                  </MenuItem>
-                ))}
-              </TextField>
+        <Typography variant="h4" sx={{ flex: '1 1 auto' }}>
+          问答
+        </Typography>
 
-              <TextField
-                label="问题"
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                placeholder="刷怪上限在哪定义？"
-                multiline
-                minRows={2}
-                fullWidth
-              />
+        <Button
+          size="small"
+          sx={{ display: { xs: 'none', md: 'inline-flex' } }}
+          onClick={() => setSidebarOpen((open) => !open)}
+        >
+          {sidebarOpen ? '隐藏会话' : '显示会话'}
+        </Button>
+      </Stack>
 
-              <Stack direction="row" spacing={2}>
-                <Box sx={{ flex: '1 1 auto' }} />
-
-                <Button
-                  type="submit"
-                  variant="contained"
-                  disabled={busy || version === '' || question.trim() === ''}
-                >
-                  {busy ? '回答中…' : '提问'}
-                </Button>
-              </Stack>
-            </Stack>
+      <Stack direction="row" spacing={2} sx={{ alignItems: 'flex-start' }}>
+        {sidebarOpen && (
+          <Box
+            sx={{
+              display: { xs: 'none', md: 'block' },
+              width: SIDEBAR_WIDTH,
+              flexShrink: 0,
+              position: 'sticky',
+              top: 16,
+              maxHeight: 'calc(100vh - 32px)',
+            }}
+          >
+            {sidebar}
           </Box>
-        </CardContent>
-      </Card>
+        )}
 
-      {versionsState.status === 'ready' && versions.length === 0 && (
-        <Alert severity="info">
-          还没有已索引版本。管理员在「版本」页提交一次索引任务后再回来。
-        </Alert>
-      )}
+        <Drawer
+          anchor="left"
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          sx={{ display: { md: 'none' } }}
+        >
+          <Box sx={{ width: 280, height: '100%', p: 2 }}>{sidebar}</Box>
+        </Drawer>
 
-      {turns.map((turn, index) => (
-        <TurnBlock
-          key={`${index}:${turn.question}`}
-          turn={turn}
-          onOpenCitation={(citation) => {
-            setActiveCitation({ citation, version: turn.version });
-            setDrawerOpen(true);
-          }}
-        />
-      ))}
+        <Stack spacing={3} sx={{ flex: '1 1 auto', minWidth: 0 }}>
+          <Card variant="outlined">
+            <CardContent>
+              <Box component="form" onSubmit={handleSubmit}>
+                <Stack spacing={2}>
+                  <TextField
+                    select
+                    label="版本"
+                    value={version}
+                    onChange={(event) => setVersion(event.target.value)}
+                    sx={{ maxWidth: 220 }}
+                    disabled={versions.length === 0}
+                    helperText="问答只在单个版本上检索（不支持「全部版本」）"
+                  >
+                    {versions.map((item) => (
+                      <MenuItem key={item.version} value={item.version}>
+                        {item.version}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+
+                  <TextField
+                    label="问题"
+                    value={question}
+                    onChange={(event) => setQuestion(event.target.value)}
+                    placeholder="刷怪上限在哪定义？"
+                    multiline
+                    minRows={2}
+                    fullWidth
+                  />
+
+                  <Stack direction="row" spacing={2}>
+                    <Box sx={{ flex: '1 1 auto' }} />
+
+                    <Button
+                      type="submit"
+                      variant="contained"
+                      disabled={busy || version === '' || question.trim() === ''}
+                    >
+                      {busy ? '回答中…' : '提问'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Box>
+            </CardContent>
+          </Card>
+
+          {versionsState.status === 'ready' && versions.length === 0 && (
+            <Alert severity="info">
+              还没有已索引版本。管理员在「版本」页提交一次索引任务后再回来。
+            </Alert>
+          )}
+
+          {loadingConversation && (
+            <Stack sx={{ alignItems: 'center', py: 2 }}>
+              <CircularProgress size={24} />
+            </Stack>
+          )}
+
+          {loadError !== null && <Alert severity="error">{loadError}</Alert>}
+
+          {turns.map((turn, index) => (
+            <TurnBlock
+              key={`${index}:${turn.question}`}
+              turn={turn}
+              onOpenCitation={(citation) => {
+                // 历史轮次没记版本，用当前选中的版本打开（见 `turnsFromDetail`）。
+                setActiveCitation({ citation, version: turn.version || version });
+                setDrawerOpen(true);
+              }}
+            />
+          ))}
+        </Stack>
+      </Stack>
 
       <CitationDrawer
         open={drawerOpen}

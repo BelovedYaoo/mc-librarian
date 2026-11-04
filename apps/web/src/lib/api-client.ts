@@ -107,6 +107,19 @@ export type Citation = components['schemas']['Citation'];
 /** 工具轨迹里的一步（调了什么、参数）。 */
 export type AskStep = components['schemas']['AskStep'];
 
+/** 历史会话列表项（`GET /v1/conversations`）。 */
+export type ConversationSummary = components['schemas']['ConversationSummary'];
+
+/** 历史会话详情（`GET /v1/conversations/{id}`）。 */
+export type ConversationDetail = components['schemas']['ConversationDetail'];
+
+/** 历史会话里的一条消息（用户问题或助手答案）。 */
+export type ConversationMessage = components['schemas']['ConversationMessage'];
+
+/** 历史会话列表响应体。 */
+export type ConversationList =
+  paths['/v1/conversations']['get']['responses'][200]['content']['application/json'];
+
 /** 符号查找的匹配级别开关（`any` 不过滤）。 */
 export type SymbolKind = components['schemas']['SymbolKind'];
 
@@ -565,4 +578,38 @@ function parseSseBlock(block: string): AskEvent | null {
   } catch {
     return null;
   }
+}
+
+// ----------------------------------------------------------------------
+// 历史会话（问答页左栏）
+// ----------------------------------------------------------------------
+
+/** 我的历史会话列表，按 `updated_at` 降序（服务端已排好）。 */
+export async function listConversations(
+  params: { limit?: number } = {},
+  signal?: AbortSignal
+): Promise<ConversationSummary[]> {
+  const body = await request<ConversationList>(`/v1/conversations${buildQuery(params)}`, {
+    signal,
+  });
+
+  return body.conversations ?? [];
+}
+
+/** 一个历史会话的标题与全部消息（含引用与用量）。 */
+export function getConversation(
+  conversationId: string,
+  signal?: AbortSignal
+): Promise<ConversationDetail> {
+  return request<ConversationDetail>(
+    `/v1/conversations/${encodeURIComponent(conversationId)}`,
+    { signal }
+  );
+}
+
+/** 删除一个历史会话（级联删消息）；别人的会话后端回 404。 */
+export function deleteConversation(conversationId: string): Promise<void> {
+  return request<void>(`/v1/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+  });
 }

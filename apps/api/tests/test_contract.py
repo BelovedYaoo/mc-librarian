@@ -907,6 +907,97 @@ def test_ask_request_schema_matches() -> None:
         assert "default" not in _non_null(runtime["properties"][field])
         assert "default" not in _non_null(contract["properties"][field])
 
+    # `conversation_id` 可选：省略则新建会话，给了就续聊。
+    assert "conversation_id" in runtime["properties"]
+    assert "conversation_id" in contract["properties"]
+    assert "conversation_id" not in runtime["required"]
+    assert "conversation_id" not in contract["required"]
+
+
+# ----------------------------------------------------------------------
+# 历史会话（`/v1/conversations*`，问答页左栏）
+# ----------------------------------------------------------------------
+
+
+CONVERSATION_OPERATIONS: Final = (
+    ("/v1/conversations", "get", "listConversations"),
+    ("/v1/conversations/{conversationId}", "get", "getConversation"),
+    ("/v1/conversations/{conversationId}", "delete", "deleteConversation"),
+)
+
+
+def test_conversation_paths_are_implemented() -> None:
+    runtime_paths = set(_runtime()["paths"])
+
+    assert {"/v1/conversations", "/v1/conversations/{conversationId}"} <= runtime_paths
+
+
+@pytest.mark.parametrize(("path", "method", "operation_id"), CONVERSATION_OPERATIONS)
+def test_conversation_operation_ids_match(
+    path: str, method: str, operation_id: str
+) -> None:
+    runtime = _operation(_runtime(), path, method)
+    contract = _operation(_contract(), path, method)
+
+    assert runtime["operationId"] == contract["operationId"] == operation_id
+    assert runtime["tags"] == contract["tags"] == ["answer"]
+    # 不覆盖 security：继承全局 cookieAuth / bearerAuth。
+    assert "security" not in runtime
+
+
+def test_conversation_error_responses_are_declared() -> None:
+    """未认证是 401；详情/删除还会因「不是本人会话」回 404。"""
+    for spec in (_runtime(), _contract()):
+        assert "401" in _operation(spec, "/v1/conversations", "get")["responses"]
+
+        for method in ("get", "delete"):
+            responses = _operation(spec, "/v1/conversations/{conversationId}", method)[
+                "responses"
+            ]
+
+            assert {"401", "404"} <= set(responses)
+
+
+def test_conversation_schemas_match() -> None:
+    for spec in (_runtime(), _contract()):
+        summary = _deref(
+            spec,
+            _response_schema(spec, "/v1/conversations")["properties"]["conversations"]["items"],
+        )
+
+        assert summary["required"] == [
+            "id",
+            "title",
+            "created_at",
+            "updated_at",
+            "message_count",
+        ]
+
+        detail = _response_schema(spec, "/v1/conversations/{conversationId}")
+
+        assert detail["required"] == ["id", "title", "messages"]
+
+        message = _deref(spec, detail["properties"]["messages"]["items"])
+
+        assert message["required"] == ["role", "content", "citations", "created_at"]
+        assert set(message["properties"]) == {
+            "role",
+            "content",
+            "citations",
+            "usage",
+            "created_at",
+        }
+        assert message["properties"]["role"]["enum"] == ["user", "assistant"]
+
+
+def test_ask_done_event_carries_the_conversation_id() -> None:
+    """`done` 必须回传会话 id，前端据此刷新左栏与续聊。"""
+    for spec in (_runtime(), _contract()):
+        done = _ask_event_branch(spec, "done")
+
+        assert "conversation_id" in done["required"]
+        assert "conversation_id" in done["properties"]
+
 
 # ----------------------------------------------------------------------
 # issue #12：用量聚合与告警（`GET /v1/admin/usage`）

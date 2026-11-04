@@ -207,6 +207,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 我的历史会话列表
+         * @description 只返回当前用户自己的会话，按 `updated_at` 降序；`message_count` 是会话内的消息条数
+         *     （用户问题 + 助手答案）。会话在首次 `/v1/ask` 时自动创建，最多保留每用户 200 个。
+         */
+        get: operations["listConversations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/conversations/{conversationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 历史会话详情
+         * @description 会话标题与全部消息（含引用与用量）。**别人的会话一律 404**（不是 403，避免泄露会话
+         *     是否存在）。
+         */
+        get: operations["getConversation"];
+        put?: never;
+        post?: never;
+        /**
+         * 删除历史会话
+         * @description 级联删除该会话的全部消息；别人的会话一律 404。
+         */
+        delete: operations["deleteConversation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/login": {
         parameters: {
             query?: never;
@@ -735,6 +781,11 @@ export interface components {
         AskRequest: {
             question: string;
             version: string;
+            /**
+             * @description 续聊时带上历史会话 id（从 `done` 事件或 `GET /v1/conversations` 取）；省略则新建会话。
+             *     不是本人会话一律 404。
+             */
+            conversation_id?: string;
             /** @description 省略时用服务端设置 `settings.ask.max_steps`（默认 6） */
             max_steps?: number | null;
             /** @description 省略时用服务端设置 `settings.ask.max_answer_tokens`（默认 8000） */
@@ -764,6 +815,8 @@ export interface components {
             type: "done";
             usage: components["schemas"]["Usage"];
             reason: components["schemas"]["AskReason"];
+            /** @description 本次问答所属的历史会话 id（新建或续聊的那个） */
+            conversation_id: string;
         } | {
             /** @constant */
             type: "error";
@@ -793,6 +846,35 @@ export interface components {
          * @enum {string}
          */
         AskReason: "stop" | "max_steps" | "degraded";
+        ConversationSummary: {
+            id: string;
+            /** @description 首条问题，截断到 30 字（超出加 `…`） */
+            title: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description 会话内的消息条数（用户问题 + 助手答案） */
+            message_count: number;
+        };
+        ConversationList: {
+            conversations: components["schemas"]["ConversationSummary"][];
+        };
+        ConversationMessage: {
+            /** @enum {string} */
+            role: "user" | "assistant";
+            content: string;
+            citations: components["schemas"]["Citation"][];
+            /** @description 只有助手消息有；用户消息为 null */
+            usage?: components["schemas"]["Usage"] | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ConversationDetail: {
+            id: string;
+            title: string;
+            messages: components["schemas"]["ConversationMessage"][];
+        };
         Usage: {
             prompt_tokens?: number;
             completion_tokens?: number;
@@ -1136,6 +1218,8 @@ export interface components {
         JobId: string;
         /** @description 邀请链接里的明文 token */
         InviteToken: string;
+        /** @description 历史会话 id */
+        ConversationId: string;
     };
     requestBodies: never;
     headers: never;
@@ -1435,6 +1519,77 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+        };
+    };
+    listConversations: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 历史会话 id */
+                conversationId: components["parameters"]["ConversationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 历史会话 id */
+                conversationId: components["parameters"]["ConversationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已删除 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     login: {

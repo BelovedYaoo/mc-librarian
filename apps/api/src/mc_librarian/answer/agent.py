@@ -71,6 +71,7 @@ class AskRun:
         timeout_s: float,
         llm_timeout_s: float,
         pricing: LlmPricing,
+        conversation_id: str | None = None,
     ) -> None:
         self.client = client
         self.toolbox = toolbox
@@ -90,6 +91,11 @@ class AskRun:
         self.citations: list[Citation] = []
         self.answer = ""
         self.reason: AskReason = "stop"
+        # 所属历史会话：HTTP 层在收尾时据此把答案落库，并把它回传给前端（`done` 事件）。
+        self.conversation_id = conversation_id
+        # 是否已经走到统一收尾（`_finish`）。客户端中途断开时生成器停在 `yield`，此标志为 False，
+        # 收尾就只还槽位、不写半截答案。
+        self.finished = False
 
     @property
     def latency_ms(self) -> int:
@@ -237,6 +243,7 @@ class AskRun:
 
     async def _finish(self, reason: AskReason) -> AsyncIterator[dict[str, Any]]:
         """统一收尾：`delta`* → `citation`* → `done`。"""
+        self.finished = True
         self.reason = reason
 
         for chunk in _delta_chunks(self.answer):
@@ -250,7 +257,18 @@ class AskRun:
                 "symbol": citation.symbol,
             }
 
-        yield {"type": "done", "usage": self.usage.model_dump(), "reason": reason}
+        done: dict[str, Any] = {
+            "type": "done",
+            "usage": self.usage.model_dump(),
+            "reason": reason,
+        }
+
+        # `conversation_id` 只在 HTTP 层用（`/v1/ask` 会自动建会话）；评测等直接构造 `AskRun`
+        # 的调用方没有会话，就不带这个字段。
+        if self.conversation_id is not None:
+            done["conversation_id"] = self.conversation_id
+
+        yield done
 
     async def _call(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]

@@ -7,7 +7,9 @@
    不引入 `sse-starlette` 之类的新依赖）；`Accept: application/json` 时退化成一次性 `AskResponse`；
 3. 每次请求写**一行** `usage`（含降级的情况），写完在后台检查一次当日告警阈值（`#12`，
    不阻断响应）；
-4. 并发槽位在任何退出路径上都归还（含客户端中途断开）——收尾绑在 ASGI 响应的 `__call__` 上，
+4. 历史会话（问答页左栏）：首次提问自动建会话、把用户问题落库，收尾时把助手最终答案（含引用
+   与 usage）写一条消息；`conversation_id` 随 `done` 事件回传（见 `conversations` 模块）；
+5. 并发槽位在任何退出路径上都归还（含客户端中途断开）——收尾绑在 ASGI 响应的 `__call__` 上，
    不依赖 async generator 被正确关闭（见 `_AskStreamResponse`）。
 
 模型超时 / 不可用 / 返回非法响应都在 `AskRun` 里翻成降级，**HTTP 仍是 200**——不冒泡成 500。
@@ -26,7 +28,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
-from mc_librarian import alerts
+from mc_librarian import alerts, conversations
 from mc_librarian import usage as usage_store
 from mc_librarian.answer import AskLimiter, AskRun, OpenAiCompatChatClient
 from mc_librarian.answer.tools import ToolBox
@@ -38,7 +40,7 @@ from mc_librarian.config import (
     resolve_llm_config,
     resolve_llm_pricing,
 )
-from mc_librarian.db import Database
+from mc_librarian.db import Database, transaction
 from mc_librarian.indexing import query
 from mc_librarian.problems import Problem, ProblemException, problem_response
 from mc_librarian.schemas import AskRequest, AskResponse, User
@@ -148,6 +150,9 @@ async def ask(
         index_path = require_index(conn, settings, body.version)
         config = resolve_llm_config(settings)
         index = query.open_readonly(index_path, check_same_thread=False)
+        # 会话解析 / 新建 + 用户问题落库。给错 `conversation_id` 时这里抛 404，与其余失败路径
+        # 一样走到 `except BaseException` 归还槽位。
+        conversation_id = _open_conversation(conn, user, body)
         run = AskRun(
             client=OpenAiCompatChatClient(config),
             toolbox=ToolBox(index, settings, body.version),
@@ -160,6 +165,7 @@ async def ask(
             timeout_s=float(settings.ask_timeout_s),
             llm_timeout_s=settings.llm_timeout_s,
             pricing=resolve_llm_pricing(settings),
+            conversation_id=conversation_id,
         )
     except LlmConfigError as error:
         _abandon(index, limiter)
@@ -244,6 +250,66 @@ def _abandon(index: sqlite3.Connection | None, limiter: AskLimiter) -> None:
     limiter.release()
 
 
+def _open_conversation(conn: sqlite3.Connection, user: User, body: AskRequest) -> str:
+    """解析或新建会话，并把用户问题落库；返回会话 id。
+
+    - 省略 `conversation_id` → 新建会话（标题取首条问题，超出 30 字截断），并裁剪到每用户上限；
+    - 给了 `conversation_id` → 必须是本人的会话，否则 404（不泄露会话是否存在）。
+
+    用户问题在建会话时立即落库（助手答案在收尾时落），这样客户端中途断开也不会丢掉问题。
+    """
+    if body.conversation_id is None:
+        with transaction(conn):
+            conversation_id = conversations.create(
+                conn, user_id=user.id, title=conversations.title_from_question(body.question)
+            )
+            conversations.append_message(
+                conn, conversation_id=conversation_id, role="user", content=body.question
+            )
+            conversations.prune(conn, user_id=user.id)
+
+        return conversation_id
+
+    with transaction(conn):
+        owned = conversations.find_owned(
+            conn, conversation_id=body.conversation_id, user_id=user.id
+        )
+
+        if owned is None:
+            raise ProblemException(404, "资源不存在", "会话不存在")
+
+        conversations.append_message(
+            conn, conversation_id=body.conversation_id, role="user", content=body.question
+        )
+        conversations.touch(conn, conversation_id=body.conversation_id)
+
+    return body.conversation_id
+
+
+def _record_answer(database: Database, run: AskRun) -> None:
+    """收尾时把助手最终答案（含引用与 usage）落库；流式过程中的增量不落库。
+
+    只在真正走到统一收尾（`run.finished`）时写：客户端中途断开时生成器停在 `yield`，
+    此时没有完整答案，不写半截内容。写失败只记日志，不影响已经发出去的响应。
+    """
+    if run.conversation_id is None or not run.finished:
+        return
+
+    try:
+        with database.connect() as connection, transaction(connection):
+            conversations.append_message(
+                connection,
+                conversation_id=run.conversation_id,
+                role="assistant",
+                content=run.answer,
+                citations=run.citations,
+                usage=run.usage,
+            )
+            conversations.touch(connection, conversation_id=run.conversation_id)
+    except Exception:  # 写历史失败不该把一次成功的问答变成 500
+        logger.exception("写入问答历史失败（%s）", run.conversation_id)
+
+
 def _close_ask(
     run: AskRun,
     database: Database,
@@ -254,10 +320,11 @@ def _close_ask(
     limiter: AskLimiter,
     settings: Settings,
 ) -> None:
-    """一次问答的收尾：还槽位、关索引、记一行用量。任何退出路径都必须走到这里一次。"""
-    # 槽位先还：后面两步即使失败，槽位也不会漏（漏了就没有任何补救路径）。
+    """一次问答的收尾：还槽位、关索引、写一条助手消息、记一行用量。任何退出路径都必须走到这里一次。"""
+    # 槽位先还：后面几步即使失败，槽位也不会漏（漏了就没有任何补救路径）。
     limiter.release()
     index.close()
+    _record_answer(database, run)
     _record_usage(database, run, user, model, version, settings)
 
 

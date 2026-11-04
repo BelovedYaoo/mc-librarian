@@ -306,6 +306,56 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
 
+  /v1/conversations:
+    get:
+      tags: [answer]
+      summary: 我的历史会话列表
+      description: |
+        只返回当前用户自己的会话，按 `updated_at` 降序；`message_count` 是会话内的消息条数
+        （用户问题 + 助手答案）。会话在首次 `/v1/ask` 时自动创建，最多保留每用户 200 个。
+      operationId: listConversations
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/conversations/{conversationId}:
+    get:
+      tags: [answer]
+      summary: 历史会话详情
+      description: |
+        会话标题与全部消息（含引用与用量）。**别人的会话一律 404**（不是 403，避免泄露会话
+        是否存在）。
+      operationId: getConversation
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [answer]
+      summary: 删除历史会话
+      description: 级联删除该会话的全部消息；别人的会话一律 404。
+      operationId: deleteConversation
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "204": { description: 已删除 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/auth/login:
     post:
       tags: [auth]
@@ -844,6 +894,12 @@ components:
       required: true
       schema: { type: string }
       description: 邀请链接里的明文 token
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string }
+      description: 历史会话 id
 
   responses:
     BadRequest:
@@ -1047,6 +1103,11 @@ components:
       properties:
         question: { type: string, minLength: 1, maxLength: 2000 }
         version: { type: string }
+        conversation_id:
+          type: string
+          description: |
+            续聊时带上历史会话 id（从 `done` 事件或 `GET /v1/conversations` 取）；省略则新建会话。
+            不是本人会话一律 404。
         max_steps:
           type: [integer, "null"]
           minimum: 1
@@ -1081,11 +1142,14 @@ components:
             lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
             symbol: { type: string }
         - type: object
-          required: [type, usage, reason]
+          required: [type, usage, reason, conversation_id]
           properties:
             type: { type: string, const: done }
             usage: { $ref: "#/components/schemas/Usage" }
             reason: { $ref: "#/components/schemas/AskReason" }
+            conversation_id:
+              type: string
+              description: 本次问答所属的历史会话 id（新建或续聊的那个）
         - type: object
           required: [type, problem]
           properties:
@@ -1127,6 +1191,50 @@ components:
       description: |
         `done` 的收尾原因：`stop` = 模型不再调用工具、正常作答；`max_steps` = 达到检索步数上限后
         强制收尾；`degraded` = 模型超时/不可用/返回非法响应，用已召回的检索结果降级作答。
+
+    ConversationSummary:
+      type: object
+      required: [id, title, created_at, updated_at, message_count]
+      properties:
+        id: { type: string }
+        title: { type: string, description: 首条问题，截断到 30 字（超出加 `…`） }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        message_count: { type: integer, description: 会话内的消息条数（用户问题 + 助手答案） }
+
+    ConversationList:
+      type: object
+      required: [conversations]
+      properties:
+        conversations:
+          type: array
+          items: { $ref: "#/components/schemas/ConversationSummary" }
+
+    ConversationMessage:
+      type: object
+      required: [role, content, citations, created_at]
+      properties:
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/Citation" }
+        usage:
+          anyOf:
+            - $ref: "#/components/schemas/Usage"
+            - type: "null"
+          description: 只有助手消息有；用户消息为 null
+        created_at: { type: string, format: date-time }
+
+    ConversationDetail:
+      type: object
+      required: [id, title, messages]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ConversationMessage" }
 
     Usage:
       type: object

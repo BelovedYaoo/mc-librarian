@@ -57,6 +57,11 @@ __all__ = [
     "AuditList",
     "Citation",
     "ClassKind",
+    "ConversationDetail",
+    "ConversationList",
+    "ConversationMessage",
+    "ConversationRole",
+    "ConversationSummary",
     "CreateUserRequest",
     "CreatedUser",
     "FileSlice",
@@ -658,11 +663,12 @@ class AskRequest(BaseModel):
     """契约 `components.schemas.AskRequest`；`version` 必传，模型不可改。
 
     `max_steps` / `max_answer_tokens` 省略时用服务端设置（`settings.ask.*`）——设置页改的就是
-    这两个默认值，见 `api/v1/answer.py`。
+    这两个默认值，见 `api/v1/answer.py`。`conversation_id` 省略时新建会话，给了就续聊该会话。
     """
 
     question: str = Field(min_length=1, max_length=2000)
     version: str
+    conversation_id: str | None = None
     max_steps: int | None = Field(default=None, ge=1, le=12)
     max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
 
@@ -675,6 +681,51 @@ class AskResponse(BaseModel):
     steps: list[AskStep]
     usage: Usage
     reason: AskReason
+
+
+# ----------------------------------------------------------------------
+# 历史会话（问答页左栏，迁移 v9）
+# ----------------------------------------------------------------------
+
+# `messages.role` 的取值域，与建表的 CHECK 一致。
+ConversationRole = Literal["user", "assistant"]
+
+
+class ConversationSummary(BaseModel):
+    """`GET /v1/conversations` 的一项：左栏列表要的字段（标题 + 相对时间 + 条数）。"""
+
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+
+
+class ConversationList(BaseModel):
+    """`GET /v1/conversations` 的 200；按 `updated_at` 降序。"""
+
+    conversations: list[ConversationSummary]
+
+
+class ConversationMessage(BaseModel):
+    """`ConversationDetail.messages` 的一项。
+
+    `usage` 只有助手消息有（用户消息为 `null`）；`citations` 用户消息为空数组。
+    """
+
+    role: ConversationRole
+    content: str
+    citations: list[Citation]
+    usage: Usage | None = None
+    created_at: datetime
+
+
+class ConversationDetail(BaseModel):
+    """`GET /v1/conversations/{id}` 的 200：会话标题 + 全部消息。"""
+
+    id: str
+    title: str
+    messages: list[ConversationMessage]
 
 
 class AskStepEvent(BaseModel):
@@ -704,11 +755,12 @@ class AskCitationEvent(BaseModel):
 
 
 class AskDoneEvent(BaseModel):
-    """`done` 事件：正常、`max_steps` 或降级收尾，都带上已知的 usage。"""
+    """`done` 事件：正常、`max_steps` 或降级收尾，都带上已知的 usage 与所属会话 id。"""
 
     type: Literal["done"]
     usage: Usage
     reason: AskReason
+    conversation_id: str
 
 
 class AskErrorEvent(BaseModel):
