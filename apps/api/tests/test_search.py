@@ -560,20 +560,89 @@ def test_summary_channel_degrades_on_fts_syntax_in_query(
 
 
 @requires_ripgrep
-def test_fts_syntax_query_still_reaches_the_literal_channel(
+def test_literal_channel_skips_a_query_without_identifiers(
     user_client: TestClient, settings: Settings, conn: sqlite3.Connection, indexed: Path
 ) -> None:
-    """摘要路因 FTS 语法降级后，`literal` 路照常返回（`"` 在 fixture 的 `data/*.json` 里是字面量）。
+    """query 里一个标识符 token 都没有（纯中文 / 纯标点）时，`literal` 路不起子进程、返回空。
 
-    断言落在 `literal` 上，所以依赖 `rg`：symbol 路的编辑距离降级也可能对 `"` 返回命中，
-    但那不代表字面量通道正常（见 `test_summary_channel_degrades_on_fts_syntax_in_query`）。
+    旧行为把整句原样当 ripgrep 正则：中文查询在源码里恒不命中，还白耗一次 5 秒超时的子进程
+    （issue #23）。标点同理——`"` 在 fixture 的 `data/*.json` 里遍地都是，那种「命中」只是噪声。
     """
     write_summaries(settings)
 
-    body = post_search(user_client, {"query": '"'})
+    for raw_query in ('"', "刷怪上限是怎么算的"):
+        body = post_search(user_client, {"query": raw_query})
 
-    assert any("literal" in hit["why"] for hit in body["hits"])
-    assert all("summary" not in hit["why"] for hit in body["hits"])
+        assert all("literal" not in hit["why"] for hit in body["hits"]), raw_query
+
+
+def test_literal_pattern_extracts_only_identifiers() -> None:
+    """`literal_pattern` 只抽「像标识符的 token」：驼峰、点号路径、下划线都算，长度 ≥ 3。"""
+    assert channels.literal_pattern("刷怪上限是怎么算的") is None
+    assert channels.literal_pattern("，。 、") is None
+    assert channels.literal_pattern("MobCategory") == "MobCategory"
+    # `.`/`$` 在正则里有特殊含义，这里要的是字面量，所以逐个转义。
+    assert channels.literal_pattern("Mob.spawnInterval") == "Mob\\.spawnInterval"
+    assert channels.literal_pattern("刷怪上限 MobCategory 怎么算") == "MobCategory"
+    # 多个 token 去重、按出现顺序用 `|` 连接；短于 3 的丢掉。
+    assert channels.literal_pattern("tick tick Mob ok") == "tick|Mob"
+
+
+def test_literal_candidates_do_not_spawn_ripgrep_for_chinese_queries(
+    settings: Settings,
+    index_conn: sqlite3.Connection,
+    indexed: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯中文查询不起子进程（issue #23）：`subprocess.run` 被换成「调用即失败」。"""
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("纯中文查询不该起 ripgrep 子进程")
+
+    monkeypatch.setattr(channels.subprocess, "run", explode)
+
+    candidates = channels.literal_candidates(
+        index_conn,
+        source_root(settings.data_dir, VERSION),
+        "刷怪上限是怎么算的",
+        path_prefix=None,
+    )
+
+    assert candidates == []
+
+
+def test_literal_candidates_send_only_the_english_tokens_to_ripgrep(
+    settings: Settings,
+    index_conn: sqlite3.Connection,
+    indexed: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """中英混合查询只把英文部分送进 rg（issue #23）：整句中文不再被当正则。"""
+    captured: list[list[str]] = []
+
+    class Completed:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args: list[str], **_kwargs: object) -> Completed:
+        captured.append(list(args))
+
+        return Completed()
+
+    monkeypatch.setattr(channels.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(channels.subprocess, "run", fake_run)
+
+    channels.literal_candidates(
+        index_conn,
+        source_root(settings.data_dir, VERSION),
+        "刷怪上限 MobCategory 怎么算",
+        path_prefix=None,
+    )
+
+    assert len(captured) == 1
+    # `_ripgrep` 的参数末尾是 `-- <pattern> .`。
+    assert captured[0][-2] == "MobCategory"
 
 
 def test_empty_result_is_200_with_empty_arrays(

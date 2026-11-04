@@ -46,16 +46,15 @@ WAIT_TIMEOUT_S = 10.0
 MECHANIC_WORDS = ("刷怪", "生成", "掉落", "刻", "区块", "附魔", "红石")
 
 # 不合格摘要的典型形态（规格 §1 的三行格式）：每种形态各一条用例，断言该类的失败被记录、
-# 且不入库（`parse_batch_response` → `validate_summary`）。
+# 且不入库（`parse_batch_response` → `validate_summary`）。前缀**不是**判定依据（issue #23：
+# 真实模型经常写成三行自由文本），所以这里不再把「缺前缀」当不合格。
 BAD_SUMMARIES: Final[dict[str, str]] = {
     "行数不是 3": "刷怪上限：每区块生成预算\n关键成员：spawnInterval",
-    "第 2 行没有「机制」前缀": (
-        "刷怪上限：每区块生成预算\n实现方式：按刻调度\n关键成员：spawnInterval"
+    "第 1 行没有中文": "Spawn budget per chunk\n机制：按刻调度\n关键成员：spawnInterval",
+    "第 2 行没有中文": "刷怪上限：每区块生成预算\nby ticking\n关键成员：spawnInterval",
+    "第 3 行没有英文标识符": (
+        "刷怪上限：每区块生成预算\n机制：按刻调度\n关键成员：生成间隔与上限"
     ),
-    "第 3 行没有「关键成员」前缀": (
-        "刷怪上限：每区块生成预算\n机制：按刻调度\n成员：spawnInterval"
-    ),
-    "没有中文": "Spawn budget: caps mob count per chunk\n机制：tick\n关键成员：spawnInterval",
     "第 1 行太短": "刷怪\n机制：按刻调度\n关键成员：spawnInterval",
     "第 1 行只是复述类名": (
         "net.minecraft.world.Mob\n机制：按刻调度\n关键成员：spawnInterval"
@@ -244,6 +243,29 @@ def test_valid_summary_passes_the_format_gate() -> None:
     text = "刷怪上限：每区块生成预算\n机制：按 mob cap 与玩家距离调度\n关键成员：spawnInterval"
 
     assert summarize.validate_summary(text, fqn="net.minecraft.world.Mob") is None
+
+
+def test_unprefixed_three_line_summary_passes_the_gate() -> None:
+    """三行自由文本（不带「职责：/机制：/关键成员：」前缀）同样合格（issue #23 实测）。
+
+    真实模型经常不写前缀。把「有没有前缀」当判定依据会把整批摘要全拒掉，闸门因此只校验实质：
+    前两行有中文、第 3 行有英文标识符。
+    """
+    text = (
+        "控制每个区块的刷怪上限与生成节奏\n"
+        "按生物群系权重挑选候选，受 mob cap 与玩家距离约束\n"
+        "spawnInterval, getMaxInstancesPerChunk"
+    )
+
+    assert summarize.validate_summary(text, fqn="net.minecraft.world.Mob") is None
+
+
+def test_members_line_without_an_identifier_is_rejected() -> None:
+    """第 3 行（关键成员）没有英文标识符就是不合格：这是该行唯一的可靠实质。"""
+    text = "控制每个区块的刷怪上限\n按生物群系权重挑选候选\n生成间隔与最大实例数"
+    problem = summarize.validate_summary(text, fqn="net.minecraft.world.Mob")
+
+    assert problem is not None and "英文标识符" in problem
 
 
 @pytest.mark.parametrize("head", ["管理玩家背包", "刷怪上限与预算", "管理玩家背包物品"])
@@ -501,6 +523,17 @@ def test_export_restore_remaps_class_ids_and_drops_removed_classes(
 # ----------------------------------------------------------------------
 
 
+def test_build_prompt_states_the_three_line_format() -> None:
+    """格式要求与样板写在**用户消息**里（issue #23：只写在 system 消息里模型会忽略）。"""
+    prompt = summarize.build_prompt([digest("net.minecraft.world.Mob", "net.minecraft.world")])
+
+    for prefix in ("职责：", "机制：", "关键成员："):
+        assert prefix in prompt, prefix
+
+    assert "只许英文标识符" in prompt
+    assert "### net.minecraft.world.Mob" in prompt
+
+
 def test_group_by_package_splits_batches_within_a_package() -> None:
     """按 package 分批：同包按 `batch_size` 切，不同包不混批（规格 §3）。"""
     batches = summarize.group_by_package(
@@ -531,6 +564,36 @@ def test_invalid_json_marks_every_class_in_the_batch_failed(
     assert stats.generated == 0
     assert stats.failed == 6
     assert read_summaries(indexed) == {}
+
+
+def test_fenced_json_response_is_parsed() -> None:
+    """```json 围栏（真实模型的常态）在解析前被剥掉，不是「响应不是合法 JSON」。"""
+    body = (
+        '{"net.minecraft.world.Mob": "职责：控制刷怪上限\\n'
+        '机制：按 mob cap 调度\\n关键成员：spawnInterval"}'
+    )
+    digests = [digest("net.minecraft.world.Mob", "net.minecraft.world")]
+
+    for raw in (f"```json\n{body}\n```", f"```\n{body}\n```", body):
+        parsed, failures = summarize.parse_batch_response(raw, digests)
+
+        assert failures == {}, raw
+        assert "net.minecraft.world.Mob" in parsed, raw
+
+
+def test_prose_around_the_json_object_is_tolerated() -> None:
+    """JSON 前后的说明文字（「以下是摘要：」/「希望有帮助」）不影响解析。"""
+    body = (
+        '{"net.minecraft.world.Mob": "职责：控制刷怪上限\\n'
+        '机制：按 mob cap 调度\\n关键成员：spawnInterval"}'
+    )
+    digests = [digest("net.minecraft.world.Mob", "net.minecraft.world")]
+
+    for raw in (f"以下是摘要：\n{body}", f"{body}\n希望有帮助！", f"好的：\n```json\n{body}\n```"):
+        parsed, failures = summarize.parse_batch_response(raw, digests)
+
+        assert failures == {}, raw
+        assert "net.minecraft.world.Mob" in parsed, raw
 
 
 def test_single_class_failure_keeps_the_rest(

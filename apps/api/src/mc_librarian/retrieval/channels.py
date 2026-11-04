@@ -11,15 +11,21 @@
 符号：同一实体被多路召回时才能被 RRF 累加，`why` 也才会有多个值（规格 §1）。任何一路为空
 （含 ripgrep 不可用 / 超时、`summaries_fts` 表不存在或不是 FTS5、query 含 FTS 语法）都不算错误
 （规格 §8）。
+
+
+注：`import shutil as shutil` / `import subprocess as subprocess` 的 `as` 写法是
+给 mypy 的显式再导出标记——测试里会 monkeypatch `channels.subprocess.run` 与
+`channels.shutil.which`，不这样标注会被 `no_implicit_reexport` 判为 attr-defined。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import shutil
+import re
+import shutil as shutil
 import sqlite3
-import subprocess
+import subprocess as subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -34,6 +40,11 @@ Channel = Literal["summary", "symbol", "literal", "reference"]
 
 # 每路各取前 50 条候选（规格 §1）。
 CHANNEL_LIMIT: Final = 50
+
+# 送进 ripgrep 的只能是「像标识符的 token」：中文整句当正则在源码里恒不命中，还白耗一次
+# 5 秒超时的子进程（issue #23）。驼峰、点号路径、下划线都算，长度 ≥ 3（短于此的多是噪声）。
+IDENTIFIER_TOKEN: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
+IDENTIFIER_MIN_LEN: Final = 3
 
 # ripgrep 的固定参数（规格 §3）；`--json` 便于按行解析。
 RG_BINARY: Final = "rg"
@@ -126,11 +137,40 @@ def literal_candidates(
     *,
     path_prefix: str | None,
 ) -> list[Candidate]:
-    """字面量通道：ripgrep 子进程扫源码树，超时 / 不可用时返回空并写 warn。"""
+    """字面量通道：ripgrep 子进程扫源码树，超时 / 不可用时返回空并写 warn。
+
+    `name` 是自然语言查询时，只把其中「像标识符的 token」送进 ripgrep（`literal_pattern`）：
+    整句中文当正则在源码里恒不命中，还白耗一次 5 秒超时的子进程（issue #23）。一个标识符
+    token 都没有（纯中文 / 纯标点）时不起子进程，直接返回空。
+    """
+    pattern = literal_pattern(name)
+
+    if pattern is None:
+        return []
+
     return [
         _location_candidate(connection, "literal", path, line)
-        for path, line in _ripgrep(source_root, name, path_prefix=path_prefix)
+        for path, line in _ripgrep(source_root, pattern, path_prefix=path_prefix)
     ]
+
+
+def literal_pattern(name: str) -> str | None:
+    """从查询里抽出「像标识符的 token」，拼成 ripgrep 的候选正则；一个都没有时返回 `None`。
+
+    `IDENTIFIER_TOKEN` 覆盖驼峰、点号路径、下划线（与 issue #23 的提取规则一致）。多个 token
+    去重后按出现顺序用 `|` 连接（任一个命中都算候选）；每个 token 用 `re.escape` 转义：`.`/`$`
+    在正则里有特殊含义，而这里要的是字面量。
+    """
+    tokens = list(
+        dict.fromkeys(
+            token for token in IDENTIFIER_TOKEN.findall(name) if len(token) >= IDENTIFIER_MIN_LEN
+        )
+    )
+
+    if not tokens:
+        return None
+
+    return "|".join(re.escape(token) for token in tokens)
 
 
 def summary_candidates(

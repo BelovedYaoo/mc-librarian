@@ -53,14 +53,17 @@ jieba.setLogLevel(logging.WARNING)
 
 # 摘要固定 3 行（规格 §1）。
 SUMMARY_LINE_COUNT: Final = 3
-# 第 2/3 行的固定前缀（规格 §1）；不是这两个前缀就是没按格式写。
-MECHANIC_PREFIX: Final = "机制"
-MEMBERS_PREFIX: Final = "关键成员"
+# 三行**可选**的字面前缀（规格 §1 的格式建议）：模型有时写、有时不写，两种都收。
+# 判定前一律剥掉，只校验实质——真实模型经常写成三行自由文本，把「有没有前缀」当判定依据
+# 会把整批摘要全拒掉（issue #23 的实测）。
+LINE_PREFIXES: Final[tuple[str, ...]] = ("职责", "机制", "关键成员")
+# 第 3 行（关键成员）的实质：至少一个英文标识符。驼峰、下划线、点号路径都算，
+# 长度 ≥ 3（首字符 + 两个以上）。这是「关键成员」唯一能可靠校验的特征。
+IDENTIFIER: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # 第 1 行（职责）的最短长度：比这短的多半是「Mob」这类复述类名的垃圾。定得宽松（4 字符）
 # ——「管理玩家背包」这种简洁但合格的第 1 行不该被格式闸门拒掉（拒好摘要的闸门比没有更糟）。
 SUMMARY_MIN_HEAD_CHARS: Final = 4
-# 摘要必须用中文写：去掉「机制」「关键成员」两个固定标签后仍要有汉字，否则就是把类名 / 代码
-# 复述一遍（标签本身是中文，不先摘掉的话这项检查永远为真）。
+# 前两行必须含中日韩字符：否则就是把类名 / 代码复述一遍（只校验前两行——第 3 行是英文标识符）。
 CJK_CHAR: Final = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 # FTS5 的 `unicode61` 分词器会把纯标点切成零个 token（`\w` 在 `str` 上含汉字）。
 FTS_WORD_CHAR: Final = re.compile(r"\w")
@@ -70,12 +73,23 @@ SUMMARY_MAX_CHARS: Final = 2000
 FAILURE_SAMPLE: Final = 5
 
 SYSTEM_PROMPT: Final = (
-    "你是 Minecraft 源码知识库的中文摘要写手。为每个类写恰好 3 行中文摘要，格式固定：\n"
-    "<职责>：一句话说明这个类在游戏里干什么（不是复述代码）\n"
-    "机制：它怎么做到的，或它约束了什么\n"
-    "关键成员：英文标识符，逗号分隔\n"
-    "必须带上游戏机制词（刷怪、掉落、刻、区块、生成、附魔、红石……），中文在前、英文标识符在后。\n"
-    '只输出一个 JSON 对象：{"<类的全限定名>": "<三行摘要>"}，不要输出任何其它文字。'
+    "你是 Minecraft 源码知识库的中文摘要写手，只输出一个 JSON 对象，不要输出任何其它文字。"
+)
+
+# 摘要的三行格式要求（规格 §1）+ 一条完整样板。
+# 这段要求放在**用户消息**里（`build_prompt`）、紧挨着类清单：实测同一个模型在「要求只写在
+# system 消息里」时会忽略格式（输出 markdown 列表或纯中文描述），写在用户消息里则稳定遵守
+# （issue #23 的实测：system 消息版本 0/20，用户消息版本 20/20）。
+SUMMARY_FORMAT_RULES: Final[tuple[str, ...]] = (
+    "每一行都必须带固定前缀：",
+    "第 1 行「职责：」+ 这个类在游戏里干什么（不是复述代码）；",
+    "第 2 行「机制：」+ 它怎么做到的（带游戏机制词，如刷怪、掉落、刻、区块、生成）；",
+    "第 3 行「关键成员：」+ 该类真实的英文字段名 / 方法名，逗号分隔。"
+    "第 3 行只许英文标识符，不许写中文描述。",
+    "格式样板（类名与内容只是占位，不要照抄）：",
+    '{"com.example.ExampleClass": "职责：控制每个区块的刷怪上限与生成节奏\\n'
+    "机制：按生物群系权重挑选候选，受 mob cap 与玩家距离约束\\n"
+    '关键成员：spawnInterval, getMaxInstancesPerChunk"}',
 )
 
 # `summaries` 是普通表（幂等要读 `content_hash`），`summaries_fts` 是独立的 FTS5 表，
@@ -420,9 +434,15 @@ def group_by_package(
 
 
 def build_prompt(digests: Sequence[ClassDigest]) -> str:
-    """一批类的提示词；每个类以 `### <fqn>` 起头，便于模型对号入座。"""
+    """一批类的提示词：格式要求 + 样板（`SUMMARY_FORMAT_RULES`），然后是每个类。
+
+    每个类以 `### <fqn>` 起头，便于模型对号入座。格式要求放用户消息而不是 `SYSTEM_PROMPT`
+    的理由见 `SUMMARY_FORMAT_RULES` 的注释。
+    """
     blocks = [
-        f"请为下面 {len(digests)} 个类各写一条三行中文摘要，按 JSON 对象返回。"
+        f"为下面 {len(digests)} 个类各写一条三行中文摘要，按 JSON 对象返回，键是类的全限定名。",
+        *SUMMARY_FORMAT_RULES,
+        "",
     ]
 
     for digest in digests:
@@ -435,7 +455,34 @@ def build_prompt(digests: Sequence[ClassDigest]) -> str:
     return "\n".join(blocks)
 
 
+# 模型常把 JSON（甚至整段摘要）包在 ```json 围栏里——真实模型的常态，不是异常。
 _CODE_FENCE: Final = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
+
+
+def strip_code_fence(text: str) -> str:
+    """剥掉首尾的 markdown 代码围栏（` ```json ` / ` ``` `）与前后空白。"""
+    return _CODE_FENCE.sub("", text.strip())
+
+
+def extract_json_object(raw: str) -> str:
+    """从模型响应里取出最外层的 JSON 对象文本。
+
+    剥掉围栏与空白后，从第一个 `{` 起用 `json.JSONDecoder.raw_decode` 解出一个完整的 JSON
+    值：前置的「以下是摘要：」与尾随的「希望有帮助」都不会让整批摘要判失败。取不到时原样返回，
+    由调用方的 `json.loads` 去报「不是合法 JSON」——失败归类（整批失败）因此不变。
+    """
+    text = strip_code_fence(raw)
+    start = text.find("{")
+
+    if start == -1:
+        return text
+
+    try:
+        _, end = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError:
+        return text
+
+    return text[start:end]
 
 
 def normalize_summary(text: str) -> str:
@@ -443,8 +490,11 @@ def normalize_summary(text: str) -> str:
 
     `SUMMARY_MAX_CHARS` 是**逐行**上限：对整段文本一次性截断会把第 2/3 行一起切掉，入库后
     只剩 1 行、绕过「固定 3 行」的闸门。第 4 行起视为第 3 行成员列表的折行，空格拼接。
+    首尾的代码围栏也在这里剥掉：模型有时把整段摘要包进围栏。
     """
-    lines = [line.strip()[:SUMMARY_MAX_CHARS] for line in text.strip().splitlines()]
+    lines = [
+        line.strip()[:SUMMARY_MAX_CHARS] for line in strip_code_fence(text).splitlines()
+    ]
 
     if len(lines) > SUMMARY_LINE_COUNT:
         tail = " ".join(line for line in lines[SUMMARY_LINE_COUNT - 1 :] if line)
@@ -453,34 +503,52 @@ def normalize_summary(text: str) -> str:
     return "\n".join(lines)
 
 
+def _strip_line_prefix(line: str) -> str:
+    """剥掉行首可选的「职责：/机制：/关键成员：」前缀（半角 / 全角冒号都认）。"""
+    for prefix in LINE_PREFIXES:
+        if line.startswith(prefix):
+            return line[len(prefix) :].lstrip("：: ").strip()
+
+    return line.strip()
+
+
 def validate_summary(text: str, *, fqn: str) -> str | None:
     """校验一条摘要是否满足规格 §1 的三行格式；合格返回 `None`，不合格返回原因。
 
-    传入的应当是 `normalize_summary` 规整过的文本（首尾无空行、逐行截断、折行已并回第 3 行）。
-    只挡最明显的垃圾（行数 / 第 2、3 行前缀 / 是不是中文 / 第 1 行是不是在复述类名），
-    不做语义判断：「有没有游戏机制词」无法可靠校验，那是 prompt 的责任。
+    只校验**实质**，不要求字面前缀：真实模型经常写成三行自由文本、不带「机制：/关键成员：」，
+    那同样是合格摘要——把「有没有前缀」当判定依据会把整批摘要全拒掉（issue #23 的实测）。
+    传入的文本由 `normalize_summary` 规整（剥围栏、逐行截断、第 4 行起的折行并回第 3 行），
+    因此「至少 3 行」这一条对折行的成员列表同样成立。判定规则：
+
+    - 至少 3 行；
+    - 第 1 行（剥掉前缀后）长度 ≥ `SUMMARY_MIN_HEAD_CHARS` 且不等于该类的 FQN 或简单名；
+    - 前两行含中日韩字符（摘要必须用中文写，不是复述类名）；
+    - 第 3 行含至少一个英文标识符（`IDENTIFIER`）——这是「关键成员」的实质。
+
+    先判第 1 行再看整体中文：模型复述类名时（第 1 行就是 FQN）报「复述类名」比报「没有中文」
+    更精确。所有规则都只决定「拒 / 收」与失败原因，不改变是否入库。
+    不做语义判断：「有没有游戏机制词」「是不是在复述代码」都无法可靠校验，那是 prompt 的责任。
     """
-    lines = [line.strip() for line in text.strip().splitlines()]
+    lines = [line.strip() for line in normalize_summary(text).splitlines()]
 
     if len(lines) < SUMMARY_LINE_COUNT:
         return f"至少 {SUMMARY_LINE_COUNT} 行，实际 {len(lines)} 行"
 
-    if not lines[1].startswith(MECHANIC_PREFIX):
-        return f"第 2 行必须以「{MECHANIC_PREFIX}」开头"
-
-    if not lines[2].startswith(MEMBERS_PREFIX):
-        return f"第 3 行必须以「{MEMBERS_PREFIX}」开头"
-
-    if CJK_CHAR.search(text.replace(MECHANIC_PREFIX, "").replace(MEMBERS_PREFIX, "")) is None:
-        return "没有中文（必须用中文写，不是复述类名）"
-
-    head = lines[0].rstrip("：:").strip()
+    head = _strip_line_prefix(lines[0])
+    mechanism = _strip_line_prefix(lines[1])
+    members = _strip_line_prefix(lines[2])
 
     if len(head) < SUMMARY_MIN_HEAD_CHARS:
         return f"第 1 行太短（少于 {SUMMARY_MIN_HEAD_CHARS} 个字符）"
 
     if head in (fqn, fqn.rsplit(".", 1)[-1]):
         return "第 1 行只是复述类名"
+
+    if CJK_CHAR.search(head) is None or CJK_CHAR.search(mechanism) is None:
+        return "前两行必须有中文（必须用中文写，不是复述类名）"
+
+    if IDENTIFIER.search(members) is None:
+        return "第 3 行必须含至少一个英文标识符（关键成员）"
 
     return None
 
@@ -493,11 +561,10 @@ def parse_batch_response(
     整体不是合法 JSON（或不是对象）时，**该批全部按单类失败**；JSON 合法但缺某个 fqn、
     值不是非空字符串、或值不满足三行格式（`validate_summary`）时，只有那一个类失败
     （规格 §1/§3）——不合格的摘要不进库，走调用方既有的失败/重试路径。
+    响应里的围栏与前后散文由 `extract_json_object` 剥掉：那是真实模型的常态，不是异常。
     """
-    text = _CODE_FENCE.sub("", raw.strip())
-
     try:
-        loaded = json.loads(text)
+        loaded = json.loads(extract_json_object(raw))
     except json.JSONDecodeError as error:
         reason = f"响应不是合法 JSON：{error}"
         return {}, {digest.fqn: reason for digest in digests}
