@@ -81,6 +81,24 @@ const grey = {
  */
 const grey500 = '145, 158, 171';
 
+/**
+ * 「凹陷」表面（`background.neutral`）的底色。
+ *
+ * Minimal 这里用的是 `grey[200]`（`#F4F6F8`）——一个色相约 210° 的冷灰。本项目的主色是
+ * `#00A76F`（色相约 160°），两者相差 50°，冷灰底与绿色主色并排显得脏。改用与主色同系
+ * （色相约 152°）的淡绿，亮度与 `grey[200]` 几乎一致，所以原有对比度不受影响。
+ */
+const NEUTRAL_BACKGROUND = '#F1F7F4';
+
+/**
+ * 卡片阴影：照抄 minimal-vite-ts 的 `core/custom-shadows.ts` 里 `customShadows.card`
+ * （`0 0 2px 0` + `0 12px 24px -4px`，都是 `grey[500]` 的低透明度）。
+ *
+ * Minimal 的卡片就靠这一层阴影在白底上「浮」起来，本身没有边框；这里额外补一条 `divider`
+ * 细边框，让卡片在同样纯白的页面底上也有一圈看得见的边界。
+ */
+const CARD_SHADOW = `0 0 2px 0 rgba(${grey500}, 0.2), 0 12px 24px -4px rgba(${grey500}, 0.12)`;
+
 /** 浅色（light-only，本项目不做暗色模式与主题切换）调色板，照抄 Minimal 的 light 定义。 */
 const lightPalette: PaletteOptions = {
   mode: 'light',
@@ -94,12 +112,13 @@ const lightPalette: PaletteOptions = {
     secondary: grey[600],
     disabled: grey[500],
   },
-  // `default` 是页面外壳（body / LayoutRoot），`paper` 是内容表面（顶栏、消息区、卡片），
-  // `neutral` 是「凹陷」表面（导航列、代码块、表格斑马行）——Minimal 里这三者用途不同。
+  // `default` 是页面外壳（body / LayoutRoot）与侧栏，`paper` 是内容表面（顶栏、消息区、卡片），
+  // `neutral` 只用在需要「凹陷」感的地方（代码块、行内代码、表格表头）——**不做面板分区**。
+  // 层次靠 `divider` 边框与卡片阴影，不靠灰底面板（Minimal 的侧栏就是白的）。
   background: {
     paper: '#FFFFFF',
     default: '#FFFFFF',
-    neutral: grey[200],
+    neutral: NEUTRAL_BACKGROUND,
   },
   action: {
     active: grey[600],
@@ -119,6 +138,19 @@ const lightPalette: PaletteOptions = {
 const baseOptions: ThemeOptions = {
   palette: lightPalette,
   shape: { borderRadius: 8 },
+  components: {
+    // 卡片：细边框 + 极淡阴影。边框用 `divider`（grey[500] 20%），阴影用 Minimal 的卡片
+    // token，圆角按 Minimal 的 `Number(shape.borderRadius) * 2`（8 → 16px）。
+    MuiCard: {
+      styleOverrides: {
+        root: ({ theme }) => ({
+          border: `1px solid ${theme.palette.divider}`,
+          borderRadius: Number(theme.shape.borderRadius) * 2,
+          boxShadow: CARD_SHADOW,
+        }),
+      },
+    },
+  },
   typography: {
     // `@fontsource-variable/public-sans` 注册的族名是 `Public Sans Variable`（引入见 src/global.css）。
     // 中文回退到 `Noto Sans SC`（系统字体，不打包 CJK 字体）。

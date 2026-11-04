@@ -56,7 +56,7 @@ export function UsageView() {
         </Typography>
       </div>
 
-      <Card variant="outlined">
+      <Card>
         <CardContent>
           <Stack
             direction={{ xs: 'column', sm: 'row' }}
@@ -203,7 +203,7 @@ function BucketRow({ bucket }: { bucket: UsageBucket }) {
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <Card variant="outlined" sx={{ flex: '1 1 160px' }}>
+    <Card sx={{ flex: '1 1 160px' }}>
       <CardContent>
         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
           {label}

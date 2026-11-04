@@ -20,7 +20,7 @@ export function HealthView() {
   const { state, refresh } = useHealth();
 
   return (
-    <Card variant="outlined">
+    <Card>
       <CardContent>
         <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
           <Typography variant="h6">后端健康状态</Typography>

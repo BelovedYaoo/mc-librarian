@@ -445,8 +445,8 @@ export function AskView() {
               flexShrink: 0,
               minHeight: 0,
               p: 2,
-              // 会话列表栏与最左导航同属「凹陷」表面。
-              bgcolor: 'background.neutral',
+              // 会话列表栏也是白底（同最左导航），与消息区靠右边框分隔。
+              bgcolor: 'background.default',
               borderRight: '1px solid',
               borderColor: 'divider',
             }}

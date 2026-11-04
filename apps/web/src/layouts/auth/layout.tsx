@@ -33,7 +33,7 @@ export function AuthLayout({ title, subtitle, children }: AuthLayoutProps) {
               </Typography>
             </div>
 
-            <Card variant="outlined">
+            <Card>
               <CardContent sx={{ p: { xs: 3, md: 4 } }}>
                 <Stack spacing={3}>
                   <div>

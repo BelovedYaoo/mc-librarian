@@ -388,7 +388,7 @@ export function SettingsView() {
       </Typography>
 
       {GROUPS.map((group) => (
-        <Card key={group.block} variant="outlined">
+        <Card key={group.block}>
           <CardContent>
             <Typography variant="subtitle1">{group.title}</Typography>
             {group.hint && (

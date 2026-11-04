@@ -73,7 +73,7 @@ export function VersionsView() {
         </Alert>
       )}
 
-      <Card variant="outlined">
+      <Card>
         <CardContent>
           <Typography variant="h6" sx={{ mb: 2 }}>
             已索引版本

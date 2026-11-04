@@ -105,7 +105,7 @@ export function JobsView() {
       {error && <Alert severity="error">读取任务列表失败：{error}</Alert>}
 
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} sx={{ alignItems: 'flex-start' }}>
-        <Card variant="outlined" sx={{ width: { xs: '100%', md: 280 }, flex: '0 0 auto' }}>
+        <Card sx={{ width: { xs: '100%', md: 280 }, flex: '0 0 auto' }}>
           <CardContent>
             <Typography variant="h6" sx={{ mb: 1 }}>
               任务队列
@@ -150,7 +150,7 @@ export function JobsView() {
               <LogPanel lines={lines} error={logsError} />
             </>
           ) : (
-            <Card variant="outlined">
+            <Card>
               <CardContent>
                 <Typography variant="body2" sx={{ color: 'text.secondary' }}>
                   选中左侧任务查看进度与日志。
@@ -181,7 +181,7 @@ function JobDetail({ job, busyAction, actionError, onCancel, onRetry }: JobDetai
   const retryable = job.status === 'failed' || job.status === 'canceled';
 
   return (
-    <Card variant="outlined">
+    <Card>
       <CardContent>
         <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 2 }}>
           <Typography variant="h6">{job.version ?? '未指定版本'}</Typography>
@@ -250,7 +250,7 @@ type LogPanelProps = {
 
 function LogPanel({ lines, error }: LogPanelProps) {
   return (
-    <Card variant="outlined">
+    <Card>
       <CardContent>
         <Typography variant="h6" sx={{ mb: 1 }}>
           日志

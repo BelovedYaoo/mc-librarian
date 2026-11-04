@@ -23,7 +23,7 @@ declare module '@mui/material/styles' {
   }
 
   interface TypeBackground {
-    /** 「凹陷」表面：导航列、代码块、表格斑马行。 */
+    /** 「凹陷」表面：markdown 代码块、行内代码、表格表头——**不用于面板分区**。 */
     neutral: string;
   }
 }

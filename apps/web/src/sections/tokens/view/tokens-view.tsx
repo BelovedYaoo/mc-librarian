@@ -112,7 +112,7 @@ export function TokensView() {
   };
 
   return (
-    <Card variant="outlined">
+    <Card>
       <CardContent>
         <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
           <Typography variant="h6">访问令牌</Typography>

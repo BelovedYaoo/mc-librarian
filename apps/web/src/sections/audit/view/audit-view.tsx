@@ -51,7 +51,7 @@ export function AuditView() {
         </Typography>
       </div>
 
-      <Card variant="outlined">
+      <Card>
         <CardContent>
           <Stack
             component="form"

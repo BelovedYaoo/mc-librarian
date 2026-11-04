@@ -179,7 +179,7 @@ export function BrowseView() {
     <Stack spacing={3}>
       <Typography variant="h4">检索调试台</Typography>
 
-      <Card variant="outlined">
+      <Card>
         <CardContent>
           <Box component="form" onSubmit={handleSubmit}>
             <Stack spacing={2}>
@@ -289,7 +289,7 @@ export function BrowseView() {
       )}
 
       {results && results.hits.length > 0 && (
-        <Card variant="outlined">
+        <Card>
           <CardContent>
             <Typography variant="h6" sx={{ mb: 1 }}>
               命中（{results.hits.length} / total {results.total}）
@@ -336,7 +336,7 @@ export function BrowseView() {
       {symbolDetail && selected && <SymbolDetailBlock detail={symbolDetail} />}
 
       {outline && selected && (
-        <Card variant="outlined">
+        <Card>
           <CardContent>
             <Typography variant="h6">骨架 · {outline.path}</Typography>
 
@@ -450,7 +450,7 @@ function HitRow({
 
 function SymbolDetailBlock({ detail }: { detail: SymbolDetail }) {
   return (
-    <Card variant="outlined">
+    <Card>
       <CardContent>
         <Typography variant="h6" sx={{ fontFamily: 'monospace' }}>
           {detail.signature ?? detail.fqn}
@@ -553,7 +553,7 @@ function SliceBlock({ slice }: { slice: FileSlice }) {
   const lines = slice.content === '' ? [] : slice.content.split('\n');
 
   return (
-    <Card variant="outlined">
+    <Card>
       <CardContent>
         <Typography variant="h6">
           源码 · {slice.path}:{slice.start}-{slice.end}
@@ -584,7 +584,9 @@ function SliceBlock({ slice }: { slice: FileSlice }) {
                   flexShrink: 0,
                   pr: 2,
                   textAlign: 'right',
-                  color: 'text.disabled',
+                  // 用 `text.secondary` 而不是 `text.disabled`：行号是元信息，白底上
+                  // `text.disabled`（#919EAB）只有 2.73:1，读起来太淡。
+                  color: 'text.secondary',
                   userSelect: 'none',
                 }}
               >

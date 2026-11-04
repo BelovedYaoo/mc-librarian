@@ -41,8 +41,9 @@ const NavRoot = styled('nav')(({ theme }) => ({
   display: 'flex',
   gap: theme.spacing(1),
   padding: theme.spacing(2),
-  // 导航列用「凹陷」表面（grey[200]），与顶栏/内容区的 paper 拉开层次。
-  backgroundColor: theme.palette.background.neutral,
+  // 导航列就是白底（`background.default`）：Minimal 的 `--layout-nav-bg` 也是
+  // `palette.background.default`，light 下即 `#FFFFFF`。层次靠右边框，不靠灰底。
+  backgroundColor: theme.palette.background.default,
   borderBottom: `1px solid ${theme.palette.divider}`,
   [theme.breakpoints.up('md')]: {
     flex: '0 0 180px',

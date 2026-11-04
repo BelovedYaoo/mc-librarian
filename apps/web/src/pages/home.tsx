@@ -30,7 +30,7 @@ export default function HomePage() {
           </Typography>
         </div>
 
-        <Card variant="outlined">
+        <Card>
           <CardContent>
             <Typography variant="h6" sx={{ mb: 2 }}>
               当前账号

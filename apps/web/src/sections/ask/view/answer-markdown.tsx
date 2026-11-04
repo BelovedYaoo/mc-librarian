@@ -130,15 +130,15 @@ const markdownSx = {
   '& a': { color: 'primary.main' },
   '& hr': { my: 2, border: 0, borderTop: '1px solid', borderColor: 'divider' },
   '& del': { color: 'text.secondary' },
-  // 行内代码。底色照抄 Minimal 的 markdown 样式（grey[500] 20%）：用 `action.hover`（8%）
-  // 在白色消息区上几乎看不出来。
+  // 行内代码。底色用主色（`#00A76F`）8% 的淡绿，与「凹陷」表面同一色系：
+  // `action.hover`（grey 8%）偏蓝，在白色消息区上既弱又和绿色主色不搭。
   '& code': {
     fontFamily: 'monospace',
     fontSize: '0.875em',
     px: 0.5,
     py: 0.25,
     borderRadius: 0.5,
-    bgcolor: 'rgba(145, 158, 171, 0.2)',
+    bgcolor: 'rgba(0, 167, 111, 0.08)',
   },
   // 代码块：底色 + 等宽 + 横向滚动。
   // Minimal 的 markdown 用 `grey[900]` 深底 + 白字；本项目代码高亮用 highlight.js 的
@@ -168,7 +168,8 @@ const markdownSx = {
     py: 0.75,
     textAlign: 'left',
   },
-  '& thead th': { bgcolor: 'action.hover', fontWeight: 600 },
+  // 表头用「凹陷」表面：Minimal 的 `MuiTableCell.head` 也是 `background.neutral`。
+  '& thead th': { bgcolor: 'background.neutral', fontWeight: 600 },
 };
 
 const cursorSx = {
