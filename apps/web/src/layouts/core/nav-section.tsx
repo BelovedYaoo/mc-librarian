@@ -41,6 +41,8 @@ const NavRoot = styled('nav')(({ theme }) => ({
   display: 'flex',
   gap: theme.spacing(1),
   padding: theme.spacing(2),
+  // 导航列用「凹陷」表面（grey[200]），与顶栏/内容区的 paper 拉开层次。
+  backgroundColor: theme.palette.background.neutral,
   borderBottom: `1px solid ${theme.palette.divider}`,
   [theme.breakpoints.up('md')]: {
     flex: '0 0 180px',
@@ -59,7 +61,9 @@ const NavItemLink = styled(NavLink)(({ theme }) => ({
   '&:hover': { backgroundColor: theme.palette.action.hover },
   '&.active': {
     backgroundColor: theme.palette.action.selected,
-    color: theme.palette.primary.main,
+    // 用 `primary.dark` 而不是 `primary.main`：新主色 #00A76F 在选中底色上只有 2.52:1，
+    // `primary.dark`（#007867）在同一底色上是 4.39:1，绿色标识还在。
+    color: theme.palette.primary.dark,
     fontWeight: theme.typography.fontWeightMedium,
   },
 }));

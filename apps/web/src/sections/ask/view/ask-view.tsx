@@ -445,6 +445,8 @@ export function AskView() {
               flexShrink: 0,
               minHeight: 0,
               p: 2,
+              // 会话列表栏与最左导航同属「凹陷」表面。
+              bgcolor: 'background.neutral',
               borderRight: '1px solid',
               borderColor: 'divider',
             }}
@@ -475,7 +477,14 @@ export function AskView() {
           <Box
             ref={messagesRef}
             onScroll={handleMessagesScroll}
-            sx={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', px: { xs: 2, md: 3 }, py: 2 }}
+            sx={{
+              flex: '1 1 auto',
+              minHeight: 0,
+              overflowY: 'auto',
+              px: { xs: 2, md: 3 },
+              py: 2,
+              bgcolor: 'background.paper',
+            }}
           >
             {loadingConversation && (
               <Stack sx={{ alignItems: 'center', py: 2 }}>
@@ -513,6 +522,7 @@ export function AskView() {
               flexShrink: 0,
               px: { xs: 2, md: 3 },
               py: 2,
+              bgcolor: 'background.paper',
               borderTop: '1px solid',
               borderColor: 'divider',
             }}

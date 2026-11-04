@@ -130,20 +130,23 @@ const markdownSx = {
   '& a': { color: 'primary.main' },
   '& hr': { my: 2, border: 0, borderTop: '1px solid', borderColor: 'divider' },
   '& del': { color: 'text.secondary' },
-  // 行内代码。
+  // 行内代码。底色照抄 Minimal 的 markdown 样式（grey[500] 20%）：用 `action.hover`（8%）
+  // 在白色消息区上几乎看不出来。
   '& code': {
     fontFamily: 'monospace',
     fontSize: '0.875em',
     px: 0.5,
     py: 0.25,
     borderRadius: 0.5,
-    bgcolor: 'action.hover',
+    bgcolor: 'rgba(145, 158, 171, 0.2)',
   },
   // 代码块：底色 + 等宽 + 横向滚动。
+  // Minimal 的 markdown 用 `grey[900]` 深底 + 白字；本项目代码高亮用 highlight.js 的
+  // github.css（浅色 token），深底会读不出来，所以底色改用调色板里的「凹陷」表面。
   '& pre': {
     my: 1.5,
     p: 1.5,
-    bgcolor: '#f6f8fa',
+    bgcolor: 'background.neutral',
     borderRadius: 1,
     overflowX: 'auto',
   },

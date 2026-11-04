@@ -325,7 +325,9 @@ function FileViewer({
                 flexShrink: 0,
                 pr: 1.5,
                 textAlign: 'right',
-                color: 'text.disabled',
+                // 用 `text.secondary` 而不是 `text.disabled`：灰色 disabled 在高亮行
+                // （`warning.light`）上只有 1.96:1，行号会消失。
+                color: 'text.secondary',
                 userSelect: 'none',
               }}
             >
