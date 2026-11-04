@@ -1,10 +1,4 @@
-import type {
-  AskEvent,
-  AskReason,
-  AskUsage,
-  Citation,
-  FileSlice,
-} from 'src/lib/api-client';
+import type { AskEvent, AskReason, AskUsage, Citation } from 'src/lib/api-client';
 
 import { useEffect, useMemo, useState } from 'react';
 import Alert from '@mui/material/Alert';
@@ -22,7 +16,10 @@ import Typography from '@mui/material/Typography';
 
 import { useVersions } from 'src/hooks';
 
-import { ApiError, readFile, streamAsk } from 'src/lib/api-client';
+import { ApiError, streamAsk } from 'src/lib/api-client';
+
+import { AnswerMarkdown } from './answer-markdown';
+import { CitationDrawer } from './citation-drawer';
 
 // ----------------------------------------------------------------------
 
@@ -124,6 +121,12 @@ export function AskView() {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
+  // 抽屉的 `open` 与内容分开：关闭时保留内容，退场动画里不会闪空白。
+  const [activeCitation, setActiveCitation] = useState<{
+    citation: Citation;
+    version: string;
+  } | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const versions = useMemo(
     () => (versionsState.status === 'ready' ? versionsState.versions : []),
@@ -238,15 +241,35 @@ export function AskView() {
       )}
 
       {turns.map((turn, index) => (
-        <TurnBlock key={`${index}:${turn.question}`} turn={turn} />
+        <TurnBlock
+          key={`${index}:${turn.question}`}
+          turn={turn}
+          onOpenCitation={(citation) => {
+            setActiveCitation({ citation, version: turn.version });
+            setDrawerOpen(true);
+          }}
+        />
       ))}
+
+      <CitationDrawer
+        open={drawerOpen}
+        citation={activeCitation?.citation ?? null}
+        version={activeCitation?.version ?? ''}
+        onClose={() => setDrawerOpen(false)}
+      />
     </Stack>
   );
 }
 
 // ----------------------------------------------------------------------
 
-function TurnBlock({ turn }: { turn: Turn }) {
+function TurnBlock({
+  turn,
+  onOpenCitation,
+}: {
+  turn: Turn;
+  onOpenCitation: (citation: Citation) => void;
+}) {
   return (
     <Stack spacing={2} divider={<Divider flexItem />}>
       <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
@@ -266,20 +289,18 @@ function TurnBlock({ turn }: { turn: Turn }) {
       )}
 
       {turn.answer !== '' && (
-        <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
-          {turn.answer}
-        </Typography>
+        <AnswerMarkdown text={turn.answer} streaming={turn.status === 'streaming'} />
       )}
 
       {turn.citations.length > 0 && (
         <Stack spacing={1}>
-          <Typography variant="subtitle2">引用（点击展开代码）</Typography>
+          <Typography variant="subtitle2">引用（点击查看整个文件）</Typography>
 
           {turn.citations.map((citation, index) => (
             <CitationRow
               key={`${citation.path}:${citation.lines.join('-')}:${index}`}
               citation={citation}
-              version={turn.version}
+              onOpen={() => onOpenCitation(citation)}
             />
           ))}
         </Stack>
@@ -352,106 +373,32 @@ function droppedLabels(args: Record<string, unknown> | undefined): string[] {
   return Array.isArray(dropped) ? dropped.map(String) : [];
 }
 
-/** 一条引用：点击后用 `/v1/read` 内联展开代码（不跳走，不丢上下文）。 */
-function CitationRow({ citation, version }: { citation: Citation; version: string }) {
-  const [slice, setSlice] = useState<FileSlice | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+/** 一条引用：点击后打开右侧抽屉，展示整个文件并高亮这几行（不跳走，不丢上下文）。 */
+function CitationRow({ citation, onOpen }: { citation: Citation; onOpen: () => void }) {
   const lines = citation.lines;
 
-  const handleToggle = async () => {
-    if (slice) {
-      setSlice(null);
-
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const loaded = await readFile({
-        version,
-        path: citation.path,
-        start: lines[0],
-        end: lines[1],
-      });
-
-      setSlice(loaded);
-    } catch (cause) {
-      setError(errorText(cause));
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
-    <Stack spacing={1}>
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{
-          alignItems: 'center',
-          cursor: 'pointer',
-          borderRadius: 1,
-          px: 1,
-          '&:hover': { backgroundColor: 'action.hover' },
-        }}
-        onClick={() => void handleToggle()}
-      >
-        <Chip size="small" variant="outlined" label={citation.symbol ?? '代码位置'} />
-
-        <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: '1 1 auto' }}>
-          {citation.path}:{lines.join('-')}
-        </Typography>
-
-        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-          {loading ? '读取中…' : slice ? '收起' : '展开'}
-        </Typography>
-      </Stack>
-
-      {error && <Alert severity="error">读取源码失败：{error}</Alert>}
-
-      {slice && <SliceBlock slice={slice} />}
-    </Stack>
-  );
-}
-
-function SliceBlock({ slice }: { slice: FileSlice }) {
-  const lines = slice.content === '' ? [] : slice.content.split('\n');
-
-  return (
-    <Box
+    <Stack
+      direction="row"
+      spacing={1}
       sx={{
-        fontFamily: 'monospace',
-        fontSize: 13,
-        lineHeight: 1.6,
-        overflowX: 'auto',
-        bgcolor: 'action.hover',
+        alignItems: 'center',
+        cursor: 'pointer',
         borderRadius: 1,
-        p: 2,
+        px: 1,
+        '&:hover': { backgroundColor: 'action.hover' },
       }}
+      onClick={onOpen}
     >
-      {lines.map((line, index) => (
-        <Box key={slice.start + index} sx={{ display: 'flex' }}>
-          <Box
-            component="span"
-            sx={{
-              width: 48,
-              flexShrink: 0,
-              pr: 2,
-              textAlign: 'right',
-              color: 'text.disabled',
-              userSelect: 'none',
-            }}
-          >
-            {slice.start + index}
-          </Box>
-          <Box component="span" sx={{ whiteSpace: 'pre' }}>
-            {line === '' ? ' ' : line}
-          </Box>
-        </Box>
-      ))}
-    </Box>
+      <Chip size="small" variant="outlined" label={citation.symbol ?? '代码位置'} />
+
+      <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: '1 1 auto' }}>
+        {citation.path}:{lines.join('-')}
+      </Typography>
+
+      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+        查看
+      </Typography>
+    </Stack>
   );
 }
