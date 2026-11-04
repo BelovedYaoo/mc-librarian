@@ -8,6 +8,7 @@ import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import Drawer from '@mui/material/Drawer';
 import Stack from '@mui/material/Stack';
+import Switch from '@mui/material/Switch';
 import Typography from '@mui/material/Typography';
 
 import { ApiError, readFile } from 'src/lib/api-client';
@@ -45,6 +46,8 @@ export function CitationDrawer({
 }) {
   const [state, setState] = useState<LoadState>({ status: 'idle' });
   const [copied, setCopied] = useState(false);
+  // 自动换行：抽屉很高，横向滚动条会落在最底部够不到（实测长行被右缘截断）。
+  const [wrap, setWrap] = useState(true);
 
   useEffect(() => {
     if (!open || citation === null) return undefined;
@@ -145,6 +148,13 @@ export function CitationDrawer({
                   共 {state.total} 行
                 </Typography>
               )}
+
+              <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', ml: 'auto' }}>
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  自动换行
+                </Typography>
+                <Switch size="small" checked={wrap} onChange={(e) => setWrap(e.target.checked)} />
+              </Stack>
             </Stack>
           </Box>
 
@@ -170,6 +180,7 @@ export function CitationDrawer({
                 )}
 
                 <FileViewer
+                  wrap={wrap}
                   slice={state.slice}
                   highlight={citation.lines}
                   focusLine={citation.lines[0]}
@@ -193,10 +204,12 @@ function FileViewer({
   slice,
   highlight,
   focusLine,
+  wrap,
 }: {
   slice: FileSlice;
   highlight: readonly number[];
   focusLine: number;
+  wrap: boolean;
 }) {
   const lines = useMemo(() => (slice.content === '' ? [] : slice.content.split('\n')), [slice]);
   const startLine = slice.start;
@@ -303,7 +316,17 @@ function FileViewer({
               {lineNo}
             </Box>
 
-            <Box component="span" sx={{ flex: '1 1 auto', whiteSpace: 'pre' }}>
+            <Box
+              component="span"
+              sx={{
+                flex: '1 1 auto',
+                // 默认自动换行：抽屉很高，横向滚动条会落在最底部、实际够不到（实测截断在右缘）。
+                // 关掉换行时用 pre + 父级 overflow-x 兜底，保持列对齐。
+                whiteSpace: wrap ? 'pre-wrap' : 'pre',
+                overflowWrap: wrap ? 'anywhere' : 'normal',
+                pr: 1,
+              }}
+            >
               {line === '' ? ' ' : line}
             </Box>
           </Box>
