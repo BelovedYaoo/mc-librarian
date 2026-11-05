@@ -574,8 +574,10 @@ export function AskView() {
                 </TextField>
               </Tooltip>
 
+              {/* 这一行**不带浮动 label**：多行 TextField 的 label 会给容器加顶部留白，
+                  实测把静止高度从 44 撑到 60，三个控件就再也对不齐。用途由 placeholder 说明，
+                  `aria-label` 补无障碍名。 */}
               <TextField
-                label="问题"
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 placeholder="刷怪上限在哪定义？"
@@ -583,16 +585,14 @@ export function AskView() {
                 minRows={1}
                 maxRows={8}
                 inputRef={questionInputRef}
-                slotProps={{ htmlInput: { onKeyDown: handleQuestionKeyDown } }}
+                slotProps={{
+                  htmlInput: { onKeyDown: handleQuestionKeyDown, 'aria-label': '问题' },
+                }}
                 size="small"
                 sx={{
                   flex: '1 1 240px',
                   minWidth: 0,
-                  '& .MuiOutlinedInput-root': {
-                    minHeight: COMPOSER_CONTROL_HEIGHT,
-                    alignItems: 'flex-start',
-                  },
-                  '& .MuiOutlinedInput-input': { py: '10px' },
+                  '& .MuiOutlinedInput-root': { minHeight: COMPOSER_CONTROL_HEIGHT },
                 }}
               />
 
