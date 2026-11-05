@@ -836,3 +836,56 @@ def test_streamed_deltas_match_persisted_answer(
     assistant = next(m for m in detail["messages"] if m["role"] == "assistant")
 
     assert assistant["content"] == streamed
+
+
+def test_read_patch_rebuilds_hunks_from_the_index(tmp_path: Path) -> None:
+    """补丁正文从 `patches` 表按 hunk 顺序重建；不是补丁（或没这张表）返回 None。
+
+    模型从 `search` 命中的 `path`（`xxx.java.patch`）直接调 `read` 是很自然的动作，
+    但 `.patch` 不在源码树里——读不到就白花一轮（实测 4 次 `read` 失败里 2 次是这个）。
+    """
+    from mc_librarian.retrieval import read_patch
+
+    db = sqlite3.connect(tmp_path / "index.sqlite")
+    db.execute(
+        "CREATE TABLE patches (id INTEGER PRIMARY KEY, path TEXT, hunk_index INTEGER,"
+        " target TEXT, old_start INTEGER, old_lines INTEGER, new_start INTEGER,"
+        " new_lines INTEGER, context TEXT, tokens INTEGER)"
+    )
+    # 用 `chr(10)` 拼换行：在脚本里写 `\\n` 的转义层数最容易数错（已被坑两次）。
+    NL = chr(10)
+    db.executemany(
+        "INSERT INTO patches (path, hunk_index, context) VALUES (?, ?, ?)",
+        [
+            ("a/B.java.patch", 1, NL.join(["@@ -20,3 +_,4 @@", "-  old", "+  new"])),
+            ("a/B.java.patch", 0, NL.join(["@@ -5,2 +_,2 @@", "   same", "+  added"])),
+        ],
+    )
+    db.commit()
+
+    text = read_patch(db, "a/B.java.patch")
+
+    assert text is not None
+    # 顺序按 hunk_index，而不是插入顺序。
+    assert text.index("@@ -5,2") < text.index("@@ -20,3")
+    assert read_patch(db, "a/Nope.java.patch") is None
+    db.close()
+
+
+def test_read_tool_clamps_end_to_file_length(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """`end` 超出文件长度时**夹到末尾**并返回实际区间，不报错。
+
+    模型无从知道文件有多少行，猜大很常见；报错只会让它再试一次。
+    这里用 fixture 里真实存在的 `Mob.java`，故意要 `end=9999`。
+    """
+    fake_chat.script = [
+        tool_call("read", path="net/minecraft/world/Mob.java", start=1, end=9999),
+        final_answer("读到了。"),
+    ]
+
+    events = parse_sse(ask(user_client).text)
+    step = next(e for e in events if e.get("type") == "step" and e.get("ok") is not None)
+
+    assert step["ok"] is True, step.get("error")

@@ -252,9 +252,16 @@ class ToolBox:
         )
 
     def _outline(self, args: dict[str, Any]) -> ToolOutcome:
-        outline = file_outline(
-            self._connection, self._settings, self._version, _require_str(args, "path")
-        )
+        path = _require_str(args, "path")
+
+        # 补丁不是 Java 源码，没有类/方法骨架。直接说清楚该用什么，别让它以为路径写错了
+        # 而去反复重试（实测模型会对着 `.patch` 调一次 outline 再调一次 read）。
+        if path.endswith(".patch"):
+            raise RetrievalNotFound(
+                f"{path} 是补丁文件，没有类/方法骨架；用 read 读它的改动内容（含行号）"
+            )
+
+        outline = file_outline(self._connection, self._settings, self._version, path)
 
         return ToolOutcome(
             ok=True,

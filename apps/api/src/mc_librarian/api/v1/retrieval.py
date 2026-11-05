@@ -23,6 +23,7 @@ from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.retrieval import (
     RetrievalNotFound,
     file_outline,
+    read_patch,
     read_source,
     reference_list,
     slice_lines,
@@ -208,8 +209,14 @@ def read_file(
     max_tokens: Annotated[int, Query(ge=100, le=32000)] = 4000,
 ) -> FileSlice:
     # 行号校验自己做（规格 §8）：三条越界都要在 detail 里带上文件总行数。
-    require_index(conn, settings, version)
+    index_path = require_index(conn, settings, version)
     text = read_source(settings, version, path)
+
+    if text is None:
+        # 补丁正文在索引库里（`patches` 表的 hunk），不在源码树上——与 ask 的 `read` 工具
+        # 走同一个回退，否则同一个路径在工具里能读、在抽屉里 404。
+        with query.open_readonly(index_path) as index:
+            text = read_patch(index, path)
 
     if text is None:
         if not source_tree_present(settings, version):
