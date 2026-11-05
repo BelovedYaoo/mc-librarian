@@ -7,7 +7,6 @@ import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
-import Collapse from '@mui/material/Collapse';
 import Divider from '@mui/material/Divider';
 import Drawer from '@mui/material/Drawer';
 import MenuItem from '@mui/material/MenuItem';
@@ -23,6 +22,8 @@ import { ApiError, deleteConversation, getConversation, streamAsk } from 'src/li
 import { AnswerMarkdown } from './answer-markdown';
 import { CitationDrawer } from './citation-drawer';
 import { ConversationList } from './conversation-list';
+import { GeneratingIndicator } from './generating-indicator';
+import { ThinkingTrace, type StepTrace } from './thinking-trace';
 
 // ----------------------------------------------------------------------
 
@@ -57,14 +58,6 @@ const EXAMPLE_QUESTIONS = [
   '解析掉落表 JSON 的类在哪',
 ];
 
-/** 工具轨迹里的一步：调用前只有 `args`，返回后补上 `ok` / `hits`；`context_budget` 只有 `args`。 */
-type StepTrace = {
-  tool: string;
-  args?: Record<string, unknown>;
-  ok?: boolean;
-  hits?: number;
-};
-
 type Turn = {
   question: string;
   /** 该轮提问用的版本；历史会话载入的轮次为 `''`（用当前选中的版本打开引用）。 */
@@ -76,9 +69,9 @@ type Turn = {
   usage: AskUsage | null;
   status: 'streaming' | 'done' | 'error';
   error: string | null;
+  /** 本轮请求开始的时间戳：轨迹与生成指示器的计时起点。 */
+  startedAt: number | null;
 };
-
-const CONTEXT_BUDGET_TOOL = 'context_budget';
 
 function errorText(cause: unknown): string {
   return cause instanceof ApiError ? cause.message : String(cause);
@@ -95,6 +88,7 @@ function emptyTurn(question: string, version: string): Turn {
     usage: null,
     status: 'streaming',
     error: null,
+    startedAt: Date.now(),
   };
 }
 
@@ -122,6 +116,8 @@ function turnsFromDetail(detail: ConversationDetail): Turn[] {
       usage: assistant?.usage ?? null,
       status: 'done',
       error: null,
+      // 历史轮次不计时：它们的耗时在 `usage.latency_ms` 里，轨迹也用服务端给的总值。
+      startedAt: null,
     });
 
     if (assistant) index += 1;
@@ -552,7 +548,9 @@ export function AskView() {
                 flexWrap: { xs: 'wrap', sm: 'nowrap' },
               }}
             >
-              <Tooltip title="只在选中的版本上检索">
+              {/* 版本串可以很长（`neoforge-21.1.265+1.21.1`），窄下拉会截断；
+                  Tooltip 里带完整版本，hover 就能看全。 */}
+              <Tooltip title={`${version}｜只在选中的版本上检索`}>
                 <TextField
                   select
                   size="small"
@@ -561,7 +559,7 @@ export function AskView() {
                   onChange={(event) => setVersion(event.target.value)}
                   disabled={versions.length === 0}
                   sx={{
-                    width: { xs: '100%', sm: 210 },
+                    width: { xs: '100%', sm: 240 },
                     flexShrink: 0,
                     '& .MuiOutlinedInput-root': { height: COMPOSER_CONTROL_HEIGHT },
                   }}
@@ -678,7 +676,19 @@ function TurnBlock({
         <VersionBadge version={turn.version} current={currentVersion} />
       </Stack>
 
-      {turn.steps.length > 0 && <StepTraceBlock steps={turn.steps} />}
+      {turn.steps.length > 0 && (
+        <ThinkingTrace
+          steps={turn.steps}
+          streaming={turn.status === 'streaming'}
+          startedAt={turn.startedAt}
+          latencyMs={turn.usage?.latency_ms ?? null}
+        />
+      )}
+
+      {/* 还没有任何增量文本时的等待态：像素格 + 实时秒数。一旦开始出字就交给光标，不叠两个动画。 */}
+      {turn.status === 'streaming' && turn.answer === '' && turn.steps.every((s) => s.ok !== undefined) && (
+        <GeneratingIndicator startedAt={turn.startedAt} />
+      )}
 
       {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
 
@@ -740,62 +750,6 @@ function VersionBadge({ version, current }: { version: string; current: string }
   if (version === current) return null;
 
   return <Chip size="small" variant="outlined" label={`此轮版本 ${version}`} />;
-}
-
-function StepTraceBlock({ steps }: { steps: StepTrace[] }) {
-  const [expanded, setExpanded] = useState(false);
-  // `context_budget` 是伪工具（只有 `args`，永远没有 `ok`）：它不进「完成/总数」的分母。
-  const toolSteps = steps.filter((step) => step.tool !== CONTEXT_BUDGET_TOOL);
-  const done = toolSteps.filter((step) => step.ok !== undefined).length;
-
-  return (
-    <Stack spacing={1}>
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-        <Chip size="small" variant="outlined" label={`工具轨迹 ${done}/${toolSteps.length}`} />
-
-        <Button size="small" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? '收起轨迹' : '展开轨迹'}
-        </Button>
-      </Stack>
-
-      <Collapse in={expanded}>
-        <Stack spacing={0.5}>
-          {steps.map((step, index) => (
-            <Typography
-              key={`${step.tool}-${index}`}
-              variant="body2"
-              sx={{ fontFamily: 'monospace' }}
-            >
-              {stepLine(step)}
-            </Typography>
-          ))}
-        </Stack>
-      </Collapse>
-    </Stack>
-  );
-}
-
-/** 一步轨迹的展示文本；`context_budget` 没有 `ok`，单独渲染（不再落进「…」那一支）。 */
-function stepLine(step: StepTrace): string {
-  if (step.tool === CONTEXT_BUDGET_TOOL) {
-    const dropped = droppedLabels(step.args);
-    const detail = dropped.length > 0 ? `：${dropped.join('、')}` : '';
-
-    return `${step.tool}（已丢弃 ${dropped.length} 条最旧结果${detail}）`;
-  }
-
-  const args = step.args === undefined ? '' : ` ${JSON.stringify(step.args)}`;
-
-  if (step.ok === undefined) return `${step.tool}${args} …`;
-
-  return `${step.tool}${args}${step.ok ? ` → ${step.hits ?? 0} 条` : ' → 失败'}`;
-}
-
-/** `context_budget` 的 `args.dropped`：被丢弃的工具结果标签（后端给字符串数组）。 */
-function droppedLabels(args: Record<string, unknown> | undefined): string[] {
-  const dropped = args?.dropped;
-
-  return Array.isArray(dropped) ? dropped.map(String) : [];
 }
 
 /** 一条引用：点击后打开右侧抽屉，展示整个文件并高亮这几行（不跳走，不丢上下文）。 */
