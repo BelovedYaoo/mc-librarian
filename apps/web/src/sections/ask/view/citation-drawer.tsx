@@ -35,8 +35,8 @@ const HIGHLIGHT_DEBOUNCE_MS = 80;
  * 与页面色系相差 ~116°）。正文 token `#E1E4E8` → 9.70:1、关键字 `#F97583` → 4.65:1、
  * 行号（`text.secondary` `#C4CDD5`）→ 7.68:1。
  *
- * 唯一例外是 Shiki github-dark 的注释色 `#6A737D`（2.57:1）——它在纯黑上也只到 4.36:1，换任何
- * 底色都上不了 AA，不是这一处底色能修的（`#33290D` 上也只有 2.98:1）。
+ * 注释 token 不在这里处理：Shiki 官方主题的 `#6A737D` 配任何底色都上不了 AA（在本底色上只有
+ * 2.57:1），已在 `shiki-highlighter.ts` 里按模式换成调色板值（light `#454F5B` / dark `#919EAB`）。
  */
 const HIGHLIGHT_DARK = '#1C3A30';
 
