@@ -196,7 +196,13 @@ export function ThinkingTrace({ steps, streaming, startedAt, latencyMs }: Thinki
             color: 'text.secondary',
           }}
         >
-          {streaming ? <LiveSeconds startedAt={startedAt} /> : seconds != null ? formatSeconds(seconds) : ''}
+          {streaming ? (
+            <LiveSeconds startedAt={startedAt} />
+          ) : seconds != null ? (
+            formatSeconds(seconds)
+          ) : (
+            ''
+          )}
         </Typography>
 
         <Box

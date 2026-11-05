@@ -1,4 +1,10 @@
-import type { AskEvent, AskReason, AskUsage, Citation, ConversationDetail } from 'src/lib/api-client';
+import type {
+  AskEvent,
+  AskReason,
+  AskUsage,
+  Citation,
+  ConversationDetail,
+} from 'src/lib/api-client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
@@ -188,8 +194,12 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
  */
 export function AskView() {
   const { state: versionsState } = useVersions();
-  const { conversations, loading: conversationsLoading, error: conversationsError, refresh } =
-    useConversations();
+  const {
+    conversations,
+    loading: conversationsLoading,
+    error: conversationsError,
+    refresh,
+  } = useConversations();
   const [searchParams, setSearchParams] = useSearchParams();
   const conversationId = searchParams.get(CONVERSATION_PARAM);
 
@@ -642,7 +652,13 @@ function EmptyState({ onPick }: { onPick: (question: string) => void }) {
         </Typography>
 
         <Box
-          sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, justifyContent: 'center', maxWidth: 640 }}
+          sx={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 1,
+            justifyContent: 'center',
+            maxWidth: 640,
+          }}
         >
           {EXAMPLE_QUESTIONS.map((example) => (
             <Button key={example} size="small" variant="outlined" onClick={() => onPick(example)}>
@@ -687,12 +703,10 @@ function TurnBlock({
 
       {/* 等待态只在「模型在想/在写、但没有工具在跑」时出现：
           有工具在跑时轨迹自己就有转动指示器，再叠一个像素格是两个动画抢注意力。 */}
-      {turn.status === 'streaming'
-        && turn.answer === ''
-        && !turn.steps.some((step) => step.ok === undefined)
-        && turn.citations.length === 0 && (
-          <GeneratingIndicator startedAt={turn.startedAt} />
-        )}
+      {turn.status === 'streaming' &&
+        turn.answer === '' &&
+        !turn.steps.some((step) => step.ok === undefined) &&
+        turn.citations.length === 0 && <GeneratingIndicator startedAt={turn.startedAt} />}
 
       {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
 
