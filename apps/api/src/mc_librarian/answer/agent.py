@@ -52,6 +52,11 @@ MAX_CITATIONS: Final = 20
 # 截断到剩余预算时，单个工具结果至少留这么多 token（否则模型看不到任何内容）。
 MIN_RESULT_TOKENS: Final = 200
 
+# 压缩的目标水位 = 预算 × 该比例。**不能只压到刚好低于预算**：那样压完就贴着上限，
+# 下一次工具调用（一次 `read` 就是几千 token）立刻又超，于是出现「压缩 → 调一两次 →
+# 又压缩」的抖动。留 30% 余量能把压缩间隔拉开到十几次调用一次。
+COMPACT_TARGET_RATIO: Final = 0.7
+
 
 class AskRun:
     """一次 `/v1/ask` 的循环状态与事件流。`stream()` 是唯一的入口。"""
@@ -297,10 +302,16 @@ class AskRun:
             self.citations.append(item)
 
     def _fit_budget(self, messages: list[dict[str, Any]]) -> list[str]:
-        """把工具结果的总量压进 `max_context_tokens`，返回被丢弃的标签（规格 §3）。"""
+        """把工具结果的总量压到**目标水位**，返回被丢弃的标签（规格 §3）。
+
+        目标水位是 `max_context_tokens * COMPACT_TARGET_RATIO` 而不是预算本身：
+        只压到刚好达标的话，压完整段上下文就在上限边缘，下一次工具调用立刻又超，
+        表现为「压缩 → 调一两次 → 又压缩」的抖动，且每轮都要重压一次、白耗时间。
+        """
+        target = int(self.max_context_tokens * COMPACT_TARGET_RATIO)
         dropped: list[str] = []
 
-        while _tool_tokens(messages) > self.max_context_tokens and _exchange_count(messages) > 1:
+        while _tool_tokens(messages) > target and _exchange_count(messages) > 1:
             start = _first_exchange(messages)
 
             if start is None:
@@ -314,13 +325,13 @@ class AskRun:
             dropped.extend(str(item["_label"]) for item in messages[start:end] if "_label" in item)
             del messages[start:end]
 
-        # 只剩最后一个工具结果仍超预算：按剩余预算把它截断（保留系统提示与用户问题）。
-        if _tool_tokens(messages) > self.max_context_tokens:
-            self._truncate_newest(messages)
+        # 只剩最后一个工具结果仍超水位：按剩余空间把它截断（保留系统提示与用户问题）。
+        if _tool_tokens(messages) > target:
+            self._truncate_newest(messages, target)
 
         return dropped
 
-    def _truncate_newest(self, messages: list[dict[str, Any]]) -> None:
+    def _truncate_newest(self, messages: list[dict[str, Any]], target: int) -> None:
         index = next(
             (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("_tool")), None
         )
@@ -333,7 +344,7 @@ class AskRun:
             for position, item in enumerate(messages)
             if item.get("_tool") and position != index
         )
-        budget = max(self.max_context_tokens - others, MIN_RESULT_TOKENS)
+        budget = max(target - others, MIN_RESULT_TOKENS)
         content = str(messages[index].get("content") or "")
         messages[index]["content"] = _truncate_to_tokens(content, budget)
 
@@ -394,22 +405,35 @@ def _first_exchange(messages: list[dict[str, Any]]) -> int | None:
     return next((i for i, item in enumerate(messages) if item.get("_exchange")), None)
 
 
+TRUNCATION_NOTE: Final = "\n…（超出上下文预算，已截断）"
+
+
 def _truncate_to_tokens(text: str, limit: int) -> str:
-    """把文本截到不超过 `limit` 个 token（按字符二分，口径与 `count_tokens` 一致）。"""
+    """把文本截到**含截断提示在内**不超过 `limit` 个 token（按字符二分，与 `count_tokens` 同口径）。
+
+    提示本身也占 token：先按 `limit` 截再拼提示，最终会比 `limit` 多出提示那几个 token，
+    压缩完仍然贴着水位——`_fit_budget` 的「压到目标水位」就永远差一点（实测差 15：
+    `word ` × 700 截到 700，实际得到 716）。所以先把提示的长度留出来再二分。
+    """
     if limit <= 0:
         return ""
 
     if count_tokens(text) <= limit:
         return text
 
+    budget = limit - count_tokens(TRUNCATION_NOTE)
+
+    if budget <= 0:
+        return TRUNCATION_NOTE.strip()
+
     low, high = 0, len(text)
 
     while low < high:
         middle = (low + high + 1) // 2
 
-        if count_tokens(text[:middle]) <= limit:
+        if count_tokens(text[:middle]) <= budget:
             low = middle
         else:
             high = middle - 1
 
-    return text[:low] + "\n…（超出上下文预算，已截断）"
+    return text[:low] + TRUNCATION_NOTE

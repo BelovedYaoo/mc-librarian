@@ -617,3 +617,53 @@ def test_ask_returns_404_when_version_is_unregistered(
 
     assert response.status_code == 404
     assert "未注册" in response.json()["detail"]
+
+def test_fit_budget_leaves_headroom_below_the_cap() -> None:
+    """压缩要压到**目标水位**（预算 × 比例），不是刚好卡在上限。
+
+    只压到刚好达标的话，压完整段上下文就贴着上限，下一次工具调用立刻又超——表现为
+    「压缩 → 调一两次 → 又压缩」的抖动。这条用例直接对 `_fit_budget` 断言水位。
+    """
+    from mc_librarian.answer.agent import COMPACT_TARGET_RATIO, AskRun, _tool_tokens
+
+    budget = 1000
+    run = AskRun.__new__(AskRun)  # `_fit_budget` 只用到 `max_context_tokens`
+    run.max_context_tokens = budget
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "问题"},
+    ]
+
+    # 6 轮工具调用，每轮结果约 700 token；总量远超预算，但丢掉最旧两轮就够「刚好达标」。
+    for index in range(6):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": f"c{index}", "type": "function"}],
+                # 压缩按「轮」丢：`_exchange_count` / `_first_exchange` 认的就是这个标记。
+                "_exchange": True,
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"c{index}",
+                "content": "word " * 700,  # 约 700 token（重复的 "x" 会被压到很低，用词更像真实代码）
+                "_tool": True,
+                "_label": f"search#{index}",
+            }
+        )
+
+    before = _tool_tokens(messages)
+    dropped = run._fit_budget(messages)
+    after = _tool_tokens(messages)
+    target = int(budget * COMPACT_TARGET_RATIO)
+
+    assert before > budget
+    assert dropped, "超预算时必须丢东西"
+    assert after <= target, f"压完应留余量：{after} 应 <= {target}（预算 {budget}）"
+    # 丢掉的是最旧的那些，最新的那一轮必须还在（模型要继续用它作答）。
+    assert "search#0" in dropped
+    assert "search#5" not in dropped
