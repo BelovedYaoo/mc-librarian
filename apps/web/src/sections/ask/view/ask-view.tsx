@@ -64,11 +64,24 @@ const EXAMPLE_QUESTIONS = [
   '解析掉落表 JSON 的类在哪',
 ];
 
+/**
+ * 一轮回答的**有序片段**。
+ *
+ * 模型会在工具调用之间插入正文（「我再查一下…」），随后继续调工具。只用一个 `steps[]` 加一个
+ * `answer` 会把中间那几段正文挤到所有工具之后，用户看到的是「一堆工具 → 全部正文」，
+ * 与真实过程不符。片段按到达顺序排列，渲染时原样展开。
+ */
+type Segment =
+  | { kind: 'steps'; steps: StepTrace[] }
+  | { kind: 'text'; text: string };
+
 type Turn = {
   question: string;
   /** 该轮提问用的版本；历史会话载入的轮次为 `''`（用当前选中的版本打开引用）。 */
   version: string;
-  steps: StepTrace[];
+  /** 有序片段（工具批次与正文交替）。 */
+  segments: Segment[];
+  /** 完整正文（各 `text` 片段拼起来）。落库与用量展示用它，渲染走 `segments`。 */
   answer: string;
   citations: Citation[];
   reason: AskReason | null;
@@ -87,7 +100,7 @@ function emptyTurn(question: string, version: string): Turn {
   return {
     question,
     version,
-    steps: [],
+    segments: [],
     answer: '',
     citations: [],
     reason: null,
@@ -115,7 +128,11 @@ function turnsFromDetail(detail: ConversationDetail): Turn[] {
       question: message.content,
       // 每轮记下当时用的版本（迁移 v10 之前落库的历史行为 null → 回退到当前选择）。
       version: assistant?.version ?? '',
-      steps: [],
+      // 历史里没有工具轨迹，整段答案就是一个正文片段。
+      segments:
+        assistant?.content !== undefined && assistant.content !== ''
+          ? [{ kind: 'text', text: assistant.content }]
+          : [],
       answer: assistant?.content ?? '',
       citations: assistant?.citations ?? [],
       reason: null,
@@ -137,28 +154,57 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
   switch (event.type) {
     case 'step': {
       if (event.args !== undefined) {
-        return { ...turn, steps: [...turn.steps, { tool: event.tool, args: event.args }] };
+        // 「开始」：接在本轮最后一个工具批次里；若最后一个片段是正文，说明中间插了话，
+        // 从这里**另起一批**——这正是「工具 / 正文 / 工具」分开的依据。
+        const last = turn.segments[turn.segments.length - 1];
+        const step: StepTrace = { tool: event.tool, args: event.args };
+
+        if (last?.kind === 'steps') {
+          return {
+            ...turn,
+            segments: [...turn.segments.slice(0, -1), { kind: 'steps', steps: [...last.steps, step] }],
+          };
+        }
+
+        return { ...turn, segments: [...turn.segments, { kind: 'steps', steps: [step] }] };
       }
 
-      // 返回后的事件不带 args：补在**最早**一步还没收尾的同名工具上。
+      // 「完成」：补在当前批次里**最早**一步还没收尾的同名工具上。
       //
       // 一轮里的多个调用是并发跑的，服务端先为整批发「开始」再按请求顺序发「完成」——
-      // 所以同一批里可能挂着多个同名工具（比如两个 `search`），「完成」必须按先来先配对；
+      // 同一批里可能挂着多个同名工具（比如两个 `search`），必须按先来先配对；
       // 取最后一步会把 A 的结果挂到 B 上。
-      const steps = [...turn.steps];
+      const last = turn.segments[turn.segments.length - 1];
 
-      for (let index = 0; index < steps.length; index += 1) {
-        if (steps[index].ok === undefined && steps[index].tool === event.tool) {
-          steps[index] = { ...steps[index], ok: event.ok, hits: event.hits };
-          break;
-        }
-      }
+      if (last?.kind !== 'steps') return turn;
 
-      return { ...turn, steps };
+      const steps = [...last.steps];
+      const target = steps.findIndex(
+        (step) => step.ok === undefined && step.tool === event.tool
+      );
+
+      if (target === -1) return turn;
+
+      steps[target] = { ...steps[target], ok: event.ok, hits: event.hits };
+
+      return { ...turn, segments: [...turn.segments.slice(0, -1), { kind: 'steps', steps }] };
     }
 
-    case 'delta':
-      return { ...turn, answer: turn.answer + event.text };
+    case 'delta': {
+      // 正文增量：接着上一段正文；若上一段是工具批次，就新起一段（正文插在工具之后）。
+      const last = turn.segments[turn.segments.length - 1];
+      const answer = turn.answer + event.text;
+
+      if (last?.kind === 'text') {
+        return {
+          ...turn,
+          answer,
+          segments: [...turn.segments.slice(0, -1), { kind: 'text', text: last.text + event.text }],
+        };
+      }
+
+      return { ...turn, answer, segments: [...turn.segments, { kind: 'text', text: event.text }] };
+    }
 
     case 'citation':
       return {
@@ -736,14 +782,25 @@ function TurnBlock({
             />
           )}
 
-          {/* 工具轨迹就放在原骨架屏的位置（加载行下方）。 */}
-          {turn.steps.length > 0 && (
-            <ThinkingTrace
-              steps={turn.steps}
-              streaming={streaming}
-              startedAt={turn.startedAt}
-              latencyMs={turn.usage?.latency_ms ?? null}
-            />
+          {/* 片段按到达顺序渲染：工具批次 → 正文 → 工具批次 → 正文。
+              模型在两次调工具之间说的话属于正文，不该被挤到所有工具之后。 */}
+          {turn.segments.map((segment, index) =>
+            segment.kind === 'steps' ? (
+              <ThinkingTrace
+                key={`steps-${index}`}
+                steps={segment.steps}
+                streaming={streaming}
+                startedAt={turn.startedAt}
+                latencyMs={turn.usage?.latency_ms ?? null}
+              />
+            ) : (
+              <AnswerMarkdown
+                key={`text-${index}`}
+                text={segment.text}
+                // 只有最后一段还在流式时才显示光标；中间段落已经定稿了。
+                streaming={streaming && index === turn.segments.length - 1}
+              />
+            )
           )}
 
           {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
@@ -757,8 +814,6 @@ function TurnBlock({
           {turn.reason === 'max_steps' && !turn.answer.includes('已达检索步数上限') && (
             <Alert severity="info">已达检索步数上限，以下基于已获取的信息。</Alert>
           )}
-
-          {turn.answer !== '' && <AnswerMarkdown text={turn.answer} streaming={streaming} />}
 
           {turn.citations.length > 0 && (
             <Stack spacing={1}>
