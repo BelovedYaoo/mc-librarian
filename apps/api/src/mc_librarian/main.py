@@ -25,6 +25,7 @@ from mc_librarian.indexing.layout import index_path
 from mc_librarian.indexing.summarize import warmup_segmentation
 from mc_librarian.indexing.text import warmup_token_counting
 from mc_librarian.jobs import JobRunner, store
+from mc_librarian.mcp import mount_mcp
 from mc_librarian.problems import component_schema, install_exception_handlers
 from mc_librarian.schemas import answer_schemas
 from mc_librarian.secretbox import require_secret
@@ -136,7 +137,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await runner.start()
 
     try:
-        yield
+        # MCP 的会话管理器必须在父 app 的 lifespan 里跑：只 mount 子 app 不跑它，请求会报
+        # `Task group is not initialized`（实测）。它是纯增量——没有客户端连接时只是挂着。
+        async with app.state.mcp_server.session_manager.run():
+            yield
     finally:
         await runner.stop()
 
@@ -218,6 +222,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.openapi = lambda: _build_openapi(app)  # type: ignore[method-assign]
     install_exception_handlers(app)
     app.include_router(api_router)
+
+    # MCP（`/mcp`，streamable HTTP，PAT 鉴权）：把同一套检索能力暴露给外部 agent。
+    # 必须在 `include_router` 之后 mount——`Mount` 会按顺序匹配，`/mcp` 与 `/v1/*` 不重叠。
+    app.state.mcp_server = mount_mcp(app, app.state.db, settings)
 
     return app
 

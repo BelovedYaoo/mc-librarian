@@ -18,6 +18,7 @@
 mc-librarian/
 ├─ apps/
 │  ├─ api/                 Python：FastAPI + JobRunner + 索引 CLI
+│  │  └─ mc_librarian/mcp/  MCP 端点（/mcp，streamable HTTP + PAT 鉴权）
 │  └─ web/                 React + Vite + MUI 9（源自 minimal-vite-ts）
 ├─ scripts/                setup / dev / check / smoke（本地开发与校验入口）
 ├─ packages/               （计划中）
@@ -35,7 +36,7 @@ mc-librarian/
 
 ```
         ┌───────── web（内嵌 dist，容器内只跑 HTTP）───────────┐
-:80  ───┤  静态站点 · /api/* 反代                                │
+:80  ───┤  静态站点 · /api/* 反代 · /v1/* · /mcp*                │
         └───────────────────────┬──────────────────────────────┘
                                 │
                     ┌───────────▼───────────┐

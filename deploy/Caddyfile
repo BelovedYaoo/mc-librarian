@@ -24,6 +24,14 @@
 		}
 	}
 
+	# MCP 端点（streamable HTTP）：`/mcp` 与 `/mcp/` 都要原样转发。
+	# 它也是长连接（GET 方向是 SSE 事件流），同样不能攒内容。
+	handle /mcp* {
+		reverse_proxy api:8787 {
+			flush_interval -1
+		}
+	}
+
 	# 其余走静态站点；react-router 的前端路由（/login、/browse…）回退到 index.html。
 	handle {
 		root * /srv

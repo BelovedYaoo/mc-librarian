@@ -192,16 +192,68 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"latenc
 | 方式 | 适用 | 来源 |
 |---|---|---|
 | OpenAPI 3.1 | 前端生成的 TS 客户端、Dify / n8n / LangChain | `docs/openapi.yaml` |
-| MCP | Claude Code / Cursor / pi | `apps/api` 内薄适配器 |
+| MCP（streamable HTTP） | Claude Code / Cursor / pi | `apps/api/src/mc_librarian/mcp/`，见 §9 |
 | 直接 HTTP | 脚本、curl | 同上 |
 
 前端类型由 `openapi-typescript` 从本文件生成到 `apps/web/src/types/api.d.ts`（`bun run --cwd apps/web gen:api`）。**本仓没有 CI**，契约守卫是两道脚本/测试：`scripts/check.mjs` 的契约漂移守卫（重新生成类型，目录里的文件与生成结果不一致就失败）与 `apps/api/tests/test_contract.py`（比对运行时 `app.openapi()` 与本文件），防止「文档写了、代码没做」。
 
-## 9. 变更记录
+## 9. MCP 端点（`/mcp`）
+
+把同一套检索能力以 **MCP（Model Context Protocol，streamable HTTP）** 暴露给外部 agent 客户端（pi / Claude Code / Cursor）。它**不是**第二个实现：七个工具全部转调 `mc_librarian.retrieval.service` 与 `mc_librarian.answer`，召回行为与 `/v1/search` 同源。
+
+| 项 | 值 |
+|---|---|
+| 路径 | `https://<域名>/mcp`（**不带尾斜杠**；`/mcp` 与 `/mcp/` 都直接 200，不发 307） |
+| 传输 | streamable HTTP（旧的 SSE 传输不支持） |
+| 鉴权 | `Authorization: Bearer mcl_...`（个人访问令牌，与 `/v1/*` 同一个 `pats` 表）。**只认 PAT**——session cookie 不能调 MCP |
+| 失败 | 缺/错/过期/吊销统一 `401` + `WWW-Authenticate: Bearer`，不区分「不存在」与「已吊销」 |
+
+### 9.1 工具清单
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `versions` | — | 已索引版本 + 加载器标识 + 摘要覆盖。**模型唯一能知道合法版本串的入口** |
+| `search` | `query_text`, `version`, `source?`, `path_prefix?`, `detail?`, `limit?` | 多路融合检索（摘要/符号/字面量/引用/补丁），主入口 |
+| `symbol` | `name`, `version`, `fuzzy?`, `source?` | 按名找符号，返回签名与成员 |
+| `outline` | `path`, `version` | 文件骨架（类/方法 + 行号区间） |
+| `read` | `path`, `version`, `start`, `end`, `max_tokens?` | 按行读源码（1-based 闭区间，**必须给区间**） |
+| `references` | `symbol_name`, `version`, `limit?` | 反查调用点与所在封闭方法 |
+| `ask` | `question`, `version` | 服务端跑完整检索循环，返回带行号引用的中文答案（30–70 秒） |
+
+`source` 只对加载器版本有意义：`patched`（打过补丁的 MC）/ `loader`（加载器自身）/ `patch`（补丁文件）。
+
+### 9.2 返回形状
+
+工具返回**结构化 JSON 文本**，字段名与 `/v1` 契约一致（`hits` / `why` / `suggestions` / `symbol` / `lines` / `truncated`）。命中带 `why`（哪一路召回）与 `suggestions`（下一步可搜什么）——模型据此迭代检索，比换措辞重试有效。
+
+**工具内错误回 `{"error": "..."}` 而不是抛异常**：版本写错、路径不存在这些是模型能自我纠正的；抛异常会变成 MCP 的 `isError` 且信息被包一层。只有鉴权失败才 401。
+
+### 9.3 客户端配置
+
+pi（`~/.pi/agent/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "mc-librarian": {
+      "type": "http",
+      "url": "https://mc-librarian.belovedyaoo.top/mcp",
+      "headers": { "Authorization": "Bearer mcl_..." },
+      "timeout": 300,
+      "description": "Minecraft 源码知识库：中文提问检索原版与 NeoForge 源码（含补丁）"
+    }
+  }
+}
+```
+
+`timeout` 要显式调大（默认 60 秒）：`ask` 单次 30–70 秒，用默认值会中途超时。
+
+## 10. 变更记录
 
 | 日期 | 版本 | 内容 |
 |---|---|---|
 | 2026-11-03 | 0.1.0 | 初稿：search / symbol / references / outline / read / ask |
+| 2026-11-05 | 0.2.0 | issue #26：新增 MCP 端点 `/mcp`（streamable HTTP + PAT 鉴权，7 个工具）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | 加账号体系、PAT、admin（users/jobs/settings/usage/audit）、ask 改 SSE、`latest` 移除 |
 | 2026-11-03 | 0.2.0 | issue #3：契约补 `GET/POST /v1/setup`、`Session` 相关错误响应（`Unauthorized`/`Forbidden`/`SetupCompleted`）；实现 setup 与 login/logout/me，控制面 SQLite 落地 `users`/`sessions` + `schema_version`。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-03 | 0.2.0 | issue #10：契约补 `GET/POST /v1/auth/tokens`、`DELETE /v1/auth/tokens/{tokenId}`；实现 PAT 签发/列表/吊销与 `mcl_` 前缀 Bearer 鉴权，迁移 v2 落地 `pats` 表。属 v0.2 设计内的增量补齐，`info.version` 不变 |

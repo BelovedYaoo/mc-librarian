@@ -95,7 +95,9 @@ def indexed(admin_client: TestClient, settings: Settings) -> Path:
     return prepare_version(admin_client, settings)
 
 
-def get_symbol(client: TestClient, name: str, **params: object) -> list[dict[str, Any]]:
+def get_symbol(
+    client: TestClient, name: str, **params: str | int | bool | None
+) -> list[dict[str, Any]]:
     response = client.get("/v1/symbol", params={"version": VERSION, "name": name, **params})
 
     assert response.status_code == 200, response.text
@@ -103,7 +105,7 @@ def get_symbol(client: TestClient, name: str, **params: object) -> list[dict[str
     return cast("list[dict[str, Any]]", response.json()["matches"])
 
 
-def retrieval_requests() -> list[tuple[str, dict[str, object]]]:
+def retrieval_requests() -> list[tuple[str, dict[str, str | int]]]:
     """四个端点的最小可用请求。"""
     return [
         ("/v1/symbol", {"version": VERSION, "name": "Mob"}),
@@ -824,7 +826,12 @@ def test_read_truncates_from_the_tail_when_over_budget(
         "\n".join(f"// line {index:02d} " + "x" * 60 for index in range(1, 41)) + "\n",
         encoding="utf-8",
     )
-    params = {"version": VERSION, "path": relative, "start": 1, "end": 40}
+    params: dict[str, str | int] = {
+        "version": VERSION,
+        "path": relative,
+        "start": 1,
+        "end": 40,
+    }
 
     full = admin_client.get("/v1/read", params=params).json()
     trimmed = admin_client.get("/v1/read", params={**params, "max_tokens": 100}).json()

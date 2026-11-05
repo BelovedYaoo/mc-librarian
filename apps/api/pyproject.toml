@@ -13,6 +13,9 @@ dependencies = [
   # 摘要层的 FTS5 预分词（#7 规格 §6）：`trigram` 对两字词（「刷怪」）不友好，`unicode61`
   # 又不切中文，所以入库前用 jieba 切好、查询时对 query 做同样切分。
   "jieba>=0.42",
+  # MCP 端点（/mcp，streamable HTTP）：把检索能力暴露给外部 agent。
+  # 2.x 的 API 与 1.x 不同（FastMCP 改名 MCPServer），钉下界避免装到旧版。
+  "mcp>=2.3",
   "pydantic>=2.12",
   "pydantic-settings>=2.11",
   # 读仓库根的 .env（`get_settings()` 用；显式声明，否则新环境上会静默失效）。
