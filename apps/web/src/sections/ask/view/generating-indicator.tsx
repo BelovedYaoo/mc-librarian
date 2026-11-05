@@ -123,7 +123,7 @@ export function GeneratingIndicator({
       {/* 骨架行：只有一行「正在生成回答」时，正文区是一大片空白，容易被读成卡死。
         三条宽度递减的微光条给出「内容马上就来」的形状预期；出现第一个字就整块消失。 */}
       <Stack spacing={1} sx={{ mt: 1.5 }} aria-hidden>
-        {['100%', '96%', '62%'].map((width) => (
+        {['100%', '92%', '55%'].map((width) => (
           <Box
             key={width}
             sx={{

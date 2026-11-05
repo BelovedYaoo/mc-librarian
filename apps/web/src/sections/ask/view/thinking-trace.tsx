@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { keyframes } from '@mui/material/styles';
+import { alpha, keyframes } from '@mui/material/styles';
 import Box from '@mui/material/Box';
 import Collapse from '@mui/material/Collapse';
 import Stack from '@mui/material/Stack';
@@ -61,7 +61,7 @@ function Spinner() {
         flexShrink: 0,
         borderRadius: '50%',
         border: '2px solid',
-        borderColor: 'divider',
+        borderColor: 'text.disabled',
         borderTopColor: theme.palette.primary.main,
         animation: `${spin} 0.8s linear infinite`,
         '@media (prefers-reduced-motion: reduce)': { animation: 'none' },
@@ -222,7 +222,15 @@ export function ThinkingTrace({ steps, streaming, startedAt, latencyMs }: Thinki
       </Stack>
 
       <Collapse in={open}>
-        <Stack sx={{ px: 1.5, pb: 1.25, pt: 0.25 }}>
+        {/* 每行之间一条极淡分隔线：20+ 行的日志列表没有分隔时，横向扫读会串行。 */}
+        <Stack
+          sx={{
+            px: 1.5,
+            pb: 1.25,
+            pt: 0.25,
+            '& > * + *': { borderTop: '1px solid', borderColor: 'divider' },
+          }}
+        >
           {steps.map((step, index) => (
             <TraceRow key={`${step.tool}-${index}`} step={step} />
           ))}
@@ -254,7 +262,22 @@ function TraceRow({ step }: { step: StepTrace }) {
   const arg = primaryArg(step.args);
 
   return (
-    <Stack direction="row" spacing={1} sx={{ alignItems: 'center', py: 0.25, minWidth: 0 }}>
+    <Stack
+      direction="row"
+      spacing={1}
+      sx={{
+        alignItems: 'center',
+        py: 0.625,
+        minWidth: 0,
+        // 失败行给一层淡红底：只靠右侧一个红字，在 20 多行里会漏看。
+        ...(step.ok === false && {
+          bgcolor: (theme) =>
+            alpha(theme.palette.error.main, theme.palette.mode === 'dark' ? 0.1 : 0.06),
+          mx: -1.5,
+          px: 1.5,
+        }),
+      }}
+    >
       <StepStatus step={step} />
 
       <Typography

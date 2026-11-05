@@ -714,7 +714,9 @@ function TurnBlock({
         <Alert severity="warning">模型暂不可用，以下是检索到的相关代码位置。</Alert>
       )}
 
-      {turn.reason === 'max_steps' && (
+      {/* 服务端在 `max_steps` 收尾时会把同一句提示**前缀进答案**，这里再放一条 Alert 就重复了。
+          只在答案里没有那句话时才补（降级路径的答案不带前缀）。 */}
+      {turn.reason === 'max_steps' && !turn.answer.includes('已达检索步数上限') && (
         <Alert severity="info">已达检索步数上限，以下基于已获取的信息。</Alert>
       )}
 
