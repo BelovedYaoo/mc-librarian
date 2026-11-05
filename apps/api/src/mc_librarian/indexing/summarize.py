@@ -21,6 +21,13 @@
 LLM 配置默认从环境变量读（`MC_LIBRARIAN_LLM_*`），`#11` 落地后 `settings` 表的覆盖优先
 （调用方先用 `settings_store.effective_settings()` 叠好再传进来），未配置时明确报错
 （见 `config.resolve_llm_config`），不静默跳过——静默跳过会让索引看起来「有摘要」但实际为空。
+
+issue #24：摘要按来源分型（规格 §4）——`patched`（`net.minecraft.**`）沿用 MC 游戏机制
+导向的规则；`loader`（`net.neoforged.**`）用加载器语境（事件、注入、转换、注册、生命周期）；
+`patch` 按 **patch 文件**生成（不是一个 hunk 一条），面向「谁把刷怪逻辑改了」这类问题。
+三套 prompt 共用同一个 3 行格式与闸门（`validate_summary`）。补丁摘要存进 `summaries`
+（`source = 'patch'`、`class_id` 为 NULL、`fqn` 是补丁路径），并注入 `patches_fts`
+（`refresh_patch_fts`）——否则中文提问命中不了补丁 hunk（hunk 正文是英文 / 代码）。
 """
 
 from __future__ import annotations
@@ -32,10 +39,10 @@ import logging
 import re
 import sqlite3
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Any, Final, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -43,8 +50,9 @@ import jieba
 
 from mc_librarian.config import LlmConfig
 from mc_librarian.db import utc_now
+from mc_librarian.indexing import patches
 from mc_librarian.indexing.text import count_tokens
-from mc_librarian.schemas import LogLevel
+from mc_librarian.schemas import LogLevel, SourceKind
 
 logger = logging.getLogger("mc_librarian.indexing.summarize")
 
@@ -101,6 +109,42 @@ SUMMARY_FORMAT_RULES: Final[tuple[str, ...]] = (
     '关键成员：spawnInterval, getMaxInstancesPerChunk"}',
 )
 
+# 加载器自身（`net.neoforged.**`）的规则（issue #24 规格 §4）：框架代码不是游戏机制，
+# 直接用 MC 那套会写出「这个类定义了 XXX 方法」这种废话。要求写清「在加载流程里承担什么
+# 职责、扩展点在哪、怎么被调用」，机制词换成加载器语境。
+LOADER_FORMAT_RULES: Final[tuple[str, ...]] = (
+    "每一行都必须带固定前缀：",
+    "第 1 行「职责：」+ 这个类在加载器框架里承担什么职责（不是复述代码）；",
+    "第 2 行「机制：」+ 它怎么被调用、扩展点在哪（带加载器语境词，如事件、注入、转换、"
+    "注册、生命周期）；",
+    "第 3 行「关键成员：」+ 该类真实的英文字段名 / 方法名，逗号分隔。"
+    "第 3 行只许英文标识符，不许写中文描述。",
+    "格式样板（类名与内容只是占位，不要照抄）：",
+    '{"com.example.EventBus": "职责：在模组加载期间分发注册事件并驱动订阅者回调\\n'
+    "机制：按注册顺序遍历监听器，受生命周期阶段与优先级约束\\n"
+    '关键成员：register, post, listeners"}',
+)
+
+# 补丁（按 patch 文件生成）的规则（issue #24 规格 §4）：面向「谁把刷怪逻辑改了」这类问题。
+PATCH_FORMAT_RULES: Final[tuple[str, ...]] = (
+    "每一行都必须带固定前缀：",
+    "第 1 行「职责：」+ 这个补丁改了哪个类的什么行为（不是复述 diff）；",
+    "第 2 行「机制：」+ 为什么改 / 怎么改（带游戏或加载器语境词，如刷怪、掉落、刻、区块、"
+    "事件、注入、注册）；",
+    "第 3 行「关键成员：」+ 被改动的真实英文类名 / 方法名 / 字段名，逗号分隔。"
+    "第 3 行只许英文标识符，不许写中文描述。",
+    "格式样板（类名与内容只是占位，不要照抄）：",
+    '{"net/minecraft/world/Mob.java.patch": "职责：改掉 Mob 的刷怪与掉落钩子\\n'
+    "机制：在 tick 里插入自定义 AI，受 mob cap 与区块加载状态约束\\n"
+    '关键成员：Mob, customServerAiStep, checkDespawn"}',
+)
+
+# 按来源选规则（issue #24 规格 §4）；一批内 source 一致（`group_by_package` 按 source 分组）。
+FORMAT_RULES_BY_SOURCE: Final[dict[str, tuple[str, ...]]] = {
+    "patched": SUMMARY_FORMAT_RULES,
+    "loader": LOADER_FORMAT_RULES,
+}
+
 # `summaries` 是普通表（幂等要读 `content_hash`），`summaries_fts` 是独立的 FTS5 表，
 # 存 jieba 预分词后的 `text_zh`（规格 §6）。查询走 `summaries_fts`，展示回 `summaries`。
 SUMMARIES_DDL: Final[tuple[str, ...]] = (
@@ -112,7 +156,8 @@ SUMMARIES_DDL: Final[tuple[str, ...]] = (
       text_zh      TEXT NOT NULL,
       content_hash TEXT NOT NULL,
       tokens       INTEGER NOT NULL DEFAULT 0,
-      created_at   TEXT NOT NULL
+      created_at   TEXT NOT NULL,
+      source       TEXT NOT NULL DEFAULT 'patched'
     )
     """,
     "CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts"
@@ -129,7 +174,7 @@ class ClassDigest:
     """一个类送进 LLM 的最小信息 + 幂等用的内容指纹（规格 §3/§4）。
 
     `field_signatures`/`method_signatures` 参与 `content_hash`；`field_names` 是送进 prompt 的
-    「字段名」（规格 §3 只说字段名，不算类型）。
+    「字段名」（规格 §3 只说字段名，不算类型）。`source` 决定用哪套 prompt（issue #24 规格 §4）。
     """
 
     class_id: int
@@ -141,38 +186,68 @@ class ClassDigest:
     field_signatures: tuple[str, ...]
     method_signatures: tuple[str, ...]
     content_hash: str
+    source: SourceKind = "patched"
 
 
 @dataclass(frozen=True)
 class SummaryRow:
-    """一条待入库的摘要。"""
+    """一条待入库的摘要。`class_id` 为 `None` 时是补丁摘要（`fqn` 是补丁路径）。"""
 
-    class_id: int
+    class_id: int | None
     fqn: str
     text_zh: str
+    content_hash: str
+    source: SourceKind = "patched"
+
+
+@dataclass(frozen=True)
+class PatchDigest:
+    """一个补丁文件送进 LLM 的最小信息 + 幂等用的内容指纹（issue #24 规格 §3/§4）。
+
+    摘要**按 patch 文件**生成（不是一个 hunk 一条）：`context` 是该文件全部 hunk 正文的拼接
+    （送 prompt 时再截断），`content_hash` 覆盖路径 + target + 全部 hunk 正文。
+    """
+
+    path: str
+    target: str
+    hunk_count: int
+    context: str
     content_hash: str
 
 
 @dataclass(frozen=True)
 class StoredSummary:
-    """已入库摘要的一行；重建索引时按 fqn 搬运（`class_id` 在新索引里重映射）。"""
+    """已入库摘要的一行；重建索引时按 fqn 搬运（`class_id` 在新索引里重映射）。
+
+    `source` 区分类摘要（`patched`/`loader`）与补丁摘要（`patch`）：后者 `class_id` 为 NULL，
+    搬运时不需要重映射。
+    """
 
     fqn: str
     text_zh: str
     content_hash: str
     tokens: int
     created_at: str
+    source: SourceKind = "patched"
 
 
 @dataclass(frozen=True)
 class SummaryStats:
-    """一次摘要生成的汇总；`generated + reused + failed == classes`。"""
+    """一次摘要生成的汇总；`generated + reused + failed == classes`。
+
+    `patches*` 是补丁文件摘要的同类计数（issue #24）：`patches_generated + patches_reused +
+    patches_failed == patches`。
+    """
 
     classes: int
     generated: int
     reused: int
     failed: int
     failures: tuple[str, ...] = ()
+    patches: int = 0
+    patches_generated: int = 0
+    patches_reused: int = 0
+    patches_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -186,11 +261,13 @@ class SummaryCoverage:
 class SummaryClient(Protocol):
     """摘要层的 LLM 客户端接口；测试注入假实现（返回原始响应文本）。
 
-    只负责「一批类 → 原始响应文本」；解析、失败归类、入库都在本模块，解析失败因此能按
-    单类失败处理（规格 §3）。
+    只负责「一批类 / 一批补丁 → 原始响应文本」；解析、失败归类、入库都在本模块，解析失败因此
+    能按单类失败处理（规格 §3）。两批共用同一个底层 HTTP 客户端，只是 prompt 不同。
     """
 
     async def summarize_batch(self, digests: Sequence[ClassDigest]) -> str: ...
+
+    async def summarize_patches(self, patches: Sequence[PatchDigest]) -> str: ...
 
 
 # ----------------------------------------------------------------------
@@ -267,14 +344,19 @@ def warmup_segmentation() -> str:
 
 
 def read_class_digests(db_path: Path) -> list[ClassDigest]:
-    """读出索引库里全部类的「内容指纹」，按 FQN 排序（顺序确定，便于分批与断言）。"""
+    """读出索引库里全部类的「内容指纹」，按 FQN 排序（顺序确定，便于分批与断言）。
+
+    `classes.source` 是 issue #24 新增的列：老索引（v11 前）没有它，按 `patched` 处理，
+    这样在旧库上单独跑 `summarize` 也不会报 SQL 错。
+    """
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
 
     try:
+        source_expr = _source_expr(connection, "c", "classes")
         rows = connection.execute(
             "SELECT c.id AS id, c.fqn AS fqn, c.kind AS kind, c.superclass AS superclass,"
-            " c.interfaces AS interfaces, f.pkg AS pkg"
+            f" c.interfaces AS interfaces, {source_expr} AS source, f.pkg AS pkg"
             " FROM classes c JOIN files f ON f.id = c.file_id ORDER BY c.fqn"
         ).fetchall()
         fields = _member_rows(connection, "fields")
@@ -305,10 +387,68 @@ def read_class_digests(db_path: Path) -> list[ClassDigest]:
                 content_hash=compute_content_hash(
                     fqn, superclass, interfaces, field_signatures, method_signatures
                 ),
+                source=_source_of(row["source"]),
             )
         )
 
     return digests
+
+
+def read_patch_digests(db_path: Path) -> list[PatchDigest]:
+    """读出索引库里全部补丁文件的摘要指纹，按补丁路径排序（issue #24 规格 §3）。
+
+    没有 `patches` 表（原版索引）时返回空。一个补丁文件的全部 hunk 合并成一条 digest：
+    摘要按**文件**生成，不是一个 hunk 一条。
+    """
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+
+    try:
+        if not _has_table(connection, "patches"):
+            return []
+
+        rows = connection.execute(
+            "SELECT path, target, context FROM patches ORDER BY path, hunk_index"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        connection.close()
+
+    grouped: dict[str, list[str]] = {}
+    targets: dict[str, str] = {}
+
+    for row in rows:
+        path = str(row["path"])
+        targets.setdefault(path, str(row["target"]))
+        grouped.setdefault(path, []).append(str(row["context"]))
+
+    return [
+        PatchDigest(
+            path=path,
+            target=targets[path],
+            hunk_count=len(contexts),
+            context="\n".join(contexts),
+            content_hash=patches.patch_content_hash(path, targets[path], contexts),
+        )
+        for path, contexts in sorted(grouped.items())
+    ]
+
+
+def _source_expr(connection: sqlite3.Connection, alias: str, table: str) -> str:
+    """`source` 列的 SQL 表达式；列不存在（老索引）时退回字面量 `'patched'`。"""
+    return f"{alias}.source" if _has_column(connection, table, "source") else "'patched'"
+
+
+def _source_of(raw: object) -> SourceKind:
+    return "loader" if raw == "loader" else "patched"
+
+
+def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    # `PRAGMA table_info` 的第 2 列是列名；连接可能没开 `row_factory = Row`，按下标取。
+    return any(
+        str(row[1]) == column for row in connection.execute(f"PRAGMA table_info({table})")
+    )
 
 
 def _member_rows(
@@ -391,7 +531,11 @@ def load_content_hashes(db_path: Path) -> dict[str, str]:
 
 
 def read_summary_coverage(db_path: Path) -> SummaryCoverage | None:
-    """索引库的摘要覆盖率；不是合法索引（打不开 / 缺 `classes` 表）时返回 `None`。"""
+    """索引库的**类摘要**覆盖率；不是合法索引（打不开 / 缺 `classes` 表）时返回 `None`。
+
+    分母是 `classes`，分子只数类摘要：`summaries` 里 `source = 'patch'` 的行是补丁文件摘要
+    （issue #24），算进去会让覆盖率超过 100%。
+    """
     try:
         connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     except sqlite3.Error:
@@ -402,13 +546,28 @@ def read_summary_coverage(db_path: Path) -> SummaryCoverage | None:
             return None
 
         classes = _count(connection, "classes")
-        summaries = _count(connection, "summaries")
+        summaries = _count_class_summaries(connection)
     except sqlite3.DatabaseError:
         return None
     finally:
         connection.close()
 
     return SummaryCoverage(summaries=summaries, classes=classes)
+
+
+def _count_class_summaries(connection: sqlite3.Connection) -> int:
+    """类摘要行数（`source <> 'patch'`）；没有 `source` 列（老索引）时全部算类摘要。"""
+    if not _has_table(connection, "summaries"):
+        return 0
+
+    if not _has_column(connection, "summaries", "source"):
+        return _count(connection, "summaries")
+
+    row = connection.execute(
+        "SELECT COUNT(*) AS total FROM summaries WHERE source <> 'patch'"
+    ).fetchone()
+
+    return int(row[0]) if row is not None else 0
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:
@@ -437,16 +596,20 @@ def _count(connection: sqlite3.Connection, table: str) -> int:
 def group_by_package(
     digests: Sequence[ClassDigest], batch_size: int
 ) -> list[list[ClassDigest]]:
-    """按 package 分批：同一 package 的类切成每批至多 `batch_size` 个，不跨 package 混批。"""
-    grouped: dict[str, list[ClassDigest]] = {}
+    """按 (source, package) 分批：同一来源同一 package 的类切成每批至多 `batch_size` 个。
+
+    带上 `source` 是为了让一批内 prompt 一致（`build_prompt` 按 `digests[0].source` 选规则）：
+    同一 package 可能同时出现在 patched 与 loader 两棵树里（如 `net.minecraft` 下的桥接类）。
+    """
+    grouped: dict[tuple[str, str], list[ClassDigest]] = {}
 
     for digest in digests:
-        grouped.setdefault(digest.package or "", []).append(digest)
+        grouped.setdefault((digest.source, digest.package or ""), []).append(digest)
 
     batches: list[list[ClassDigest]] = []
 
-    for package in sorted(grouped):
-        items = grouped[package]
+    for key in sorted(grouped):
+        items = grouped[key]
 
         for start in range(0, len(items), batch_size):
             batches.append(items[start : start + batch_size])
@@ -455,14 +618,17 @@ def group_by_package(
 
 
 def build_prompt(digests: Sequence[ClassDigest]) -> str:
-    """一批类的提示词：格式要求 + 样板（`SUMMARY_FORMAT_RULES`），然后是每个类。
+    """一批类的提示词：格式要求 + 样板，然后是每个类（issue #24 规格 §4 按来源分型）。
 
     每个类以 `### <fqn>` 起头，便于模型对号入座。格式要求放用户消息而不是 `SYSTEM_PROMPT`
-    的理由见 `SUMMARY_FORMAT_RULES` 的注释。
+    的理由见 `SUMMARY_FORMAT_RULES` 的注释。规则按 `digests[0].source` 选（调用方保证一批
+    内 source 一致，见 `group_by_package`）；空批按 `patched` 处理。
     """
+    source = digests[0].source if digests else "patched"
+    rules = FORMAT_RULES_BY_SOURCE.get(source, SUMMARY_FORMAT_RULES)
     blocks = [
         f"为下面 {len(digests)} 个类各写一条三行中文摘要，按 JSON 对象返回，键是类的全限定名。",
-        *SUMMARY_FORMAT_RULES,
+        *rules,
         "",
     ]
 
@@ -472,6 +638,39 @@ def build_prompt(digests: Sequence[ClassDigest]) -> str:
         blocks.append(f"接口：{', '.join(digest.interfaces) or '无'}")
         blocks.append(f"字段：{', '.join(digest.field_names) or '无'}")
         blocks.append(f"public 方法：{'; '.join(digest.method_signatures) or '无'}")
+
+    return "\n".join(blocks)
+
+
+# 一个补丁在 prompt 里的 diff 正文上限（字符）：大补丁全量入 prompt 会白白烧 token。
+PATCH_PROMPT_MAX_CHARS: Final = 4000
+
+
+def group_patches(
+    digests: Sequence[PatchDigest], batch_size: int
+) -> list[list[PatchDigest]]:
+    """按补丁路径分批：排序后切成每批至多 `batch_size` 个（顺序确定，便于断言）。"""
+    ordered = sorted(digests, key=lambda digest: digest.path)
+
+    return [
+        ordered[start : start + batch_size] for start in range(0, len(ordered), batch_size)
+    ]
+
+
+def build_patch_prompt(digests: Sequence[PatchDigest]) -> str:
+    """一批补丁的提示词（issue #24 规格 §4）：格式要求 + 每个补丁的 target 与 diff 摘要。"""
+    blocks = [
+        f"为下面 {len(digests)} 个补丁各写一条三行中文摘要，按 JSON 对象返回，键是补丁文件路径。",
+        *PATCH_FORMAT_RULES,
+        "",
+    ]
+
+    for digest in digests:
+        blocks.append(f"### {digest.path}")
+        blocks.append(f"被改的源文件：{digest.target}")
+        blocks.append(f"改动块数：{digest.hunk_count}")
+        blocks.append("diff 正文：")
+        blocks.append(digest.context[:PATCH_PROMPT_MAX_CHARS])
 
     return "\n".join(blocks)
 
@@ -586,15 +785,10 @@ def parse_batch_response(
     （规格 §1/§3）——不合格的摘要不进库，走调用方既有的失败/重试路径。
     响应里的围栏与前后散文由 `extract_json_object` 剥掉：那是真实模型的常态，不是异常。
     """
-    try:
-        loaded = json.loads(extract_json_object(raw))
-    except json.JSONDecodeError as error:
-        reason = f"响应不是合法 JSON：{error}"
-        return {}, {digest.fqn: reason for digest in digests}
+    loaded, batch_reason = _load_response_object(raw)
 
-    if not isinstance(loaded, dict):
-        reason = "响应不是 JSON 对象"
-        return {}, {digest.fqn: reason for digest in digests}
+    if loaded is None:
+        return {}, {digest.fqn: batch_reason or "响应无法解析" for digest in digests}
 
     summaries: dict[str, str] = {}
     failures: dict[str, str] = {}
@@ -622,6 +816,54 @@ def parse_batch_response(
     return summaries, failures
 
 
+def parse_patch_response(
+    raw: str, digests: Sequence[PatchDigest]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """解析一批补丁的响应 → (补丁路径 → 摘要, 补丁路径 → 失败原因)。
+
+    与 `parse_batch_response` 同一口径：整体不是 JSON 时整批失败，单条不合格只有那条失败。
+    闸门仍是 `validate_summary`（规格 §4 三套 prompt 共用），`fqn` 传补丁路径。
+    """
+    loaded, batch_reason = _load_response_object(raw)
+
+    if loaded is None:
+        return {}, {digest.path: batch_reason or "响应无法解析" for digest in digests}
+
+    summaries: dict[str, str] = {}
+    failures: dict[str, str] = {}
+
+    for digest in digests:
+        value = loaded.get(digest.path)
+
+        if not isinstance(value, str) or not value.strip():
+            failures[digest.path] = "响应缺少该补丁的摘要"
+            continue
+
+        normalized = normalize_summary(value)
+        problem = validate_summary(normalized, fqn=digest.path, has_members=True)
+
+        if problem is not None:
+            failures[digest.path] = f"摘要格式不合格：{problem}"
+            continue
+
+        summaries[digest.path] = normalized
+
+    return summaries, failures
+
+
+def _load_response_object(raw: str) -> tuple[dict[str, object] | None, str | None]:
+    """把响应解析成 JSON 对象；失败时返回 `(None, 失败原因)`。"""
+    try:
+        loaded = json.loads(extract_json_object(raw))
+    except json.JSONDecodeError as error:
+        return None, f"响应不是合法 JSON：{error}"
+
+    if not isinstance(loaded, dict):
+        return None, "响应不是 JSON 对象"
+
+    return loaded, None
+
+
 # ----------------------------------------------------------------------
 # LLM 客户端（OpenAI 兼容端点）
 # ----------------------------------------------------------------------
@@ -639,12 +881,18 @@ class OpenAiCompatClient:
         self._timeout = timeout
 
     async def summarize_batch(self, digests: Sequence[ClassDigest]) -> str:
+        return await self._post(build_prompt(digests))
+
+    async def summarize_patches(self, patches: Sequence[PatchDigest]) -> str:
+        return await self._post(build_patch_prompt(patches))
+
+    async def _post(self, prompt: str) -> str:
         payload = {
             "model": self._config.model,
             "temperature": self._config.temperature,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_prompt(digests)},
+                {"role": "user", "content": prompt},
             ],
         }
 
@@ -750,9 +998,61 @@ async def summarize_index(
 ) -> SummaryStats:
     """为索引库生成缺失的摘要并入库，返回汇总统计。
 
-    `client_factory` 只在**确有类需要生成时**才调用：全部命中哈希（重跑同一个版本）时
-    不碰 LLM，也就不需要 LLM 配置（幂等、不重复计费）。
+    先按类（patched/loader 分型 prompt），再按补丁文件（patch prompt）；`client_factory` 只在
+    某一类**确有内容需要生成时**才调用：全部命中哈希（重跑同一个版本）时不碰 LLM，也就不
+    需要 LLM 配置（幂等、不重复计费）。
+
+    补丁摘要写完后总重注一遍 `patches_fts`（`refresh_patch_fts`）：`parse` 重建库时 FTS 里
+    只有 diff 正文（英文/代码），中文提问要命中补丁 hunk 必须把中文摘要也索引进去。
     """
+    class_stats = await _summarize_classes(
+        db_path,
+        client_factory=client_factory,
+        batch_size=batch_size,
+        concurrency=concurrency,
+        log=log,
+    )
+    patch_stats = await _summarize_patches(
+        db_path,
+        client_factory=client_factory,
+        batch_size=batch_size,
+        concurrency=concurrency,
+        log=log,
+    )
+
+    return SummaryStats(
+        classes=class_stats.classes,
+        generated=class_stats.generated,
+        reused=class_stats.reused,
+        failed=class_stats.failed,
+        failures=class_stats.failures
+        + tuple(f"{path}：{reason}" for path, reason in sorted(patch_stats.failures.items())),
+        patches=patch_stats.patches,
+        patches_generated=patch_stats.generated,
+        patches_reused=patch_stats.reused,
+        patches_failed=len(patch_stats.failures),
+    )
+
+
+@dataclass(frozen=True)
+class _PatchStats:
+    """补丁文件摘要的计数（`failures` 是补丁路径 → 原因）。"""
+
+    patches: int
+    generated: int
+    reused: int
+    failures: dict[str, str]
+
+
+async def _summarize_classes(
+    db_path: Path,
+    *,
+    client_factory: Callable[[], SummaryClient],
+    batch_size: int,
+    concurrency: int,
+    log: Callable[[LogLevel, str], None],
+) -> SummaryStats:
+    """类摘要（patched/loader 按 source 选 prompt）：内容哈希未变的类不重新生成（幂等）。"""
     digests = read_class_digests(db_path)
     existing = load_content_hashes(db_path)
     pending = [digest for digest in digests if existing.get(digest.fqn) != digest.content_hash]
@@ -765,7 +1065,13 @@ async def summarize_index(
     batches = group_by_package(pending, batch_size)
     log("info", f"摘要：{len(pending)} 个类待生成，分 {len(batches)} 批，并发 {concurrency}")
 
-    results = await _run_batches(client, batches, concurrency)
+    results = await _run_batches(
+        batches,
+        concurrency,
+        send=client.summarize_batch,
+        parse=parse_batch_response,
+        key=lambda digest: digest.fqn,
+    )
     summaries: dict[str, str] = {}
     failures: dict[str, str] = {}
 
@@ -779,6 +1085,7 @@ async def summarize_index(
             fqn=digest.fqn,
             text_zh=summaries[digest.fqn],
             content_hash=digest.content_hash,
+            source=digest.source,
         )
         for digest in pending
         if digest.fqn in summaries
@@ -796,23 +1103,88 @@ async def summarize_index(
     )
 
 
+async def _summarize_patches(
+    db_path: Path,
+    *,
+    client_factory: Callable[[], SummaryClient],
+    batch_size: int,
+    concurrency: int,
+    log: Callable[[LogLevel, str], None],
+) -> _PatchStats:
+    """补丁文件摘要（按 patch 文件，不是一个 hunk 一条）+ 总重注 `patches_fts`。"""
+    digests = read_patch_digests(db_path)
+    existing = load_content_hashes(db_path)
+    pending = [digest for digest in digests if existing.get(digest.path) != digest.content_hash]
+    reused = len(digests) - len(pending)
+    summaries: dict[str, str] = {}
+    failures: dict[str, str] = {}
+
+    if pending:
+        client = client_factory()
+        batches = group_patches(pending, batch_size)
+        log("info", f"摘要：{len(pending)} 个补丁待生成，分 {len(batches)} 批，并发 {concurrency}")
+
+        results = await _run_batches(
+            batches,
+            concurrency,
+            send=client.summarize_patches,
+            parse=parse_patch_response,
+            key=lambda digest: digest.path,
+        )
+
+        for summaries_part, failures_part in results:
+            summaries.update(summaries_part)
+            failures.update(failures_part)
+
+        rows = [
+            SummaryRow(
+                class_id=None,
+                fqn=digest.path,
+                text_zh=summaries[digest.path],
+                content_hash=digest.content_hash,
+                source="patch",
+            )
+            for digest in pending
+            if digest.path in summaries
+        ]
+
+        if rows:
+            write_summaries(db_path, rows)
+
+    refresh_patch_fts(db_path)
+
+    return _PatchStats(
+        patches=len(digests),
+        generated=len(summaries),
+        reused=reused,
+        failures=failures,
+    )
+
+
 async def _run_batches(
-    client: SummaryClient, batches: Sequence[Sequence[ClassDigest]], concurrency: int
+    batches: Sequence[Sequence[object]],
+    concurrency: int,
+    *,
+    send: Callable[[Sequence[Any]], Awaitable[str]],
+    parse: Callable[[str, Sequence[Any]], tuple[dict[str, str], dict[str, str]]],
+    key: Callable[[Any], str],
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
-    """并发跑各批（信号量限制并发数），返回每批的 (摘要, 失败)。"""
+    """并发跑各批（信号量限制并发数），返回每批的 (摘要, 失败)。
+
+    `send`/`parse`/`key` 把「类摘要」与「补丁摘要」两条流程的差异挡在外面，批调度、单批失败
+    隔离与并发控制共用同一份（单批失败不能拖垮其余批次，规格 §5）。
+    """
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def run_one(
-        batch: Sequence[ClassDigest],
-    ) -> tuple[dict[str, str], dict[str, str]]:
+    async def run_one(batch: Sequence[object]) -> tuple[dict[str, str], dict[str, str]]:
         async with semaphore:
             try:
-                raw = await client.summarize_batch(batch)
+                raw = await send(batch)
             except Exception as error:  # 单批失败不能拖垮其余批次（规格 §5）
                 reason = f"LLM 调用失败：{error}"
-                return {}, {digest.fqn: reason for digest in batch}
+                return {}, {key(item): reason for item in batch}
 
-            return parse_batch_response(raw, batch)
+            return parse(raw, batch)
 
     return list(await asyncio.gather(*(run_one(batch) for batch in batches)))
 
@@ -830,6 +1202,8 @@ def write_summaries(db_path: Path, rows: Sequence[SummaryRow]) -> None:
         for statement in SUMMARIES_DDL:
             connection.execute(statement)
 
+        _ensure_summaries_source(connection)
+
         if _summaries_fts_is_misaligned(connection):
             rebuilt = rebuild_summaries_fts(connection)
             logger.warning(
@@ -845,11 +1219,74 @@ def write_summaries(db_path: Path, rows: Sequence[SummaryRow]) -> None:
                 content_hash=row.content_hash,
                 tokens=count_tokens(row.text_zh),
                 created_at=utc_now(),
+                source=row.source,
             )
 
         connection.commit()
     finally:
         connection.close()
+
+
+def _ensure_summaries_source(connection: sqlite3.Connection) -> None:
+    """给老索引（v11 前的 `summaries`）补上 `source` 列；列已在时是 no-op。
+
+    新库由 `SUMMARIES_DDL` 带 `source`；但 `summarize` 也可能跑在别人造的旧库上，
+    没有这一列时 `_insert_summary` 会直接报错，所以在写之前补上（默认 `patched`）。
+    """
+    if _has_table(connection, "summaries") and not _has_column(connection, "summaries", "source"):
+        connection.execute(
+            "ALTER TABLE summaries ADD COLUMN source TEXT NOT NULL DEFAULT 'patched'"
+        )
+
+
+def refresh_patch_fts(db_path: Path) -> int:
+    """把按文件生成的补丁摘要注入 `patches_fts`，返回刷新的 hunk 行数（issue #24 规格 §4）。
+
+    补丁 hunk 正文是英文 / 代码，中文提问命中不了它；把补丁文件的中文摘要拼在 hunk 正文前
+    一并索引，同一个补丁的每个 hunk 都能被中文召回，命中后仍能给出具体位置（`target` 与
+    新行号区间）。没有 `patches`/`patches_fts` 表（原版索引）时是 no-op。
+    """
+    connection = sqlite3.connect(db_path)
+
+    try:
+        if not _has_table(connection, "patches") or not _has_table(connection, "patches_fts"):
+            return 0
+
+        summaries = (
+            {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    "SELECT fqn, text_zh FROM summaries WHERE source = 'patch'"
+                )
+            }
+            if _has_table(connection, "summaries")
+            and _has_column(connection, "summaries", "source")
+            else {}
+        )
+        rows = connection.execute("SELECT id, path, target, context FROM patches").fetchall()
+        connection.execute("DELETE FROM patches_fts")
+        connection.executemany(
+            "INSERT INTO patches_fts (rowid, path, target, context) VALUES (?, ?, ?, ?)",
+            [
+                (
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    segment(_patch_fts_context(summaries.get(str(row[1])), str(row[3]))),
+                )
+                for row in rows
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return len(rows)
+
+
+def _patch_fts_context(summary: str | None, context: str) -> str:
+    """`patches_fts.context` 的正文：补丁文件的中文摘要（有则加）+ hunk 正文。"""
+    return context if not summary else f"{summary}\n{context}"
 
 
 def _summaries_fts_is_misaligned(connection: sqlite3.Connection) -> bool:
@@ -904,6 +1341,8 @@ def export_summaries(db_path: Path) -> list[StoredSummary]:
         if not _has_table(connection, "summaries"):
             return []
 
+        source_expr = _source_expr(connection, "s", "summaries")
+
         return [
             StoredSummary(
                 fqn=str(row[0]),
@@ -911,9 +1350,11 @@ def export_summaries(db_path: Path) -> list[StoredSummary]:
                 content_hash=str(row[2]),
                 tokens=int(row[3]),
                 created_at=str(row[4]),
+                source=_source_of(row[5]),
             )
             for row in connection.execute(
-                "SELECT fqn, text_zh, content_hash, tokens, created_at FROM summaries"
+                "SELECT fqn, text_zh, content_hash, tokens, created_at,"
+                f" {source_expr} AS source FROM summaries s"
             )
         ]
     except sqlite3.DatabaseError:
@@ -925,7 +1366,8 @@ def export_summaries(db_path: Path) -> list[StoredSummary]:
 def restore_summaries(db_path: Path, records: Sequence[StoredSummary]) -> int:
     """把搬过来的摘要写进（刚重建的）索引，返回实际写回的行数。
 
-    `class_id` 按 fqn 在新索引里重映射；类已不存在的摘要直接丢弃（不留下指向错误类的行）。
+    类摘要的 `class_id` 按 fqn 在新索引里重映射，类已不存在的直接丢弃（不留下指向错误类的行）；
+    补丁摘要（`source = 'patch'`）`class_id` 为 NULL，按原样搬回。
     """
     if not records:
         return 0
@@ -936,6 +1378,8 @@ def restore_summaries(db_path: Path, records: Sequence[StoredSummary]) -> int:
         for statement in SUMMARIES_DDL:
             connection.execute(statement)
 
+        _ensure_summaries_source(connection)
+
         class_ids = {
             str(row[0]): int(row[1])
             for row in connection.execute("SELECT fqn, id FROM classes")
@@ -943,10 +1387,13 @@ def restore_summaries(db_path: Path, records: Sequence[StoredSummary]) -> int:
         restored = 0
 
         for record in records:
-            class_id = class_ids.get(record.fqn)
+            class_id: int | None = None
 
-            if class_id is None:
-                continue
+            if record.source != "patch":
+                class_id = class_ids.get(record.fqn)
+
+                if class_id is None:
+                    continue
 
             _insert_summary(
                 connection,
@@ -956,6 +1403,7 @@ def restore_summaries(db_path: Path, records: Sequence[StoredSummary]) -> int:
                 content_hash=record.content_hash,
                 tokens=record.tokens,
                 created_at=record.created_at,
+                source=record.source,
             )
             restored += 1
 
@@ -969,12 +1417,13 @@ def restore_summaries(db_path: Path, records: Sequence[StoredSummary]) -> int:
 def _insert_summary(
     connection: sqlite3.Connection,
     *,
-    class_id: int,
+    class_id: int | None,
     fqn: str,
     text_zh: str,
     content_hash: str,
     tokens: int,
     created_at: str,
+    source: SourceKind = "patched",
 ) -> None:
     """写入一行摘要并同步 FTS 表（`summaries.fqn` 是 UNIQUE，重写即覆盖）。
 
@@ -984,14 +1433,14 @@ def _insert_summary(
     """
     row = connection.execute(
         "INSERT INTO summaries"
-        " (class_id, fqn, text_zh, content_hash, tokens, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)"
+        " (class_id, fqn, text_zh, content_hash, tokens, created_at, source)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(fqn) DO UPDATE SET"
         " class_id = excluded.class_id, text_zh = excluded.text_zh,"
         " content_hash = excluded.content_hash, tokens = excluded.tokens,"
-        " created_at = excluded.created_at"
+        " created_at = excluded.created_at, source = excluded.source"
         " RETURNING id",
-        (class_id, fqn, text_zh, content_hash, tokens, created_at),
+        (class_id, fqn, text_zh, content_hash, tokens, created_at, source),
     ).fetchone()
 
     if row is None:  # `RETURNING` 必定回一行；真没有说明库状态不对，别静默写坏 FTS

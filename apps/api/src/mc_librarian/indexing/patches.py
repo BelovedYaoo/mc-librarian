@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -147,9 +147,9 @@ def patch_target(text: str) -> str | None:
     return raw or None
 
 
-def patch_content_hash(path: str, target: str, hunks: list[PatchHunk]) -> str:
+def patch_content_hash(path: str, target: str, contexts: Sequence[str]) -> str:
     """一个 patch 文件的内容指纹（`summaries.content_hash` 口径）：路径 + target + 各 hunk 正文。"""
-    parts = [path, target, *(hunk.context for hunk in hunks)]
+    parts = [path, target, *contexts]
 
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 

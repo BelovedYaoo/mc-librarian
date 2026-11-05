@@ -31,7 +31,11 @@ from mc_librarian.config import (
     resolve_llm_config,
 )
 from mc_librarian.indexing import summarize
-from mc_librarian.indexing.build import build_index
+from mc_librarian.indexing.build import (
+    SourceSpec,
+    build_index,
+    build_index_from_sources,
+)
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.indexing.summarize import ClassDigest, SummaryRow
 from mc_librarian.main import create_app
@@ -912,3 +916,148 @@ def test_misaligned_fts_is_rebuilt_from_summaries_before_writing(
             assert any(hit.symbol == fqn for hit in hits), f"{fqn} 命不中摘要通道"
     finally:
         connection.close()
+
+
+# ----------------------------------------------------------------------
+# 加载器来源（issue #24 规格 §4）：三套 prompt 与补丁文件摘要
+# ----------------------------------------------------------------------
+
+
+def loader_digest(fqn: str, package: str) -> ClassDigest:
+    return ClassDigest(
+        class_id=0,
+        fqn=fqn,
+        package=package,
+        superclass=None,
+        interfaces=(),
+        field_names=(),
+        field_signatures=(),
+        method_signatures=(),
+        content_hash="hash",
+        source="loader",
+    )
+
+
+def test_build_prompt_uses_loader_rules_for_loader_source() -> None:
+    """loader 来源的类用加载器语境的规则（事件/注入/注册/生命周期），不是 MC 游戏机制那套。"""
+    prompt = summarize.build_prompt([loader_digest("net.neoforged.EventBus", "net.neoforged")])
+
+    assert "加载器框架" in prompt
+    assert "扩展点" in prompt
+    # 格式要求仍是同一套 3 行 + 同一个闸门（规格 §4）。
+    assert "第 3 行「关键成员：」" in prompt
+
+
+def test_group_by_package_keeps_sources_in_separate_batches() -> None:
+    """同一 package 在 patched / loader 两棵树里都有时不能混批，否则 prompt 只能选一套规则。"""
+    batches = summarize.group_by_package(
+        [
+            summarize.ClassDigest(
+                class_id=1,
+                fqn="net.minecraft.A",
+                package="net.minecraft",
+                superclass=None,
+                interfaces=(),
+                field_names=(),
+                field_signatures=(),
+                method_signatures=(),
+                content_hash="a",
+                source="patched",
+            ),
+            loader_digest("net.neoforged.B", "net.minecraft"),
+        ],
+        batch_size=10,
+    )
+
+    assert len(batches) == 2
+    assert {batch[0].source for batch in batches} == {"patched", "loader"}
+
+
+def test_build_patch_prompt_lists_targets_and_diff() -> None:
+    prompt = summarize.build_patch_prompt(
+        [
+            summarize.PatchDigest(
+                path="net/minecraft/world/Mob.java.patch",
+                target="net/minecraft/world/Mob.java",
+                hunk_count=2,
+                context="@@ -1,3 +_,5 @@\n+// Neo",
+                content_hash="h",
+            )
+        ]
+    )
+
+    assert "### net/minecraft/world/Mob.java.patch" in prompt
+    assert "被改的源文件：net/minecraft/world/Mob.java" in prompt
+    assert "改动块数：2" in prompt
+    assert "补丁" in prompt
+
+
+def test_patch_summaries_are_per_file_and_injected_into_patches_fts(
+    settings: Settings, fake_llm: Any, tmp_path: Path
+) -> None:
+    """补丁摘要按 patch 文件生成（不是一个 hunk 一条），并注入 `patches_fts` 让中文能命中。"""
+    patch_dir = tmp_path / "patches"
+    (patch_dir / "net" / "minecraft" / "world").mkdir(parents=True)
+    (patch_dir / "net" / "minecraft" / "world" / "Mob.java.patch").write_text(
+        "--- a/net/minecraft/world/Mob.java\n"
+        "+++ b/net/minecraft/world/Mob.java\n"
+        "@@ -1,3 +_,5 @@\n package net.minecraft.world;\n+// Neo: 改过\n public class Mob {\n }\n",
+        encoding="utf-8",
+    )
+
+    index = index_path(settings.data_dir, "neoforge-21.1.265+1.21.1")
+    build_index_from_sources(
+        [SourceSpec(kind="patch", root=patch_dir)], index, log=silent
+    )
+
+    stats = run_summarize(settings, index)
+
+    assert stats.patches == 1
+    assert stats.patches_generated == 1
+    assert stats.patches_failed == 0
+    # 一个 hunk 一条？不：`summaries` 里只有一条补丁摘要（按文件）。
+    assert stats.classes == 0
+
+    connection = sqlite3.connect(index)
+    connection.row_factory = sqlite3.Row
+
+    try:
+        rows = connection.execute("SELECT fqn, source, class_id FROM summaries").fetchall()
+        fts_context = connection.execute(
+            "SELECT context FROM patches_fts LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert [(row["fqn"], row["source"], row["class_id"]) for row in rows] == [
+        ("net/minecraft/world/Mob.java.patch", "patch", None)
+    ]
+    assert fts_context is not None
+    assert "刷怪" in str(fts_context["context"]), "补丁摘要必须进 patches_fts 才能被中文命中"
+
+    # 覆盖率只算类摘要，补丁摘要不把分母/分子算进去。
+    coverage = summarize.read_summary_coverage(index)
+    assert coverage is not None and coverage.summaries == 0
+
+
+def test_patch_summary_is_idempotent(
+    settings: Settings, fake_llm: Any, tmp_path: Path
+) -> None:
+    """补丁内容未变时重跑不重新调 LLM（内容哈希幂等）。"""
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    (patch_dir / "A.java.patch").write_text(
+        "--- a/A.java\n+++ b/A.java\n@@ -1,2 +_,3 @@\n a\n+b\n",
+        encoding="utf-8",
+    )
+    index = index_path(settings.data_dir, "neoforge-21.1.265+1.21.1")
+    build_index_from_sources([SourceSpec(kind="patch", root=patch_dir)], index, log=silent)
+
+    first = run_summarize(settings, index)
+    calls_after_first = len(fake_llm.calls)
+    second = run_summarize(settings, index)
+
+    assert first.patches_generated == 1
+    assert second.patches_generated == 0
+    assert second.patches_reused == 1
+    assert len(fake_llm.calls) == calls_after_first, "复用命中时不应再调 LLM"

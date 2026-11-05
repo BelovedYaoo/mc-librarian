@@ -549,21 +549,32 @@ def _summarize_stage(context: JobContext) -> dict[str, Any]:
         raise StageError(f"索引库不可读：{path}（{error}）") from error
 
     covered = stats.generated + stats.reused
+    patch_covered = stats.patches_generated + stats.patches_reused
     context.log(
         "info",
         f"摘要：生成 {stats.generated}、复用 {stats.reused}、失败 {stats.failed}"
-        f"（覆盖 {covered}/{stats.classes}）",
+        f"（覆盖 {covered}/{stats.classes}）；"
+        f"补丁：生成 {stats.patches_generated}、复用 {stats.patches_reused}、"
+        f"失败 {stats.patches_failed}（覆盖 {patch_covered}/{stats.patches}）",
     )
 
-    if stats.failed:
+    if stats.failed or stats.patches_failed:
         sample = "；".join(stats.failures[:FAILURE_SAMPLE])
-        raise StageError(f"摘要失败 {stats.failed} 个类（已生成的摘要保留）：{sample}")
+        detail = (
+            f"摘要失败 {stats.failed} 个类"
+            if not stats.patches_failed
+            else f"摘要失败：类 {stats.failed} 个、补丁 {stats.patches_failed} 个"
+        )
+        raise StageError(f"{detail}（已生成的摘要保留）：{sample}")
 
     return {
         "summaries": stats.generated,
         "summaries_reused": stats.reused,
         "summary_classes": stats.classes,
         "summary_failed": stats.failed,
+        "patch_summaries": stats.patches_generated,
+        "patch_summaries_reused": stats.patches_reused,
+        "patch_summary_failed": stats.patches_failed,
     }
 
 
