@@ -685,10 +685,14 @@ function TurnBlock({
         />
       )}
 
-      {/* 还没有任何增量文本时的等待态：像素格 + 实时秒数。一旦开始出字就交给光标，不叠两个动画。 */}
-      {turn.status === 'streaming' && turn.answer === '' && turn.steps.every((s) => s.ok !== undefined) && (
-        <GeneratingIndicator startedAt={turn.startedAt} />
-      )}
+      {/* 等待态只在「模型在想/在写、但没有工具在跑」时出现：
+          有工具在跑时轨迹自己就有转动指示器，再叠一个像素格是两个动画抢注意力。 */}
+      {turn.status === 'streaming'
+        && turn.answer === ''
+        && !turn.steps.some((step) => step.ok === undefined)
+        && turn.citations.length === 0 && (
+          <GeneratingIndicator startedAt={turn.startedAt} />
+        )}
 
       {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
 

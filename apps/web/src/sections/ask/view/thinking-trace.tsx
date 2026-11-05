@@ -11,7 +11,9 @@
  *
  * - 状态点：进行中 = 像素格动画；成功 = ✓；失败 = ✕
  * - 每行：工具名 + 最关键的那个参数（等宽、可截断）+ 结果（`N 条` / `失败`）
- * - 头部常驻：`正在检索 · 第 3 步` / `已完成 5 步`，右侧是实时/总耗时
+ * - 头部常驻：`正在检索 · 检索源码` / `已调用 N 次工具`，右侧是实时/总耗时。
+ *   用「次」不用「步」：`max_steps` 数的是**模型轮次**，一轮里可以并发多个工具调用，
+ *   所以工具调用次数往往大于步数（实测一次 `max_steps` 收尾是 12 轮 / 23 次调用）。
  * - 进行中默认展开，结束后自动收起（用户手动展开过就不再自动收）
  */
 
@@ -130,8 +132,8 @@ export function ThinkingTrace({ steps, streaming, startedAt, latencyMs }: Thinki
       ? `正在检索 · ${describeTool(current.tool)}`
       : '正在规划下一步'
     : failed > 0
-      ? `已执行 ${total} 步 · ${failed} 步失败`
-      : `已执行 ${total} 步`;
+      ? `已调用 ${total} 次工具 · ${failed} 次失败`
+      : `已调用 ${total} 次工具`;
   const seconds = latencyMs != null ? latencyMs : null;
 
   return (
