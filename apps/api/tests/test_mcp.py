@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from typing import Any
 
 import pytest
@@ -209,6 +210,9 @@ def test_versions_tool_reports_registered_versions(
     # 「注册了」不等于「能检索」：这份索引真实存在，所以要标 searchable 并进顶层清单。
     assert payload["versions"][0]["searchable"] is True
     assert payload["searchable_versions"] == ["1.21.1"]
+    # 这份 fixture 只写了源码树 + 建索引，两者都在 → 可检索也可读。
+    assert payload["versions"][0]["sources_available"] is True
+    assert payload["readable_versions"] == ["1.21.1"]
 
 
 def test_versions_marks_registered_without_index_as_unsearchable(
@@ -240,6 +244,29 @@ def test_versions_marks_registered_without_index_as_unsearchable(
     assert entry["searchable"] is False
     assert "db_path" in entry["unavailable_reason"]
     assert "9.9.9" not in payload["searchable_versions"]
+
+
+def test_versions_reports_missing_source_tree(
+    admin_client: TestClient, settings: Settings, conn: Any
+) -> None:
+    """索引传了、源码树没传时：`searchable=true` 但 `sources_available=false`。
+
+    这是最容易白跑一轮的配置错：`search` 能用，`read`/`outline` 必然失败。提前标出来。
+    """
+    _register_index(settings, conn, "1.21.1")
+    shutil.rmtree(source_root(settings.data_dir, "1.21.1"))
+
+    pat = _issue_pat(admin_client)
+    _session, headers = _open_session(admin_client, pat)
+    result = _call(admin_client, headers, "tools/call", {"name": "versions", "arguments": {}})
+    payload = json.loads(result["result"]["content"][0]["text"])
+
+    entry = payload["versions"][0]
+
+    assert entry["searchable"] is True
+    assert entry["sources_available"] is False
+    assert payload["searchable_versions"] == ["1.21.1"]
+    assert payload["readable_versions"] == []
 
 
 def test_search_error_lists_searchable_versions(

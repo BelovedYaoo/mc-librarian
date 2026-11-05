@@ -37,6 +37,7 @@ from mc_librarian.config import (
 )
 from mc_librarian.db import Database
 from mc_librarian.indexing import query
+from mc_librarian.indexing.layout import source_root
 from mc_librarian.jobs import store
 from mc_librarian.mcp.auth import Caller, current_caller
 from mc_librarian.retrieval import service
@@ -149,6 +150,9 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
                 row["unavailable_reason"] = f"索引文件不存在：{db_path}"
             else:
                 row["searchable"] = True
+                # `read` / `outline` 要读**源码树**，`search` / `symbol` / `references` 只用索引库。
+                # 两者可以不一致（索引传了、源码树没传），不提前说清的话模型会先撞一次失败。
+                row["sources_available"] = source_root(settings.data_dir, item.version).is_dir()
                 # 摘要覆盖率从索引库实时读（`versions` 表里的是登记快照，可能早于摘要补齐）。
                 try:
                     with query.open_readonly(Path(db_path), check_same_thread=False) as index:
@@ -216,8 +220,8 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
 
     @server.tool(
         description=(
-            "列出**可以检索**的版本（其它工具的 version 参数必须取自这里）。"
-            "每个版本带 searchable 标记：false 表示注册了但索引不可用，不能拿去检索。"
+            "列出可用的版本（其它工具的 version 参数必须取自这里）。"
+            "每个版本带 searchable（能否检索）与 sources_available（能否 read/outline）两个标记。"
         )
     )
     def versions() -> str:
@@ -227,8 +231,11 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
         return _payload(
             {
                 "versions": rows,
-                # 单独给一份「可以直接拿去用」的清单：模型不必自己从 searchable 字段再筛一遍。
+                # 单独给两份清单：模型不必自己从字段里再筛一遍（它经常筛错或漏筛）。
                 "searchable_versions": [row["version"] for row in rows if row["searchable"]],
+                "readable_versions": [
+                    row["version"] for row in rows if row.get("sources_available")
+                ],
             }
         )
 
