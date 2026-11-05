@@ -90,6 +90,11 @@ def _error(message: str, **extra: Any) -> str:
     return _payload({"error": message, **extra})
 
 
+def _join(versions: list[str]) -> str:
+    """把版本清单拼成一句话；空列表时说清「一个都没有」。"""
+    return "、".join(versions) if versions else "（当前没有任何可检索的版本）"
+
+
 def _caller() -> Caller | None:
     return current_caller.get()
 
@@ -110,22 +115,83 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
         with database.connect() as connection:
             yield connection
 
+    def version_states() -> list[dict[str, Any]]:
+        """每个版本的元数据 + **是否真的能检索**（`searchable`）。
+
+        「注册了」与「能检索」是两件事：版本行存在但 `db_path` 为空或索引文件被删时，
+        `/v1/*` 与 MCP 的工具都会 404。`versions` 工具必须把这条差异说清楚，否则模型会挑一个
+        看着在列表里、实际查不到的版本，然后反复失败。
+        """
+        with control() as connection:
+            items = store.list_versions(connection)
+            db_paths = store.list_version_db_paths(connection)
+
+        rows: list[dict[str, Any]] = []
+
+        for item in items:
+            row: dict[str, Any] = {
+                "version": item.version,
+                "files": item.files,
+                "tokens": item.tokens,
+                "loader": item.loader,
+                "loader_version": item.loader_version,
+                "mc_version": item.mc_version,
+                "obfuscated": item.obfuscated,
+                "indexed_at": item.indexed_at,
+            }
+            db_path = db_paths.get(item.version)
+
+            if db_path is None:
+                row["searchable"] = False
+                row["unavailable_reason"] = "索引文件未登记（版本行存在但 db_path 为空）"
+            elif not Path(db_path).is_file():
+                row["searchable"] = False
+                row["unavailable_reason"] = f"索引文件不存在：{db_path}"
+            else:
+                row["searchable"] = True
+                # 摘要覆盖率从索引库实时读（`versions` 表里的是登记快照，可能早于摘要补齐）。
+                try:
+                    with query.open_readonly(Path(db_path), check_same_thread=False) as index:
+                        row["summary_count"] = index.execute(
+                            "SELECT count(*) FROM summaries"
+                        ).fetchone()[0]
+                        row["class_count"] = index.execute(
+                            "SELECT count(*) FROM classes"
+                        ).fetchone()[0]
+                except sqlite3.Error as error:
+                    row["summary_error"] = str(error)
+
+            rows.append(row)
+
+        return rows
+
+    def searchable_versions() -> list[str]:
+        return [row["version"] for row in version_states() if row["searchable"]]
+
     @contextmanager
     def index_of(version: str) -> Iterator[sqlite3.Connection]:
-        """按版本打开只读索引库。未注册 / 无索引文件时抛 `LookupError`（调用方转成 error JSON）。"""
+        """按版本打开只读索引库。未注册 / 无索引文件时抛 `LookupError`（调用方转成 error JSON）。
+
+        `LookupError` 的消息里**直接带上可检索版本清单**：只说「先调 versions」会让模型多绕
+        一轮，而版本串本身模型是猜不出来的（`neoforge-21.1.265+1.21.1` 这种）。
+        """
+        available = searchable_versions()
+
         with control() as connection:
             registered, db_path = store.index_db_path(connection, version)
 
         if not registered:
-            raise LookupError(f"版本 {version} 未注册。先调 versions 看可用版本。")
+            raise LookupError(f"版本 {version} 未注册。可检索的版本：{_join(available)}")
 
         if db_path is None:
-            raise LookupError(f"版本 {version} 尚无索引文件。")
+            raise LookupError(f"版本 {version} 尚无索引文件。可检索的版本：{_join(available)}")
 
         path = Path(db_path)
 
         if not path.is_file():
-            raise LookupError(f"版本 {version} 的索引文件不存在：{path}")
+            raise LookupError(
+                f"版本 {version} 的索引文件不存在：{path}。可检索的版本：{_join(available)}"
+            )
 
         # `check_same_thread=False`：MCPServer 可能把同步工具丢到线程池执行，连接建在事件循环线程。
         connection = query.open_readonly(path, check_same_thread=False)
@@ -148,44 +214,23 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
     # 工具
     # ------------------------------------------------------------------
 
-    @server.tool(description="列出已索引的版本。其它工具的 version 参数必须取自这里。")
+    @server.tool(
+        description=(
+            "列出**可以检索**的版本（其它工具的 version 参数必须取自这里）。"
+            "每个版本带 searchable 标记：false 表示注册了但索引不可用，不能拿去检索。"
+        )
+    )
     def versions() -> str:
-        """返回每个版本的元数据：文件数、token、摘要覆盖、加载器标识。"""
-        with control() as connection:
-            items = store.list_versions(connection)
-            db_paths = store.list_version_db_paths(connection)
+        """返回每个版本的元数据：文件数、token、摘要覆盖、加载器标识、是否可检索。"""
+        rows = version_states()
 
-        rows: list[dict[str, Any]] = []
-
-        for item in items:
-            row: dict[str, Any] = {
-                "version": item.version,
-                "files": item.files,
-                "tokens": item.tokens,
-                "loader": item.loader,
-                "loader_version": item.loader_version,
-                "mc_version": item.mc_version,
-                "obfuscated": item.obfuscated,
-                "indexed_at": item.indexed_at,
+        return _payload(
+            {
+                "versions": rows,
+                # 单独给一份「可以直接拿去用」的清单：模型不必自己从 searchable 字段再筛一遍。
+                "searchable_versions": [row["version"] for row in rows if row["searchable"]],
             }
-            # 摘要覆盖率从索引库实时读（`versions` 表里的是登记快照，可能早于摘要补齐）。
-            db_path = db_paths.get(item.version)
-
-            if db_path is not None and Path(db_path).is_file():
-                try:
-                    with query.open_readonly(Path(db_path), check_same_thread=False) as index:
-                        row["summary_count"] = index.execute(
-                            "SELECT count(*) FROM summaries"
-                        ).fetchone()[0]
-                        row["class_count"] = index.execute(
-                            "SELECT count(*) FROM classes"
-                        ).fetchone()[0]
-                except sqlite3.Error as error:
-                    row["summary_error"] = str(error)
-
-            rows.append(row)
-
-        return _payload({"versions": rows})
+        )
 
     @server.tool(
         description=(

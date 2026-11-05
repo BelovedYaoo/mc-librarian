@@ -206,6 +206,60 @@ def test_versions_tool_reports_registered_versions(
     assert [item["version"] for item in payload["versions"]] == ["1.21.1"]
     # 加载器元数据三列在契约里有；原版版本应为 None（不是空字符串）。
     assert payload["versions"][0]["loader"] is None
+    # 「注册了」不等于「能检索」：这份索引真实存在，所以要标 searchable 并进顶层清单。
+    assert payload["versions"][0]["searchable"] is True
+    assert payload["searchable_versions"] == ["1.21.1"]
+
+
+def test_versions_marks_registered_without_index_as_unsearchable(
+    admin_client: TestClient, conn: Any
+) -> None:
+    """版本行存在但 `db_path` 为空时，`versions` 必须标 `searchable=false`。
+
+    否则模型会挑一个「在列表里但查不到」的版本，然后来回失败——这正是这个工具要防的。
+    """
+    store.register_version(
+        conn,
+        version="9.9.9",
+        files=0,
+        tokens=0,
+        obfuscated=False,
+        has_summaries=False,
+        source_size_bytes=0,
+        db_path=None,
+    )
+    conn.commit()
+
+    pat = _issue_pat(admin_client)
+    _session, headers = _open_session(admin_client, pat)
+    result = _call(admin_client, headers, "tools/call", {"name": "versions", "arguments": {}})
+    payload = json.loads(result["result"]["content"][0]["text"])
+
+    entry = next(item for item in payload["versions"] if item["version"] == "9.9.9")
+
+    assert entry["searchable"] is False
+    assert "db_path" in entry["unavailable_reason"]
+    assert "9.9.9" not in payload["searchable_versions"]
+
+
+def test_search_error_lists_searchable_versions(
+    admin_client: TestClient, settings: Settings, conn: Any
+) -> None:
+    """版本写错时错误信息里**直接给可用清单**，模型不必再多调一次 `versions`。"""
+    _register_index(settings, conn, "1.21.1")
+
+    pat = _issue_pat(admin_client)
+    _session, headers = _open_session(admin_client, pat)
+    result = _call(
+        admin_client,
+        headers,
+        "tools/call",
+        {"name": "search", "arguments": {"query_text": "刷怪", "version": "9.9.9"}},
+    )
+    payload = json.loads(result["result"]["content"][0]["text"])
+
+    assert "error" in payload
+    assert "1.21.1" in payload["error"]
 
 
 def test_search_tool_returns_error_for_unknown_version(admin_client: TestClient) -> None:
