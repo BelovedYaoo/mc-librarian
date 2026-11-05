@@ -16,6 +16,7 @@ from mc_librarian.indexing.text import split_lines
 from mc_librarian.retrieval import (
     RetrievalNotFound,
     file_outline,
+    read_patch,
     read_source,
     reference_list,
     slice_lines,
@@ -270,12 +271,20 @@ class ToolBox:
         path = _require_str(args, "path")
         text = read_source(self._settings, self._version, path)
 
+        # 补丁文件的正文在索引库里（`patches` 表的 hunk），不在源码树上。
+        # 模型常从检索命中的 `path`（`xxx.java.patch`）直接来读，这里接住，不让它白跑一轮。
+        if text is None:
+            text = read_patch(self._connection, path)
+
         if text is None:
             raise RetrievalNotFound(f"源码树里没有这个文件：{path}")
 
         lines = split_lines(text)
-        start = _bounded_int(args, "start", 1, 1, len(lines) or 1)
-        end = _bounded_int(args, "end", start, start, len(lines) or start)
+        total = len(lines) or 1
+        start = _clamped_int(args, "start", 1, 1, total)
+        # `end` **夹到文件末尾**而不是报错：模型无从知道文件多少行，猜大的很常见；
+        # 报错只会让它再试一次，而返回实际读到的区间（结果里带 `total_lines`）它自己就能纠正。
+        end = _clamped_int(args, "end", start, start, total)
         sliced = slice_lines(
             lines,
             path,
@@ -423,6 +432,16 @@ def _detail(args: dict[str, Any]) -> SearchDetail:
         raise ValueError("参数 detail 只能是 locate 或 snippet")
 
     return cast("SearchDetail", value)
+
+
+def _clamped_int(args: dict[str, Any], key: str, default: int, low: int, high: int) -> int:
+    """取整并**夹到 [low, high]**（越界不报错）。给「模型猜行号」这类场景用。"""
+    value = args.get(key, default)
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"参数 {key} 必须是整数")
+
+    return max(low, min(value, high))
 
 
 def _bounded_int(args: dict[str, Any], key: str, default: int, low: int, high: int) -> int:

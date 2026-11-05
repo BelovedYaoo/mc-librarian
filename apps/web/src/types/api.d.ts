@@ -864,6 +864,11 @@ export interface components {
             };
             ok?: boolean;
             hits?: number;
+            /**
+             * @description 失败原因（`ok=false` 时带，截断到几百字符）。例：`行号超出范围 [435, 458]`、
+             *     `源码树里没有这个文件：…`。界面据此说明「为什么失败」，不必再靠参数复放去查。
+             */
+            error?: string;
         } | {
             /** @constant */
             type: "delta";
@@ -898,6 +903,8 @@ export interface components {
             args?: {
                 [key: string]: unknown;
             };
+            /** @description 失败原因（仅失败时出现），与流式 `step` 事件的 `error` 同义 */
+            error?: string;
         };
         Citation: {
             path: string;

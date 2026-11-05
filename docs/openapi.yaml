@@ -1209,6 +1209,11 @@ components:
             args: { type: object, additionalProperties: true }
             ok: { type: boolean }
             hits: { type: integer }
+            error:
+              type: string
+              description: |
+                失败原因（`ok=false` 时带，截断到几百字符）。例：`行号超出范围 [435, 458]`、
+                `源码树里没有这个文件：…`。界面据此说明「为什么失败」，不必再靠参数复放去查。
         - type: object
           required: [type, text]
           properties:
@@ -1256,6 +1261,9 @@ components:
       properties:
         tool: { type: string }
         args: { type: object, additionalProperties: true }
+        error:
+          type: string
+          description: 失败原因（仅失败时出现），与流式 `step` 事件的 `error` 同义
 
     Citation:
       type: object

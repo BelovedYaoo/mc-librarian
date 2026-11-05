@@ -53,6 +53,10 @@ CONTEXT_BUDGET_TOOL: Final = "context_budget"
 # 降级时 `delta` 输出的说明（规格 §5）。
 DEGRADED_NOTICE: Final = "模型暂不可用，以下是相关代码位置"
 # 达到步数上限时答案开头的说明（规格 §2）。
+# 失败原因写进事件的长度上限：够说清「行号越界 / 文件不存在 / 参数非法」，
+# 又不至于把整段工具输出塞进事件。
+STEP_ERROR_CHARS: Final = 300
+
 MAX_STEPS_NOTICE: Final = "已达检索步数上限，以下基于已获取的信息"
 # 收尾时追加给模型的指令：光撤掉工具不够——模型会继续「想调工具」而给出空文本，
 # 必须明确要求它现在就答（实测 deepseek 这类推理模型在无工具时会返回空 content）。
@@ -185,12 +189,19 @@ class AskRun:
 
             # 结果按**请求顺序**消费，不按完成先后：按完成先后发出去，前端列表会跳。
             for item, outcome in zip(plan, outcomes, strict=True):
-                yield {
+                step_event: dict[str, Any] = {
                     "type": "step",
                     "tool": item.name,
                     "ok": outcome.ok,
                     "hits": outcome.hits,
                 }
+
+                if not outcome.ok:
+                    # 失败原因要能被看见：只回一个 `ok=false`，界面只能说「失败」，
+                    # 排查时要像这次一样把参数捞出来本地复放才知道为什么。
+                    step_event["error"] = outcome.text[:STEP_ERROR_CHARS]
+
+                yield step_event
                 messages.append(
                     {
                         "role": "tool",

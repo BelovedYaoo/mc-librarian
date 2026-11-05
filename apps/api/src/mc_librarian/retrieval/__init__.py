@@ -8,6 +8,7 @@ from __future__ import annotations
 from mc_librarian.retrieval.service import (
     RetrievalNotFound,
     file_outline,
+    read_patch,
     read_source,
     reference_list,
     search,
@@ -19,6 +20,7 @@ from mc_librarian.retrieval.service import (
 __all__ = [
     "RetrievalNotFound",
     "file_outline",
+    "read_patch",
     "read_source",
     "reference_list",
     "search",

@@ -921,7 +921,7 @@ def test_ask_step_event_carries_ok_and_hits() -> None:
     for spec in (_runtime(), _contract()):
         step = _ask_event_branch(spec, "step")
 
-        assert set(step["properties"]) == {"type", "tool", "args", "ok", "hits"}
+        assert set(step["properties"]) == {"type", "tool", "args", "ok", "hits", "error"}
         assert step["required"] == ["type", "tool"]
 
 

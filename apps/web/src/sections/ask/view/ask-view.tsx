@@ -185,7 +185,7 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
 
       if (target === -1) return turn;
 
-      steps[target] = { ...steps[target], ok: event.ok, hits: event.hits };
+      steps[target] = { ...steps[target], ok: event.ok, hits: event.hits, error: event.error };
 
       return { ...turn, segments: [...turn.segments.slice(0, -1), { kind: 'steps', steps }] };
     }

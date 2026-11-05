@@ -164,6 +164,31 @@ def read_source(settings: Settings, version: str, path: str) -> str | None:
     return candidate.read_text(encoding="utf-8", errors="replace")
 
 
+def read_patch(connection: sqlite3.Connection, path: str) -> str | None:
+    """从索引库的 `patches` 表重建补丁文本；不是补丁或没有这张表时返回 None。
+
+    为什么需要它：`search` 的补丁命中里 `path` 是 `xxx.java.patch`，模型照着它去调 `read`
+    是很自然的动作；但 `.patch` 文件**不在源码树里**（只在索引里切成了 hunk），于是这一读
+    必然失败，白花一轮工具调用。
+
+    重建按 `hunk_index` 拼 `context`：每段 `context` 自带 `@@ -a,b +c,d @@` 头与上下文行，
+    拼起来就是可读的补丁正文。**不是**逐字节还原原文件（文件头那几行 `diff --git`、`---`、
+    `+++` 没存），读补丁的人要看的是「改了哪几行」，这里够了。
+    """
+    if not query.has_table(connection, "patches"):
+        return None
+
+    rows = connection.execute(
+        "SELECT context FROM patches WHERE path = ? ORDER BY hunk_index", (path,)
+    ).fetchall()
+
+    if not rows:
+        return None
+
+    # 用 `chr(10)` 而不是字面换行：脚本里写 `"\\n"` 时转义层数容易数错，这里直接避开。
+    return chr(10).join(str(row[0]) for row in rows)
+
+
 def source_tree_present(settings: Settings, version: str) -> bool:
     """该版本有没有源码树。
 

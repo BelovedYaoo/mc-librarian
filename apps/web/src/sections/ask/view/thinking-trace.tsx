@@ -22,6 +22,7 @@ import { alpha, keyframes } from '@mui/material/styles';
 import Box from '@mui/material/Box';
 import Collapse from '@mui/material/Collapse';
 import Stack from '@mui/material/Stack';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 
 import type { AskStep } from 'src/lib/api-client';
@@ -48,6 +49,8 @@ export type StepTrace = Pick<AskStep, 'tool'> & {
   args?: Record<string, unknown>;
   ok?: boolean;
   hits?: number;
+  /** 失败原因（服务端在 `ok=false` 时带），hover 显示，界面不必只写「失败」。 */
+  error?: string;
 };
 
 export type ThinkingTraceProps = {
@@ -330,17 +333,24 @@ function TraceRow({ step }: { step: StepTrace }) {
 
       <Box sx={{ flex: '1 1 auto' }} />
 
-      <Typography
-        variant="caption"
-        sx={{
-          fontFamily: 'monospace',
-          fontVariantNumeric: 'tabular-nums',
-          flexShrink: 0,
-          color: step.ok === false ? 'error.main' : 'text.disabled',
-        }}
-      >
-        {step.ok === undefined ? '…' : step.ok ? `${step.hits ?? 0} 条` : '失败'}
-      </Typography>
+      <Tooltip title={step.ok === false ? (step.error ?? '失败（服务端未带原因）') : ''} placement="left">
+        <Typography
+          variant="caption"
+          sx={{
+            fontFamily: 'monospace',
+            fontVariantNumeric: 'tabular-nums',
+            flexShrink: 0,
+            color: step.ok === false ? 'error.main' : 'text.disabled',
+            // 失败原因可能很长：加下划线虚线提示「这里可以看」。
+            ...(step.ok === false && {
+              textDecoration: 'underline dotted',
+              cursor: 'help',
+            }),
+          }}
+        >
+          {step.ok === undefined ? '…' : step.ok ? `${step.hits ?? 0} 条` : '失败'}
+        </Typography>
+      </Tooltip>
     </Stack>
   );
 }

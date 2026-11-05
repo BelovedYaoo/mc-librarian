@@ -178,7 +178,15 @@ def test_ask_reports_tool_failure_to_the_model(
 
     events = parse_sse(ask(user_client).text)
 
-    assert events[1] == {"type": "step", "tool": "search", "ok": False, "hits": 0}
+    failed = events[1]
+
+    assert failed["type"] == "step"
+    assert failed["tool"] == "search"
+    assert failed["ok"] is False
+    assert failed["hits"] == 0
+    # 失败原因要出现在事件里：界面据此解释「为什么失败」，否则只显示一个「失败」，
+    # 排查时得把参数捞出来本地复放才知道原因（这次就是这么查出来的）。
+    assert "参数不合法" in failed["error"]
 
     tool_messages = [
         message

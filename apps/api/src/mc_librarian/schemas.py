@@ -734,6 +734,9 @@ class AskStep(BaseModel):
 
     tool: str
     args: dict[str, Any] = Field(default_factory=dict)
+    # 失败原因（截断到几百字符）。只在这一步失败时出现：
+    # 模型拿它自我纠正，界面拿它解释「为什么失败」。
+    error: str | None = None
 
 
 class AskRequest(BaseModel):
@@ -818,6 +821,8 @@ class AskStepEvent(BaseModel):
     args: dict[str, Any] | None = None
     ok: bool | None = None
     hits: int | None = None
+    # 失败原因：`ok=false` 时带一段可读文本（截断），界面据此说明「为什么失败」。
+    error: str | None = None
 
 
 class AskDeltaEvent(BaseModel):
