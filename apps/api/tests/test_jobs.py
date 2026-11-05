@@ -1645,7 +1645,7 @@ def test_checkpoint_int_falls_back_for_bad_values() -> None:
 
 
 def test_version_identity_derives_loader_metadata() -> None:
-    """加载器形式 `neoforge-21.1.265+1.21.1` 拆成三列；原版版本三列退化为 `mc_version == version`。"""
+    """加载器形式拆成三列；原版版本退化为 `mc_version == version`。"""
     loader = store.version_identity("neoforge-21.1.265+1.21.1")
 
     assert (loader.loader, loader.loader_version, loader.mc_version) == (
@@ -1726,3 +1726,118 @@ def test_register_version_records_loader_metadata(
     listed = admin_client.get("/v1/versions").json()["versions"][0]
     assert listed["loader"] == "neoforge"
     assert listed["mc_version"] == "1.21.1"
+
+
+# ----------------------------------------------------------------------
+# 多来源索引（issue #24 规格 §3）
+# ----------------------------------------------------------------------
+
+
+PATCH_FIXTURE = """\
+--- a/net/minecraft/world/Mob.java
++++ b/net/minecraft/world/Mob.java
+@@ -1,3 +_,5 @@
+ package net.minecraft.world;
++// Neo: 改过
+ public class Mob {
+ }
+"""
+
+
+def test_job_with_sources_indexes_patched_and_patches(
+    admin_client: TestClient, settings: Settings, source_dir: Path, tmp_path: Path
+) -> None:
+    """`options.sources` 走 `parse → summarize → finalize`：Java 目录进 classes，补丁进 patches。"""
+    patch_dir = tmp_path / "patches"
+    (patch_dir / "net" / "minecraft" / "world").mkdir(parents=True)
+    (patch_dir / "net" / "minecraft" / "world" / "Mob.java.patch").write_text(
+        PATCH_FIXTURE, encoding="utf-8"
+    )
+    version = "neoforge-21.1.265+1.21.1"
+
+    created = admin_client.post(
+        "/v1/admin/jobs",
+        json={
+            "kind": "index",
+            "version": version,
+            "options": {
+                "sources": [
+                    {"kind": "patched", "dir": str(source_dir)},
+                    {"kind": "patch", "dir": str(patch_dir)},
+                ]
+            },
+        },
+    )
+
+    assert created.status_code == 202, created.text
+    job = wait_for_terminal(admin_client, created.json()["id"])
+
+    assert job["status"] == "succeeded", job
+    assert job["stage"] == "finalize"
+
+    index = settings.data_dir / "db" / f"{version}.sqlite"
+    connection = sqlite3.connect(index)
+    connection.row_factory = sqlite3.Row
+
+    try:
+        sources = {row["source"] for row in connection.execute("SELECT source FROM classes")}
+        hunks = connection.execute("SELECT COUNT(*) AS total FROM patches").fetchone()
+    finally:
+        connection.close()
+
+    assert sources == {"patched"}
+    assert hunks is not None and int(hunks["total"]) == 1
+
+    registered = admin_client.get("/v1/versions").json()["versions"][0]
+    assert registered["loader"] == "neoforge"
+    assert registered["mc_version"] == "1.21.1"
+
+
+def test_create_job_rejects_source_dir_and_sources_together(admin_client: TestClient) -> None:
+    """`source_dir` 与 `sources` 是同一件事的单/多来源写法，同时给 → 422。"""
+    response = admin_client.post(
+        "/v1/admin/jobs",
+        json={
+            "kind": "index",
+            "version": "26.3",
+            "options": {
+                "source_dir": "/tmp/x",
+                "sources": [{"kind": "patched", "dir": "/tmp/y"}],
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "sources" in response.json()["detail"]
+
+
+def test_create_job_rejects_duplicate_source_kinds(admin_client: TestClient) -> None:
+    response = admin_client.post(
+        "/v1/admin/jobs",
+        json={
+            "kind": "index",
+            "version": "26.3",
+            "options": {
+                "sources": [
+                    {"kind": "patched", "dir": "/tmp/a"},
+                    {"kind": "patched", "dir": "/tmp/b"},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "重复" in response.json()["detail"]
+
+
+def test_create_job_rejects_unknown_source_kind(admin_client: TestClient) -> None:
+    response = admin_client.post(
+        "/v1/admin/jobs",
+        json={
+            "kind": "index",
+            "version": "26.3",
+            "options": {"sources": [{"kind": "spigot", "dir": "/tmp/a"}]},
+        },
+    )
+
+    assert response.status_code == 422

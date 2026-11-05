@@ -24,10 +24,22 @@ CONFLICT_TITLE = "冲突"
 BAD_REQUEST_TITLE = "请求不合法"
 FORBIDDEN_TITLE = "无权访问"
 
-# `options` 可省略：省略即从官方 jar 跑完整五段；给了 `options` 但 `source_dir` 为空属于笔误。
-MISSING_SOURCE_DIR_DETAIL = (
-    "options.source_dir 不能为空：要么省略 options（从官方 jar 跑 download→decompile→parse→"
-    "summarize→finalize 五段），要么给一个非空的源码目录"
+# `options` 可省略：省略即从官方 jar 跑完整五段；给了 `options` 但既无 `source_dir` 也无
+# `sources` 属于笔误（issue #24 把单目录扩成多来源，两者必居其一）。
+MISSING_SOURCE_DETAIL = (
+    "options 必须给 source_dir 或 sources：要么省略 options（从官方 jar 跑 download→decompile→"
+    "parse→summarize→finalize 五段），要么给一个非空的 source_dir / 至少一项 sources"
+)
+
+# `source_dir` 与 `sources` 是同一个东西的单/多来源写法，同时给就是语义不清。
+AMBIGUOUS_SOURCE_DETAIL = (
+    "options.source_dir 与 options.sources 不能同时给："
+    "sources 是 source_dir 的多来源形式（source_dir 等价于 [{kind: \"patched\", dir: source_dir}]）"
+)
+
+# 同一类来源只能给一个目录（两个 patched 目录该合并成一个，而不是并列）。
+DUPLICATE_SOURCE_KIND_DETAIL = (
+    "options.sources 的 kind 不能重复：patched / loader / patch 各只能出现一次"
 )
 
 # 契约里 `options.obfuscated` 是 `type: boolean`（非 nullable）：显式 null 是笔误，
@@ -59,10 +71,10 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     summary="创建索引任务",
     description=(
         "立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。"
-        "阶段序列由 options.source_dir 决定：给了源目录走 parse → summarize → finalize；"
-        "省略 options 则从官方 jar 起跑完整五段 "
+        "阶段序列由 options.source_dir / options.sources 决定：给了源目录走 "
+        "parse → summarize → finalize；省略 options 则从官方 jar 起跑完整五段 "
         "download → decompile → parse → summarize → finalize；"
-        "给了 options 但 source_dir 为空返回 422。"
+        "给了 options 但既无 source_dir 也无 sources 返回 422；两者同时给返回 422。"
     ),
     operation_id="createJob",
     responses={
@@ -85,9 +97,20 @@ def create_job(
     options = payload.options
 
     with transaction(conn):
-        # 校验与入队同一事务。`options` 可省略（走五段）；给了但 `source_dir` 为空则 422。
-        if options is not None and not options.source_dir:
-            raise ProblemException(422, BAD_REQUEST_TITLE, MISSING_SOURCE_DIR_DETAIL)
+        # 校验与入队同一事务。`options` 可省略（走五段）；给了但既无 `source_dir` 也无
+        # `sources` 则 422；两者同时给 / kinds 重复也是 422（语义不清）。
+        if options is not None:
+            if options.source_dir and options.sources:
+                raise ProblemException(422, BAD_REQUEST_TITLE, AMBIGUOUS_SOURCE_DETAIL)
+
+            if options.sources:
+                kinds = [source.kind for source in options.sources]
+
+                if len(set(kinds)) != len(kinds):
+                    raise ProblemException(422, BAD_REQUEST_TITLE, DUPLICATE_SOURCE_KIND_DETAIL)
+
+            if not options.source_dir and not options.sources:
+                raise ProblemException(422, BAD_REQUEST_TITLE, MISSING_SOURCE_DETAIL)
 
         # 显式 `obfuscated: null` 与「省略该字段」不同：前者是笔误（契约里非 nullable），回 422。
         if (

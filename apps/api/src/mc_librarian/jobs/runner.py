@@ -59,7 +59,8 @@ from mc_librarian.fetch.pipeline import (
 from mc_librarian.fetch.tools import PipelineTools, default_tools
 from mc_librarian.indexing.build import (
     BuildError,
-    build_index,
+    SourceSpec,
+    build_index_from_sources,
     place_source_tree,
     read_index_totals,
     source_tree_size_bytes,
@@ -143,10 +144,50 @@ class JobContext:
 
         return path if path.is_absolute() else (self.data_dir / path)
 
+    @property
+    def sources(self) -> list[SourceSpec]:
+        """任务要索引的来源（issue #24 规格 §3）：`options.sources`，否则 `source_dir` 单来源。
+
+        `source_dir` 等价于 `[{kind: "patched", dir: source_dir}]`（向后兼容）；两者都没有时返回
+        空列表，由 `_parse_stage` 回退到 `decompile` 就位好的源码根。相对路径按数据根解析。
+        """
+        raw = self.options.get("sources")
+
+        if isinstance(raw, list):
+            specs: list[SourceSpec] = []
+
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+
+                kind = item.get("kind")
+                directory = item.get("dir")
+
+                if kind not in ("patched", "loader", "patch") or not isinstance(directory, str):
+                    continue
+
+                path = Path(directory).expanduser()
+                specs.append(
+                    SourceSpec(
+                        kind=kind,
+                        root=path if path.is_absolute() else (self.data_dir / path),
+                    )
+                )
+
+            if specs:
+                return specs
+
+        single = self.source_dir
+
+        return [] if single is None else [SourceSpec(kind="patched", root=single)]
+
 
 def stages_for(options: Mapping[str, Any]) -> tuple[str, ...]:
-    """按任务参数选阶段序列：给了 `source_dir` 走索引三段，否则从官方 jar 起跑完整五段。"""
-    return SOURCE_STAGES if options.get("source_dir") else STAGES
+    """按任务参数选阶段序列：给了源目录 / 多来源走索引三段，否则从官方 jar 起跑完整五段。"""
+    if options.get("source_dir") or options.get("sources"):
+        return SOURCE_STAGES
+
+    return STAGES
 
 
 def resolve_obfuscated(options: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> bool:
@@ -407,29 +448,39 @@ def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
 def _parse_stage(context: JobContext) -> dict[str, Any]:
     """就位源码树并把它解析成 `db/<version>.sqlite`（规格补充 §1/§3/§4/§14）。
 
-    源码根固定为 `<data_dir>/src/<version>/`：`options.source_dir` 已经是它就直接解析，
-    否则先复制过去。没给 `options.source_dir` 时直接用它——完整五段里 `decompile` 已经把
-    源码树写在那里，`place_source_tree` 在源根相同时是 no-op。
+    源码根固定为 `<data_dir>/src/<version>/`：`options.source_dir` / `options.sources` 里的
+    Java 目录（`patched`/`loader`）都就位到这里（相对路径不变，`files.path` 据此可读）；
+    `patch` 目录不复制——补丁切片从 `patches.context` 直接取，不进源码树。没给来源时直接用
+    `dest`——完整五段里 `decompile` 已经把源码树写在那里。
 
     `build_index` 是原子替换整库（#7 的 `summaries` 表也一起没了），所以重建前先把已有摘要
     搬出来、重建后按 fqn 搬回去：否则「重跑同一个版本」每次都会把摘要清掉重生成，内容哈希
     幂等就白做了。类被删掉的摘要直接丢弃（不留下指向错误类的行）。
     """
     dest = source_root(context.data_dir, context.version)
-    root = context.source_dir or dest
+    sources = context.sources or [SourceSpec(kind="patched", root=dest)]
 
-    if not root.is_dir():
-        raise StageError(f"source_dir 不存在或不是目录：{root}")
-
-    if root.resolve() != dest.resolve():
-        context.log("info", f"parse：源码树就位到 {dest}")
+    for source in sources:
+        if not source.root.is_dir():
+            raise StageError(
+                f"来源目录不存在或不是目录（{source.kind}，来自 options.source_dir/sources）："
+                f"{source.root}"
+            )
 
     index = index_path(context.data_dir, context.version)
     carried = export_summaries(index)
 
     try:
-        place_source_tree(root, dest)
-        result = build_index(dest, index, log=context.log)
+        for source in sources:
+            if source.kind == "patch":
+                continue
+
+            if source.root.resolve() != dest.resolve():
+                context.log("info", f"parse：{source.kind} 源码树就位到 {dest}")
+
+            place_source_tree(source.root, dest)
+
+        result = build_index_from_sources(sources, index, log=context.log)
     except BuildError as error:
         raise StageError(str(error)) from error
 
@@ -443,7 +494,8 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
     context.log(
         "info",
         f"parse：{result.files} 个文件、约 {result.tokens} token、{result.source_size_bytes} 字节；"
-        f"解析 {result.parsed} 个 .java、跳过 {result.skipped} 个",
+        f"解析 {result.parsed} 个 .java、跳过 {result.skipped} 个；"
+        f"补丁 {result.patch_files} 个文件、{result.patch_hunks} 个 hunk",
     )
 
     return {
@@ -452,6 +504,8 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
         "source_size_bytes": result.source_size_bytes,
         "parsed_files": result.parsed,
         "skipped_files": result.skipped,
+        "patch_files": result.patch_files,
+        "patch_hunks": result.patch_hunks,
     }
 
 

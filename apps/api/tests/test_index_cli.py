@@ -150,6 +150,74 @@ def test_build_options_carries_force_and_reuse_index(tmp_path: Path) -> None:
     assert index_cli.build_options(None, force=False) == {"force": False, "reuse_index": True}
 
 
+def test_parse_sources_reads_repeated_kind_dir(tmp_path: Path) -> None:
+    """`--sources <kind>=<dir>` 可重复，解析成 `(kind, 绝对路径)`（issue #24 规格 §3）。"""
+    patched = tmp_path / "patched"
+    loader = tmp_path / "loader"
+    patch_dir = tmp_path / "patches"
+
+    for path in (patched, loader, patch_dir):
+        path.mkdir()
+
+    parsed = index_cli.parse_sources(
+        [f"patched={patched}", f"loader={loader}", f"patch={patch_dir}"]
+    )
+
+    assert parsed == [
+        ("patched", patched.resolve()),
+        ("loader", loader.resolve()),
+        ("patch", patch_dir.resolve()),
+    ]
+
+
+def test_parse_sources_rejects_bad_input(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="kind"):
+        index_cli.parse_sources(["spigot=/tmp/x"])
+
+    with pytest.raises(ValueError, match="形式"):
+        index_cli.parse_sources(["patched"])
+
+    with pytest.raises(ValueError, match="重复"):
+        index_cli.parse_sources([f"patched={tmp_path}", f"patched={tmp_path}"])
+
+    with pytest.raises(ValueError, match="目录不存在"):
+        index_cli.parse_sources([f"patched={tmp_path / 'missing'}"])
+
+
+def test_build_options_carries_sources(tmp_path: Path) -> None:
+    options = index_cli.build_options(
+        None, [("patched", tmp_path), ("patch", tmp_path / "patches")], force=False
+    )
+
+    assert "source_dir" not in options
+    assert options["sources"] == [
+        {"kind": "patched", "dir": str(tmp_path)},
+        {"kind": "patch", "dir": str(tmp_path / "patches")},
+    ]
+
+
+def test_main_rejects_source_dir_with_sources(
+    configure_cli: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--source-dir` 与 `--sources` 同时给是语义不清，退出码 2。"""
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+
+    code = index_cli.main(
+        [
+            "--version",
+            "26.3",
+            "--source-dir",
+            str(tmp_path),
+            "--sources",
+            f"patch={patch_dir}",
+        ]
+    )
+
+    assert code == 2
+    assert "不能同时给" in capsys.readouterr().err
+
+
 def test_main_rejects_version_with_path_separator(
     configure_cli: None, capsys: pytest.CaptureFixture[str]
 ) -> None:

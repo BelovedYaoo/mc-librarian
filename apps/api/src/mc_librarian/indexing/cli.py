@@ -1,12 +1,15 @@
-"""`mc-librarian index --version <v> [--source-dir <dir>] [--force]`：端到端产出可检索索引（#13）。
+"""`mc-librarian index --version <v> [--source-dir <dir>] [--sources <kind>=<dir> ...] [--force]`：
+端到端产出可检索索引（#13）。
 
 与 `python -m mc_librarian index ...` 是同一个入口（见 `__main__.py` 的 `cli`）。
 流水线本身不在这里：命令只负责建任务、跑完、汇总，执行复用 `JobRunner` 与 checkpoint。
 
-- 不给 `--source-dir`：完整五段 `download → decompile → parse → summarize → finalize`；
+- 不给 `--source-dir` / `--sources`：完整五段 `download → decompile → parse → summarize`
+  `→ finalize`；
   jar 已在缓存里（`cache/<version>/fetch.json` 记着 `download` 完成）时不联网重下，源码树已
   反编译完成时跳过 `decompile`（两个标记都与 `mc-librarian fetch` 共用）；
-- 给了 `--source-dir`：跳过 download/decompile，从 `parse` 开始；
+- 给了 `--source-dir`（单目录，等价于 `--sources patched=<dir>`）或 `--sources`（多来源，
+  issue #24）：跳过 download/decompile，从 `parse` 开始；
 - 不给 `--force` 且 `db/<version>.sqlite` 已是合法索引：跳过重建（复用已有索引）后继续收尾，
   因此重复执行同一命令不会改动已有产物；
 - 跑完由 `_finish` 登记版本行（`db_path` 指向刚产出的索引），服务不需要再手工注册；
@@ -38,7 +41,10 @@ from mc_librarian.jobs.runner import (
     reuse_stage_stats,
     stages_for,
 )
-from mc_librarian.schemas import VERSION_PATTERN, Job, LogLevel
+from mc_librarian.schemas import VERSION_PATTERN, Job, LogLevel, SourceKind
+
+# `--sources <kind>=<dir>` 允许的来源类型（issue #24 规格 §3）。
+SOURCE_KINDS: Final[tuple[SourceKind, ...]] = ("patched", "loader", "patch")
 
 # `psutil` 是 dev 依赖：装不上（生产不装）时跳过内存峰值测量，流水线照跑。
 PSUTIL_MISSING_MESSAGE: Final = "psutil 不可用，跳过内存峰值测量（pip install psutil）"
@@ -57,6 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="已就绪的源码树（相对路径按当前目录解析）；给了就跳过 download/decompile",
+    )
+    parser.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        metavar="KIND=DIR",
+        help=(
+            "多来源索引（可重复，issue #24）：patched / loader / patch；"
+            "例如 --sources patched=<打过补丁的 MC> --sources loader=<加载器自身> "
+            "--sources patch=<补丁目录>"
+        ),
     )
     parser.add_argument(
         "--force",
@@ -84,13 +101,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"源码目录不存在或不是目录：{source_dir}", file=sys.stderr)
         return 2
 
+    try:
+        sources = parse_sources(args.sources)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    if sources and source_dir is not None:
+        print(
+            "--source-dir 与 --sources 不能同时给：--source-dir 等价于 --sources patched=<dir>",
+            file=sys.stderr,
+        )
+        return 2
+
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
     database = Database.for_data_dir(settings.data_dir)
     database.initialize()
 
-    options = build_options(source_dir, force=args.force)
+    options = build_options(source_dir, sources, force=args.force)
 
     with database.connect() as conn, transaction(conn):
         job = store.create(
@@ -111,19 +141,62 @@ def main(argv: list[str] | None = None) -> int:
     return asyncio.run(run_job(settings, database, job))
 
 
-def build_options(source_dir: Path | None, *, force: bool) -> dict[str, Any]:
+def parse_sources(raw: list[str] | None) -> list[tuple[SourceKind, Path]]:
+    """解析 `--sources <kind>=<dir>`（可重复）；不合法时抛 `ValueError`（CLI 翻成退出码 2）。
+
+    目录不存在也当不合法：把不存在的路径交给 `parse` 阶段只会在任务里失败，不如在命令行直接说清。
+    """
+    parsed: list[tuple[SourceKind, Path]] = []
+    seen: set[str] = set()
+
+    for item in raw or []:
+        kind, separator, directory = item.partition("=")
+
+        if not separator or not directory:
+            raise ValueError(f"--sources 需要 <kind>=<dir> 形式：{item}")
+
+        if kind not in SOURCE_KINDS:
+            raise ValueError(
+                f"--sources 的 kind 只能是 {'/'.join(SOURCE_KINDS)}：{kind}"
+            )
+
+        if kind in seen:
+            raise ValueError(f"--sources 的 kind 不能重复：{kind}")
+
+        seen.add(kind)
+        path = Path(directory).expanduser().resolve()
+
+        if not path.is_dir():
+            raise ValueError(f"--sources 的目录不存在或不是目录（{kind}）：{path}")
+
+        parsed.append((kind, path))
+
+    return parsed
+
+
+def build_options(
+    source_dir: Path | None,
+    sources: list[tuple[SourceKind, Path]] | None = None,
+    *,
+    force: bool,
+) -> dict[str, Any]:
     """任务参数。
 
     - `force`：`--force` 时重建，`reuse_download_stats`/`reuse_source_tree`/`reuse_index_stats`
       都据此绕过复用；
     - `reuse_index`：CLI 的索引幂等语义（未给 `--force` 时复用已有索引）。API 任务不设这个键，
       因此「提交即重建」的既有语义不变；
-    - `source_dir`：已被 `main` 转成绝对路径，覆盖 `JobContext.source_dir` 的「相对数据根解析」。
+    - `source_dir` / `sources`：已被 `main` 转成绝对路径，覆盖 `JobContext` 的「相对数据根解析」。
     """
     options: dict[str, Any] = {"force": force, "reuse_index": not force}
 
     if source_dir is not None:
         options["source_dir"] = str(source_dir)
+
+    if sources:
+        options["sources"] = [
+            {"kind": kind, "dir": str(path)} for kind, path in sources
+        ]
 
     return options
 

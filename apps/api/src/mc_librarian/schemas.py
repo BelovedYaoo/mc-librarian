@@ -80,6 +80,7 @@ __all__ = [
     "JobLog",
     "JobLogList",
     "JobOptions",
+    "JobSource",
     "JobStage",
     "JobStatus",
     "LlmSettings",
@@ -240,11 +241,23 @@ class AuditList(BaseModel):
     entries: list[AuditEntry]
 
 
-class JobOptions(BaseModel):
-    """创建任务时的 `options`；三个字段见 docs/openapi.yaml 的 `JobCreate`。
+class JobSource(BaseModel):
+    """`JobOptions.sources` 的一项：一类来源（`kind`）与它的目录（`dir`）。
 
-    `source_dir` 可省略：省略（或不传 `options`）走完整五段；给了 `options` 但 `source_dir`
-    为空由接口层返回 422（空值属于笔误）。
+    `kind` 取值见契约：`patched`（打过补丁的 MC）/ `loader`（加载器自身）/ `patch`（补丁目录）。
+    """
+
+    kind: SourceKind
+    dir: str = Field(min_length=1, max_length=2000)
+
+
+class JobOptions(BaseModel):
+    """创建任务时的 `options`；字段见 docs/openapi.yaml 的 `JobCreate`。
+
+    `source_dir` 可省略：省略（或不传 `options`）走完整五段；给了 `options` 但既无 `source_dir`
+    也无 `sources` 由接口层返回 422（空值属于笔误）。
+    `sources`（issue #24 规格 §3）是多来源形式：一个任务同时索引 patched/loader/patch 三类内容；
+    与 `source_dir` 不能同时给（后者等价于 `[{kind: "patched", dir: source_dir}]`）。
     `obfuscated` 声明该版本源码是否经官方映射 remap；省略时由 `jobs.runner.resolve_obfuscated`
     按 checkpoint 与阶段序列推断（parse-only 缺省按「已 remap」记录）。显式传 `null` 与省略不同，
     由接口层回 422（契约里是非 nullable 的 `boolean`）。
@@ -254,6 +267,7 @@ class JobOptions(BaseModel):
     """
 
     source_dir: str | None = None
+    sources: list[JobSource] | None = None
     obfuscated: bool | None = None
     force: bool = False
 
@@ -301,7 +315,8 @@ class VersionInfo(BaseModel):
 
     `loader`/`loader_version`/`mc_version` 是加载器元数据（issue #24 规格 §1）：原版 MC 的
     `loader`/`loader_version` 为 `None`、`mc_version` 等于 `version`；加载器版本
-    （`neoforge-21.1.265+1.21.1`）三列都非空。三者由 `version` 推导（`jobs.store.version_identity`）。
+    （`neoforge-21.1.265+1.21.1`）三列都非空。三者由 `version` 推导
+    （`jobs.store.version_identity`）。
     """
 
     version: str

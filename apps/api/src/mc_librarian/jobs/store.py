@@ -85,7 +85,9 @@ def validate_version_identity(
         raise ValueError(f"加载器版本的 loader_version/mc_version 不能为空：{version}")
 
     if version != f"{loader}-{loader_version}+{mc_version}":
-        raise ValueError(f"version 与三列不自洽：{version} != {loader}-{loader_version}+{mc_version}")
+        raise ValueError(
+            f"version 与三列不自洽：{version} != {loader}-{loader_version}+{mc_version}"
+        )
 
 
 def _loads(raw: object) -> dict[str, Any]:
