@@ -650,7 +650,8 @@ def test_fit_budget_leaves_headroom_below_the_cap() -> None:
             {
                 "role": "tool",
                 "tool_call_id": f"c{index}",
-                "content": "word " * 700,  # 约 700 token（重复的 "x" 会被压到很低，用词更像真实代码）
+                # 用词而不是重复字符：`"x" * N` 会被 tokenizer 压得很低，量不出水位。
+                "content": "word " * 700,  # 约 700 token
                 "_tool": True,
                 "_label": f"search#{index}",
             }

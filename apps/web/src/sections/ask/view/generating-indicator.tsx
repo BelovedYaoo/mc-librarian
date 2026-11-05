@@ -7,6 +7,9 @@
  *
  * 为什么不用 `CircularProgress`：转圈只表达「在等」，像素格 + 实时秒数表达的是「在做事，已经
  * N 秒」——问答动辄几十秒，可见的进度比一个永不停的圈更有用。
+ *
+ * 这一行是**整轮常驻**的（见 `TurnBlock`）：跟着 `streaming` 出现和消失，不随「有没有工具在跑」
+ * 反复开关，否则每新增一次工具调用就会闪一下，反而更吵。
  */
 
 import { keyframes } from '@mui/material/styles';
@@ -82,65 +85,42 @@ export function GeneratingIndicator({
   const elapsed = useElapsed(startedAt);
 
   return (
-    <>
-      <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', py: 0.5 }}>
-        <PixelGrid />
+    <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', py: 0.5 }}>
+      <PixelGrid />
 
-        <Box
-          component="span"
-          sx={(theme) => ({
-            fontSize: 14,
-            backgroundImage: `linear-gradient(90deg, ${theme.palette.text.secondary} 0%, ${theme.palette.text.primary} 50%, ${theme.palette.text.secondary} 100%)`,
-            backgroundSize: '200% 100%',
-            backgroundClip: 'text',
-            WebkitBackgroundClip: 'text',
-            color: 'transparent',
-            animation: `${shimmer} 1.8s linear infinite`,
-            '@media (prefers-reduced-motion: reduce)': {
-              animation: 'none',
-              color: 'text.secondary',
-              backgroundImage: 'none',
-            },
-          })}
-        >
-          {label}
-        </Box>
-
-        {/* 等宽 + 等宽数字：秒数跳动时不挤动右边的文字。 */}
-        <Box
-          component="span"
-          sx={{
-            fontFamily: 'monospace',
-            fontVariantNumeric: 'tabular-nums',
-            fontSize: 13,
+      <Box
+        component="span"
+        sx={(theme) => ({
+          fontSize: 14,
+          backgroundImage: `linear-gradient(90deg, ${theme.palette.text.secondary} 0%, ${theme.palette.text.primary} 50%, ${theme.palette.text.secondary} 100%)`,
+          backgroundSize: '200% 100%',
+          backgroundClip: 'text',
+          WebkitBackgroundClip: 'text',
+          color: 'transparent',
+          animation: `${shimmer} 1.8s linear infinite`,
+          '@media (prefers-reduced-motion: reduce)': {
+            animation: 'none',
             color: 'text.secondary',
-          }}
-        >
-          {formatSeconds(elapsed)}
-        </Box>
-      </Stack>
+            backgroundImage: 'none',
+          },
+        })}
+      >
+        {label}
+      </Box>
 
-      {/* 骨架行：只有一行「正在生成回答」时，正文区是一大片空白，容易被读成卡死。
-        三条宽度递减的微光条给出「内容马上就来」的形状预期；出现第一个字就整块消失。 */}
-      <Stack spacing={1} sx={{ mt: 1.5 }} aria-hidden>
-        {['100%', '92%', '55%'].map((width) => (
-          <Box
-            key={width}
-            sx={{
-              height: 12,
-              width,
-              borderRadius: 0.5,
-              bgcolor: 'action.hover',
-              backgroundImage: (theme) =>
-                `linear-gradient(90deg, transparent 0%, ${theme.palette.action.selected} 50%, transparent 100%)`,
-              backgroundSize: '200% 100%',
-              animation: `${shimmer} 1.6s linear infinite`,
-              '@media (prefers-reduced-motion: reduce)': { animation: 'none' },
-            }}
-          />
-        ))}
-      </Stack>
-    </>
+      {/* 等宽 + 等宽数字：秒数跳动时不挤动右边的文字。 */}
+      <Box
+        component="span"
+        sx={{
+          fontFamily: 'monospace',
+          fontVariantNumeric: 'tabular-nums',
+          fontSize: 13,
+          color: 'text.secondary',
+        }}
+      >
+        {formatSeconds(elapsed)}
+      </Box>
+    </Stack>
   );
 }
 

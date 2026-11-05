@@ -12,8 +12,8 @@ import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
+import { alpha } from '@mui/material/styles';
 import CircularProgress from '@mui/material/CircularProgress';
-import Divider from '@mui/material/Divider';
 import Drawer from '@mui/material/Drawer';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
@@ -682,68 +682,102 @@ function TurnBlock({
   currentVersion: string;
   onOpenCitation: (citation: Citation) => void;
 }) {
-  return (
-    <Stack spacing={2} divider={<Divider flexItem />}>
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-        <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-          问 · {turn.question}
-        </Typography>
+  const streaming = turn.status === 'streaming';
 
-        <VersionBadge version={turn.version} current={currentVersion} />
+  return (
+    <Stack spacing={1.5}>
+      {/* 用户气泡：靠右。不再用「问 · 」前缀——左右分栏本身就是角色区分。 */}
+      <Stack direction="row" sx={{ justifyContent: 'flex-end' }}>
+        <Box
+          sx={{
+            maxWidth: { xs: '92%', md: '76%' },
+            px: 2,
+            py: 1.25,
+            borderRadius: 2.5,
+            // 主色的低透明度：暗色下不刺眼，亮色下也能与助手气泡区分开。
+            bgcolor: (theme) =>
+              alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.18 : 0.1),
+            border: '1px solid',
+            borderColor: (theme) => alpha(theme.palette.primary.main, 0.24),
+          }}
+        >
+          <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
+            {turn.question}
+          </Typography>
+
+          <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: 'center' }}>
+            <VersionBadge version={turn.version} current={currentVersion} />
+          </Stack>
+        </Box>
       </Stack>
 
-      {turn.steps.length > 0 && (
-        <ThinkingTrace
-          steps={turn.steps}
-          streaming={turn.status === 'streaming'}
-          startedAt={turn.startedAt}
-          latencyMs={turn.usage?.latency_ms ?? null}
-        />
-      )}
-
-      {/* 等待态只在「模型在想/在写、但没有工具在跑」时出现：
-          有工具在跑时轨迹自己就有转动指示器，再叠一个像素格是两个动画抢注意力。 */}
-      {turn.status === 'streaming' &&
-        turn.answer === '' &&
-        !turn.steps.some((step) => step.ok === undefined) &&
-        turn.citations.length === 0 && <GeneratingIndicator startedAt={turn.startedAt} />}
-
-      {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
-
-      {turn.reason === 'degraded' && (
-        <Alert severity="warning">模型暂不可用，以下是检索到的相关代码位置。</Alert>
-      )}
-
-      {/* 服务端在 `max_steps` 收尾时会把同一句提示**前缀进答案**，这里再放一条 Alert 就重复了。
-          只在答案里没有那句话时才补（降级路径的答案不带前缀）。 */}
-      {turn.reason === 'max_steps' && !turn.answer.includes('已达检索步数上限') && (
-        <Alert severity="info">已达检索步数上限，以下基于已获取的信息。</Alert>
-      )}
-
-      {turn.answer !== '' && (
-        <AnswerMarkdown text={turn.answer} streaming={turn.status === 'streaming'} />
-      )}
-
-      {turn.citations.length > 0 && (
-        <Stack spacing={1}>
-          <Typography variant="subtitle2">引用（点击查看整个文件）</Typography>
-
-          {turn.citations.map((citation, index) => (
-            <CitationRow
-              key={`${citation.path}:${citation.lines.join('-')}:${index}`}
-              citation={citation}
-              onOpen={() => onOpenCitation(citation)}
+      {/* 助手气泡：靠左，占满宽度——答案里有表格与代码块，限宽会让它们频繁横向滚动。 */}
+      <Box
+        sx={{
+          px: 2,
+          py: 1.5,
+          borderRadius: 2.5,
+          border: '1px solid',
+          borderColor: 'divider',
+          bgcolor: 'background.paper',
+        }}
+      >
+        <Stack spacing={1.5}>
+          {/* 加载行**常驻**整轮：之前只在「没有工具在跑」时出现，于是每新增一次工具调用就
+              闪一下（消失 → 出现）。现在这一行跟着 `streaming` 走，标签随阶段切换。 */}
+          {streaming && (
+            <GeneratingIndicator
+              startedAt={turn.startedAt}
+              label={turn.answer === '' ? '正在生成回答' : '正在输出答案'}
             />
-          ))}
-        </Stack>
-      )}
+          )}
 
-      {turn.usage && turn.status === 'done' && (
-        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-          用量：prompt {turn.usage.prompt_tokens ?? 0} · completion{' '}
-          {turn.usage.completion_tokens ?? 0} · 耗时 {turn.usage.latency_ms ?? 0} ms
-        </Typography>
-      )}
+          {/* 工具轨迹就放在原骨架屏的位置（加载行下方）。 */}
+          {turn.steps.length > 0 && (
+            <ThinkingTrace
+              steps={turn.steps}
+              streaming={streaming}
+              startedAt={turn.startedAt}
+              latencyMs={turn.usage?.latency_ms ?? null}
+            />
+          )}
+
+          {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
+
+          {turn.reason === 'degraded' && (
+            <Alert severity="warning">模型暂不可用，以下是检索到的相关代码位置。</Alert>
+          )}
+
+          {/* 服务端在 `max_steps` 收尾时会把同一句提示**前缀进答案**，这里再放一条 Alert 就重复了。
+              只在答案里没有那句话时才补（降级路径的答案不带前缀）。 */}
+          {turn.reason === 'max_steps' && !turn.answer.includes('已达检索步数上限') && (
+            <Alert severity="info">已达检索步数上限，以下基于已获取的信息。</Alert>
+          )}
+
+          {turn.answer !== '' && <AnswerMarkdown text={turn.answer} streaming={streaming} />}
+
+          {turn.citations.length > 0 && (
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">引用（点击查看整个文件）</Typography>
+
+              {turn.citations.map((citation, index) => (
+                <CitationRow
+                  key={`${citation.path}:${citation.lines.join('-')}:${index}`}
+                  citation={citation}
+                  onOpen={() => onOpenCitation(citation)}
+                />
+              ))}
+            </Stack>
+          )}
+
+          {turn.usage && turn.status === 'done' && (
+            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+              用量：prompt {turn.usage.prompt_tokens ?? 0} · completion{' '}
+              {turn.usage.completion_tokens ?? 0} · 耗时 {turn.usage.latency_ms ?? 0} ms
+            </Typography>
+          )}
+        </Stack>
+      </Box>
     </Stack>
   );
 }

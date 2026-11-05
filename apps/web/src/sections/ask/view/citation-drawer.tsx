@@ -331,7 +331,6 @@ function FileViewer({
   );
 }
 
-
 function useHighlightedLines(
   code: string,
   lang: HighlightLanguage | 'text',
