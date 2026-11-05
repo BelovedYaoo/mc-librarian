@@ -30,6 +30,16 @@ import { formatSeconds } from './generating-indicator';
 
 const CONTEXT_BUDGET_TOOL = 'context_budget';
 
+/**
+ * 明细区的高度上限 = 5 行。一次深度检索会累积 20+ 次工具调用，不封顶时轨迹会把它下面的
+ * 答案一路撑下去，一屏全是日志。
+ *
+ * 行高的来源：`py: 0.625`（上下各 5px）+ 12.5px 字号的一行正文（约 18px）≈ 28px。
+ * 换行（`textOverflow: ellipsis` + 单行）不会改变行高，所以可以按固定值算。
+ */
+const TRACE_ROW_HEIGHT = 28;
+const TRACE_VISIBLE_ROWS = 5;
+
 const spin = keyframes`
   to { transform: rotate(360deg); }
 `;
@@ -115,12 +125,21 @@ export function ThinkingTrace({ steps, streaming, startedAt, latencyMs }: Thinki
   const [pinned, setPinned] = useState<boolean | null>(null);
   const [open, setOpen] = useState(streaming);
   const wasStreaming = useRef(streaming);
+  const rowsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     // 只在「进行中 → 结束」这一刻自动收起；之后用户再展开就不会被重新收起。
     if (wasStreaming.current && !streaming && pinned === null) setOpen(false);
     wasStreaming.current = streaming;
   }, [streaming, pinned]);
+
+  useEffect(() => {
+    // 进行中把明细滚到底：最新一步永远可见（像看日志）。
+    // 结束后不再动——那时用户在往回翻，被拽到底很烦。
+    const element = rowsRef.current;
+
+    if (element !== null && open && streaming) element.scrollTop = element.scrollHeight;
+  }, [steps.length, open, streaming]);
 
   const toolSteps = steps.filter((step) => step.tool !== CONTEXT_BUDGET_TOOL);
   const failed = toolSteps.filter((step) => step.ok === false).length;
@@ -222,9 +241,14 @@ export function ThinkingTrace({ steps, streaming, startedAt, latencyMs }: Thinki
       </Stack>
 
       <Collapse in={open}>
-        {/* 每行之间一条极淡分隔线：20+ 行的日志列表没有分隔时，横向扫读会串行。 */}
-        <Stack
+        {/* 明细区固定高度、内部滚动：一次 `max_steps` 收尾可能产生 20+ 行，不封顶的话轨迹会把它
+            下面的答案一路撑下去，消息区被一份日志占满。每行之间一条极淡分隔线——20+ 行没有
+            分隔时，横向扫读会串行。 */}
+        <Box
+          ref={rowsRef}
           sx={{
+            maxHeight: TRACE_ROW_HEIGHT * TRACE_VISIBLE_ROWS,
+            overflowY: 'auto',
             px: 1.5,
             pb: 1.25,
             pt: 0.25,
@@ -234,7 +258,7 @@ export function ThinkingTrace({ steps, streaming, startedAt, latencyMs }: Thinki
           {steps.map((step, index) => (
             <TraceRow key={`${step.tool}-${index}`} step={step} />
           ))}
-        </Stack>
+        </Box>
       </Collapse>
     </Box>
   );
