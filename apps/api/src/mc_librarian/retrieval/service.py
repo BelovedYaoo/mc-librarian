@@ -235,7 +235,16 @@ def file_outline(
     """文件骨架（`GET /v1/outline` 与 ask 的 `outline` 工具共用）。
 
     文件不在索引里、或源码树里没有该路径时抛 `RetrievalNotFound`（HTTP 层翻 404，工具层翻失败）。
+
+    补丁文件在这里就拦下：它不是 Java 源码，没有类/方法骨架。之前只报「源码树里没有这个文件」，
+    模型会误以为路径写错而反复重试（实测它对着 `.patch` 先 outline 再 read）。这条检查放在服务层
+    而不是工具层，HTTP / MCP / ask 三条入口才能给同一句话。
     """
+    if path.endswith(".patch"):
+        raise RetrievalNotFound(
+            f"{path} 是补丁文件，没有类/方法骨架；用 read 读它的改动内容（含行号）"
+        )
+
     record = query.find_file(connection, path)
 
     if record is None:
