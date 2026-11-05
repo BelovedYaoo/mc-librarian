@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,12 @@ FTS_WORD_CHAR: Final = re.compile(r"\w")
 SUMMARY_MAX_CHARS: Final = 2000
 # 失败原因里最多列几个类，避免一条日志刷屏。
 FAILURE_SAMPLE: Final = 5
+
+# 瞬时错误的重试策略。摘要批次很贵（一批 40 个类、上万 token），因为网关一次抖动就
+# 永久判失败不划算；但也不能无限重试——网关长时间不可用时应快速失败、让任务落 failed。
+RETRY_ATTEMPTS: Final = 4
+RETRY_BASE_DELAY_S: Final = 2.0
+RETRYABLE_STATUS: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 SYSTEM_PROMPT: Final = (
     "你是 Minecraft 源码知识库的中文摘要写手，只输出一个 JSON 对象，不要输出任何其它文字。"
@@ -512,7 +519,7 @@ def _strip_line_prefix(line: str) -> str:
     return line.strip()
 
 
-def validate_summary(text: str, *, fqn: str) -> str | None:
+def validate_summary(text: str, *, fqn: str, has_members: bool = True) -> str | None:
     """校验一条摘要是否满足规格 §1 的三行格式；合格返回 `None`，不合格返回原因。
 
     只校验**实质**，不要求字面前缀：真实模型经常写成三行自由文本、不带「机制：/关键成员：」，
@@ -523,7 +530,9 @@ def validate_summary(text: str, *, fqn: str) -> str | None:
     - 至少 3 行；
     - 第 1 行（剥掉前缀后）长度 ≥ `SUMMARY_MIN_HEAD_CHARS` 且不等于该类的 FQN 或简单名；
     - 前两行含中日韩字符（摘要必须用中文写，不是复述类名）；
-    - 第 3 行含至少一个英文标识符（`IDENTIFIER`）——这是「关键成员」的实质。
+    - 第 3 行含至少一个英文标识符（`IDENTIFIER`）——这是「关键成员」的实质；
+      **但 `has_members=False` 时跳过这一条**：标记注解（`DontObfuscate`）与空枚举/接口
+      本来就没有成员，模型列不出标识符，硬要求会把它们全部判失败（1.21.1 实测 137 个类）。
 
     先判第 1 行再看整体中文：模型复述类名时（第 1 行就是 FQN）报「复述类名」比报「没有中文」
     更精确。所有规则都只决定「拒 / 收」与失败原因，不改变是否入库。
@@ -547,7 +556,7 @@ def validate_summary(text: str, *, fqn: str) -> str | None:
     if CJK_CHAR.search(head) is None or CJK_CHAR.search(mechanism) is None:
         return "前两行必须有中文（必须用中文写，不是复述类名）"
 
-    if IDENTIFIER.search(members) is None:
+    if has_members and IDENTIFIER.search(members) is None:
         return "第 3 行必须含至少一个英文标识符（关键成员）"
 
     return None
@@ -586,7 +595,9 @@ def parse_batch_response(
         # 先逐行截断（`normalize_summary`）再校验：反过来的话超长第 1 行会连第 2/3 行一起
         # 被切掉，入库后只剩 1 行，绕过「固定 3 行」的闸门。
         normalized = normalize_summary(value)
-        problem = validate_summary(normalized, fqn=digest.fqn)
+        # 无字段也无方法的类（标记注解、空枚举/接口）不能要求它列出成员标识符。
+        has_members = bool(digest.field_names or digest.method_signatures)
+        problem = validate_summary(normalized, fqn=digest.fqn, has_members=has_members)
 
         if problem is not None:
             failures[digest.fqn] = f"摘要格式不合格：{problem}"
@@ -632,7 +643,40 @@ class OpenAiCompatClient:
         )
 
 
+class _RetryableSummaryError(SummaryError):
+    """瞬时失败（网关 5xx / 限流 / 网络抖动）：值得退避后重试。"""
+
+
 def post_chat_completion(
+    url: str,
+    payload: dict[str, object],
+    api_key: str,
+    timeout: float,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """带退避重试地发一次 chat completion（只重试瞬时错误）。
+
+    `sleep` 可注入，便于测试不真的等待。
+    """
+    last: Exception | None = None
+
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return _post_chat_completion_once(url, payload, api_key, timeout)
+        except _RetryableSummaryError as error:
+            last = error
+
+            if attempt == RETRY_ATTEMPTS:
+                break
+
+            # 指数退避：2s / 4s / 8s（第 4 次不再等）。
+            sleep(RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+
+    raise SummaryError(f"重试 {RETRY_ATTEMPTS} 次仍失败：{last}")
+
+
+def _post_chat_completion_once(
     url: str, payload: dict[str, object], api_key: str, timeout: float
 ) -> str:
     """发一次 chat completion 请求，返回首个 choice 的文本内容。
@@ -656,9 +700,14 @@ def post_chat_completion(
             raw = response.read().decode("utf-8", errors="replace")
     except HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")[:500]
-        raise SummaryError(f"LLM 返回 HTTP {error.code}：{detail}") from error
+        message = f"LLM 返回 HTTP {error.code}：{detail}"
+
+        if error.code in RETRYABLE_STATUS:
+            raise _RetryableSummaryError(message) from error
+
+        raise SummaryError(message) from error
     except (URLError, TimeoutError, OSError) as error:
-        raise SummaryError(f"LLM 请求失败：{error}") from error
+        raise _RetryableSummaryError(f"LLM 请求失败：{error}") from error
 
     try:
         loaded = json.loads(raw)
