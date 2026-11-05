@@ -23,7 +23,12 @@ const codeTokenColors = {
     text: '#E6EDF3',
     keyword: '#FF7B72',
     string: '#A5D6FF',
-    comment: '#8B949E',
+    /**
+     * github-dark 的官方注释色是 `#8B949E`，但那是配它自己的底色（`#0D1117`）的；本项目的代码块底
+     * 是 `background.neutral`（`#22322B`，亮度高于 `#0D1117`），`#8B949E` 在它上面只有 4.38:1，
+     * 低于 AA 的 4.5。改用 `grey[500]`（`#919EAB`）→ 4.93:1。light 的注释色不动。
+     */
+    comment: '#919EAB',
     number: '#79C0FF',
     title: '#D2A8FF',
     builtIn: '#FFA657',

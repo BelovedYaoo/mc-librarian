@@ -165,8 +165,15 @@ const lightPalette: PaletteOptions = {
 };
 
 /**
- * 暗色调色板：`text` / `background` / `action` 照抄 Minimal 的 dark 定义（`core/palette.ts`），
- * 唯一例外是 `background.neutral`（见 `NEUTRAL_BACKGROUND_DARK`）。语义色六色五档不动。
+ * 暗色调色板：`background` / `action` 照抄 Minimal 的 dark 定义（`core/palette.ts`），语义色六色
+ * 五档不动。两处偏离：`background.neutral`（见 `NEUTRAL_BACKGROUND_DARK`）与 `text.secondary`
+ * （见下）。
+ *
+ * `text.secondary`：Minimal 的 dark 用 `grey[500]`（`#919EAB`），在 `paper`（`#1C252E`）上是
+ * 5.68:1，数字上过 AA，但深色底上的浅灰字看起来比同比值的浅色底更暗（Helmholtz–Kohlrausch
+ * 效应），实测 12px 的时间 / 用量 / 统计 / 辅助说明这类小字已接近读不清。改用 `grey[400]`
+ * （`#C4CDD5`）→ 9.63:1。`text.primary`（`#FFFFFF`，15.52:1）与 `text.disabled`（禁用态，
+ * 不受对比度要求约束）不动；light 的 `text.secondary`（`grey[600]`）也不动。
  */
 const darkPalette: PaletteOptions = {
   mode: 'dark',
@@ -176,7 +183,7 @@ const darkPalette: PaletteOptions = {
   divider: `rgba(${grey500}, 0.2)`,
   text: {
     primary: '#FFFFFF',
-    secondary: grey[500],
+    secondary: grey[400],
     disabled: grey[600],
   },
   background: {

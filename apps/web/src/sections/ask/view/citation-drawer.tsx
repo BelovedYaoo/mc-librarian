@@ -30,13 +30,15 @@ const HIGHLIGHT_DEBOUNCE_MS = 80;
 /**
  * 引用区间的底色（暗色）。浅色用 `warning.light`（`#FFD666`）——亮黄底配 github-light 的深色 token。
  * 暗色下那个亮黄底配 Shiki github-dark 的浅色 token 只有 ~1.1:1，读不出来；`warning.dark`
- * （`#B76E00`）也只有 ~3.1:1。改用低饱和暗黄 `#33290D`：正文 token `#E1E4E8` → 11.25:1、
- * 关键字 `#F97583` → 5.40:1、行号（`text.secondary` `#919EAB`）→ 5.25:1。
+ * （`#B76E00`）也只有 ~3.1:1。改用低饱和暗绿 `#1C3A30`：色相 160°，与主色 `#00A76F` 同系，
+ * 在冷灰蓝底 + 绿色主色的页面上大面积着色不冲突（此前用的 `#33290D` 是色相 44° 的琥珀 / 橄榄褐，
+ * 与页面色系相差 ~116°）。正文 token `#E1E4E8` → 9.70:1、关键字 `#F97583` → 4.65:1、
+ * 行号（`text.secondary` `#C4CDD5`）→ 7.68:1。
  *
- * 唯一例外是 Shiki github-dark 的注释色 `#6A737D`（2.98:1）——它在纯黑上也只到 4.36:1，换任何
- * 底色都上不了 AA，不是这一处底色能修的。
+ * 唯一例外是 Shiki github-dark 的注释色 `#6A737D`（2.57:1）——它在纯黑上也只到 4.36:1，换任何
+ * 底色都上不了 AA，不是这一处底色能修的（`#33290D` 上也只有 2.98:1）。
  */
-const HIGHLIGHT_DARK = '#33290D';
+const HIGHLIGHT_DARK = '#1C3A30';
 
 type LoadState =
   | { status: 'idle' }
@@ -339,7 +341,10 @@ function FileViewer({
                 pr: 1.5,
                 textAlign: 'right',
                 // 用 `text.secondary` 而不是 `text.disabled`：灰色 disabled 在高亮行
-                // （`warning.light`）上只有 1.96:1，行号会消失。
+                // （`warning.light`）上只有 1.96:1，行号会消失。暗色下 `text.secondary` 是
+                // `grey[400]`（`#C4CDD5`），在高亮行 `#1C3A30` 上 7.68:1、在普通行底
+                // （`action.hover` 叠 `paper`）上 8.45:1，仍明显暗于代码正文（`#E1E4E8` 的
+                // 9.70:1），「比正文淡」的行号观感还在，所以不另给行号单独取色。
                 color: 'text.secondary',
                 userSelect: 'none',
               }}
