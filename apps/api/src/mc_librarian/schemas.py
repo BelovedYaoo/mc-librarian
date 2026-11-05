@@ -30,6 +30,14 @@ VERSION_PATTERN: Final = r"^[A-Za-z0-9._+-]+$"
 # 的校验共用同一条；`config` 从这里 import，避免 schemas → config 的模块级循环）。
 JAVA_XMX_PATTERN: Final = r"^\d+[kKmMgG]$"
 
+# 问答三个上限的取值域。**请求模型（`AskRequest`）、设置写入（`AskSettingsUpdate`）与服务端
+# 配置（`config.Settings.ask_*`）共用这一组常量**：同样的边界写三遍就会漂——`max_steps` 曾经
+# 是 "设置能存 150、请求仍被 le=12 拒" 的不一致状态，排查时看不出问题在哪。
+ASK_MAX_STEPS: Final = 200
+ASK_MIN_ANSWER_TOKENS: Final = 500
+ASK_MAX_ANSWER_TOKENS: Final = 32_000
+ASK_MIN_CONTEXT_TOKENS: Final = 1_000
+
 # 检索/阅读端点的枚举（契约 `SymbolKind` 与 `SymbolDetail`/`Outline` 的 `kind`）。
 SymbolKind = Literal["any", "class", "method", "field"]
 SymbolDetailKind = Literal["class", "method", "field"]
@@ -450,9 +458,11 @@ class AskSettingsUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_steps: int | None = Field(default=None, ge=1, le=200)
-    max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
-    max_context_tokens: int | None = Field(default=None, ge=1000)
+    max_steps: int | None = Field(default=None, ge=1, le=ASK_MAX_STEPS)
+    max_answer_tokens: int | None = Field(
+        default=None, ge=ASK_MIN_ANSWER_TOKENS, le=ASK_MAX_ANSWER_TOKENS
+    )
+    max_context_tokens: int | None = Field(default=None, ge=ASK_MIN_CONTEXT_TOKENS)
     timeout_s: int | None = Field(default=None, ge=1, le=3600)
     enabled: bool | None = None
 
@@ -736,8 +746,10 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     version: str
     conversation_id: str | None = None
-    max_steps: int | None = Field(default=None, ge=1, le=12)
-    max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
+    max_steps: int | None = Field(default=None, ge=1, le=ASK_MAX_STEPS)
+    max_answer_tokens: int | None = Field(
+        default=None, ge=ASK_MIN_ANSWER_TOKENS, le=ASK_MAX_ANSWER_TOKENS
+    )
 
 
 class AskResponse(BaseModel):

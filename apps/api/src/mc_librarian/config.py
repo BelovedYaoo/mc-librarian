@@ -18,7 +18,13 @@ from typing import Final, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from mc_librarian.schemas import JAVA_XMX_PATTERN
+from mc_librarian.schemas import (
+    ASK_MAX_ANSWER_TOKENS,
+    ASK_MAX_STEPS,
+    ASK_MIN_ANSWER_TOKENS,
+    ASK_MIN_CONTEXT_TOKENS,
+    JAVA_XMX_PATTERN,
+)
 
 DATA_DIR_ENV: Final = "MC_LIBRARIAN_DATA_DIR"
 DATA_DIR_NAME: Final = "mc-librarian-data"
@@ -157,10 +163,12 @@ class Settings(BaseSettings):
     # `AskRequest.max_steps` / `max_answer_tokens` 省略时的服务端默认值（契约 `settings.ask.*`）。
     # 上限放到 200：`max_steps` 数的是**模型轮次**，一轮里可能有多个并发工具调用，
     # 复杂问题（跨类调用链、补丁对照）需要几十轮才收敛。
-    ask_max_steps: int = Field(default=6, ge=1, le=200)
-    ask_max_answer_tokens: int = Field(default=8000, ge=500, le=32000)
+    ask_max_steps: int = Field(default=6, ge=1, le=ASK_MAX_STEPS)
+    ask_max_answer_tokens: int = Field(
+        default=8000, ge=ASK_MIN_ANSWER_TOKENS, le=ASK_MAX_ANSWER_TOKENS
+    )
     # 工具结果累积的上下文预算（token）：超出时从最旧的工具结果开始丢弃（规格 §3）。
-    ask_max_context_tokens: int = Field(default=60000, ge=1000)
+    ask_max_context_tokens: int = Field(default=60000, ge=ASK_MIN_CONTEXT_TOKENS)
     # 同时在跑的问答数上限（`settings.security.max_concurrent_asks`）：超出返回 429。
     max_concurrent_asks: int = Field(default=4, ge=1, le=64)
 
