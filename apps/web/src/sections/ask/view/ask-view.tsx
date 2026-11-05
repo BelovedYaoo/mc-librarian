@@ -28,6 +28,14 @@ import { ConversationList } from './conversation-list';
 
 /** 左栏宽度（宽屏常驻）。 */
 const SIDEBAR_WIDTH = 260;
+/**
+ * 输入区三个控件（版本下拉 / 问题输入 / 提问按钮）的统一高度。
+ *
+ * 此前三者各用各的默认值：`size="small"` 的下拉 40px、带 label 的多行输入 56px、
+ * 默认按钮 36.5px——并排时底边参差。这里用一个常量钉死；输入框用 `minHeight` 而不是
+ * `height`，所以多行内容仍能把输入区撑高（聊天输入本来就该长）。
+ */
+const COMPOSER_CONTROL_HEIGHT = 44;
 /** 距底多少像素以内算「用户还在底部」：只有这时新内容才自动滚到底。 */
 const STICK_TO_BOTTOM_PX = 120;
 /** URL 里当前会话的参数名（`?c=<id>`），刷新与分享链接靠它回到同一个会话。 */
@@ -552,7 +560,11 @@ export function AskView() {
                   value={version}
                   onChange={(event) => setVersion(event.target.value)}
                   disabled={versions.length === 0}
-                  sx={{ width: { xs: '100%', sm: 210 }, flexShrink: 0 }}
+                  sx={{
+                    width: { xs: '100%', sm: 210 },
+                    flexShrink: 0,
+                    '& .MuiOutlinedInput-root': { height: COMPOSER_CONTROL_HEIGHT },
+                  }}
                 >
                   {versions.map((item) => (
                     <MenuItem key={item.version} value={item.version}>
@@ -572,14 +584,23 @@ export function AskView() {
                 maxRows={8}
                 inputRef={questionInputRef}
                 slotProps={{ htmlInput: { onKeyDown: handleQuestionKeyDown } }}
-                sx={{ flex: '1 1 240px', minWidth: 0 }}
+                size="small"
+                sx={{
+                  flex: '1 1 240px',
+                  minWidth: 0,
+                  '& .MuiOutlinedInput-root': {
+                    minHeight: COMPOSER_CONTROL_HEIGHT,
+                    alignItems: 'flex-start',
+                  },
+                  '& .MuiOutlinedInput-input': { py: '10px' },
+                }}
               />
 
               <Button
                 type="submit"
                 variant="contained"
                 disabled={busy || version === '' || question.trim() === ''}
-                sx={{ flexShrink: 0 }}
+                sx={{ flexShrink: 0, height: COMPOSER_CONTROL_HEIGHT }}
               >
                 {busy ? '回答中…' : '提问'}
               </Button>
