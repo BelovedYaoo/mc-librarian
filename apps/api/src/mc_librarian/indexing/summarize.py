@@ -60,7 +60,9 @@ SUMMARY_LINE_COUNT: Final = 3
 LINE_PREFIXES: Final[tuple[str, ...]] = ("职责", "机制", "关键成员")
 # 第 3 行（关键成员）的实质：至少一个英文标识符。驼峰、下划线、点号路径都算，
 # 长度 ≥ 3（首字符 + 两个以上）。这是「关键成员」唯一能可靠校验的特征。
-IDENTIFIER: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+# 不限制长度：真实成员名里有 `x` / `y`（Pos2i 的 record 分量）与 `id` / `ip` 这类短名，
+# 原来的 `{2,}` 会把它们判成「没列标识符」（1.21.1 实测 12 个类被误拒）。
+IDENTIFIER: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # 第 1 行（职责）的最短长度：比这短的多半是「Mob」这类复述类名的垃圾。定得宽松（4 字符）
 # ——「管理玩家背包」这种简洁但合格的第 1 行不该被格式闸门拒掉（拒好摘要的闸门比没有更糟）。
 SUMMARY_MIN_HEAD_CHARS: Final = 4
@@ -219,18 +221,30 @@ def segment(text: str) -> str:
 
 
 def fts_match_query(text: str) -> str:
-    """把 query 的分词结果拼成 FTS5 的 `MATCH` 串：每个词加引号，丢掉零 token 的碎片。
+    """把 query 的分词结果拼成 FTS5 的 `MATCH` 串。
 
-    jieba 会把标点单独切出来（「刷怪，掉落」→「刷怪」「，」「掉落」），而 `unicode61` 把纯标点
-    切成零个 token：这类碎片留在裸串里只会让整个 `MATCH` 报语法错（该路静默返回空）。
+    两条规则都是实测出来的（issue #23）：
+
+    1. **词之间用 `OR`，不是隐式 AND。** 自然语言提问会切出停用词（「刷怪上限是怎么算的」→
+       「刷怪」「上限」「是」「怎么」「算」「的」），AND 要求摘要**同时**含全部六个词——
+       任何真实摘要都做不到，整条路必然返回空。改成 `OR` 后由 bm25 按相关性排序：
+       同时含「刷怪」「上限」的摘要自然排在只含一个词的前面。
+    2. **丢掉单字中文。** 「是」「的」「算」这类单字几乎全是停用词或分词碎片，留在 OR 串里
+       只会稀释相关性。但**整句都是单字时不能全丢**（例如只问一个「刻」），那时保留原样。
+
+    另外：jieba 会把标点单独切出来（「刷怪，掉落」→「刷怪」「，」「掉落」），而 `unicode61` 把
+    纯标点切成零个 token：这类碎片留在裸串里只会让整个 `MATCH` 报语法错（该路静默返回空）。
     `"`、`*`、`-` 同理，加引号后按字面处理（串内的 `"` 按 FTS5 的写法翻倍转义）。
     所有词都是标点时返回空串，调用方据此跳过这一路，不去执行注定报错的 SQL。
     """
     tokens = [
         token.replace('"', '""') for token in jieba.cut(text) if FTS_WORD_CHAR.search(token)
     ]
+    # 单字中文当噪声丢掉；但一个都不剩时（整句都是单字）保留原样，否则等于把查询丢空。
+    substantial = [t for t in tokens if not (len(t) == 1 and CJK_CHAR.search(t))]
+    tokens = substantial or tokens
 
-    return " ".join(f'"{token}"' for token in tokens)
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def warmup_segmentation() -> str:

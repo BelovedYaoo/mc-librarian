@@ -61,6 +61,29 @@ RG_ARGS: Final[tuple[str, ...]] = (
 )
 
 
+# 索引库的 `classes.kind` 有五种（class/interface/enum/record/annotation），而契约 `Hit.type`
+# 只声明 class/method/field/file。类级命中一律归 `class`——与 `/v1/symbol` 的既有行为一致
+# （`find_symbols` 里是 `SELECT 'class' AS kind`）。
+_TYPE_BY_KIND: Final[dict[str, HitType]] = {
+    "class": "class",
+    "interface": "class",
+    "enum": "class",
+    "record": "class",
+    "annotation": "class",
+    "method": "method",
+    "field": "field",
+    "file": "file",
+}
+
+
+def hit_type(kind: str) -> HitType:
+    """索引库的 kind → 契约的 `Hit.type`。
+
+    未知值**不静默兜底**：那是索引与契约漂移的信号，让它抛出来比返回一个错类型好。
+    """
+    return _TYPE_BY_KIND[kind]
+
+
 @dataclass(frozen=True)
 class Candidate:
     """一路候选；`symbol` 为 None 表示没有任何符号覆盖这个位置（`type=file`）。"""
@@ -109,7 +132,7 @@ def symbol_candidates(
             channel="symbol",
             path=hit.path,
             symbol=hit.fqn,
-            kind=hit.kind,
+            kind=hit_type(hit.kind),
             start_line=hit.start_line,
             end_line=hit.end_line,
         )
@@ -228,7 +251,7 @@ def summary_candidates(
             channel="summary",
             path=row["path"],
             symbol=row["fqn"],
-            kind=row["kind"],
+            kind=hit_type(row["kind"]),
             start_line=int(row["start_line"]),
             end_line=int(row["end_line"]),
             summary=row["text_zh"],
@@ -257,7 +280,7 @@ def _location_candidate(
         channel=channel,
         path=path,
         symbol=symbol.fqn,
-        kind=symbol.kind,
+        kind=hit_type(symbol.kind),
         start_line=symbol.start_line,
         end_line=symbol.end_line,
     )
