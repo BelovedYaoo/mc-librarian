@@ -57,6 +57,7 @@ class Migration:
 # v7：告警去重（alert_events，issue #12）；v8：实例设置（settings，issue #11）；
 # v9：历史会话（conversations/messages，问答页左栏）；
 # v10：`messages.version`（历史引用的版本口径）。
+# v11：删 `usage.cost_usd`（用户决定只审计 token、不算金额）。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -255,7 +256,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         ),
     ),
     # v6：用量（issue #8）。每次 `/v1/ask` 写一行（含降级的情况），`#12` 只做聚合与告警。
-    # `cost_usd` 由单价算，未配单价时写 0（不编假单价，只记 token 不计成本）。
+    # 只记 token（`cost_usd` 已在 v11 删除）。
     Migration(
         version=6,
         statements=(
@@ -353,6 +354,13 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
         version=10,
         statements=("ALTER TABLE messages ADD COLUMN version TEXT",),
+    ),
+    # v11：删 `usage.cost_usd`（只审计 token，不算金额）。SQLite 3.35+ 的
+    # `ALTER TABLE ... DROP COLUMN` 够用：`cost_usd` 上没有索引或约束。
+    # **追加迁移**而不是回头改 v6：v6 已可能部署过；旧行里已有的金额一并丢弃。
+    Migration(
+        version=11,
+        statements=("ALTER TABLE usage DROP COLUMN cost_usd",),
     ),
 )
 

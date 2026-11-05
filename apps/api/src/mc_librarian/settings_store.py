@@ -34,11 +34,17 @@ KEY_LLM_BASE_URL: Final = "llm.base_url"
 KEY_LLM_MODEL: Final = "llm.model"
 KEY_LLM_API_KEY: Final = "llm.api_key"
 KEY_LLM_TEMPERATURE: Final = "llm.temperature"
+KEY_LLM_TIMEOUT_S: Final = "llm.timeout_s"
 KEY_ASK_MAX_STEPS: Final = "ask.max_steps"
 KEY_ASK_MAX_ANSWER_TOKENS: Final = "ask.max_answer_tokens"
+KEY_ASK_MAX_CONTEXT_TOKENS: Final = "ask.max_context_tokens"
 KEY_ASK_TIMEOUT_S: Final = "ask.timeout_s"
 KEY_ASK_ENABLED: Final = "ask.enabled"
+KEY_INDEX_ENABLED: Final = "index.enabled"
 KEY_INDEX_JAVA_XMX: Final = "index.java_xmx"
+KEY_INDEX_JAVA: Final = "index.java"
+KEY_INDEX_VINEFLOWER_JAR: Final = "index.vineflower_jar"
+KEY_INDEX_SPECIALSOURCE_JAR: Final = "index.specialsource_jar"
 KEY_INDEX_SUMMARY_BATCH_SIZE: Final = "index.summary_batch_size"
 KEY_INDEX_SUMMARY_CONCURRENCY: Final = "index.summary_concurrency"
 KEY_SECURITY_SESSION_TTL_HOURS: Final = "security.session_ttl_hours"
@@ -46,7 +52,6 @@ KEY_SECURITY_INVITE_TTL_HOURS: Final = "security.invite_ttl_hours"
 KEY_SECURITY_MAX_CONCURRENT_ASKS: Final = "security.max_concurrent_asks"
 KEY_ALERTS_WEBHOOK_URL: Final = "alerts.webhook_url"
 KEY_ALERTS_DAILY_TOKEN_THRESHOLD: Final = "alerts.daily_token_threshold"
-KEY_ALERTS_DAILY_COST_THRESHOLD_USD: Final = "alerts.daily_cost_threshold_usd"
 
 
 @dataclass(frozen=True)
@@ -59,22 +64,33 @@ class SettingSpec:
 
 
 # 按契约的块分组：键是请求体里的块名，值是「块内字段名 → spec」。
-# `index.enabled` 刻意不在表里：契约把它标成只读（部署级闸门，只能改环境变量）。
+#
+# 刻意**不**放进表里的环境变量（只能改环境变量，代码里也说明理由）：
+# - `data_dir` / `host` / `port` / `env`：启动参数——改了要换地方监听或换数据根，
+#   运行时改不了已打开的库与已绑定的端口；
+# - `cookie_secure`：安全护栏，放进 DB 等于护栏可被关掉；
+# - `secret`：解密 `settings` 表的主密钥，放进它自己加密的表里是循环依赖。
 BLOCK_SPECS: Final[dict[str, dict[str, SettingSpec]]] = {
     "llm": {
         "base_url": SettingSpec(KEY_LLM_BASE_URL, "llm_base_url"),
         "model": SettingSpec(KEY_LLM_MODEL, "llm_model"),
         "api_key": SettingSpec(KEY_LLM_API_KEY, "llm_api_key", encrypted=True),
         "temperature": SettingSpec(KEY_LLM_TEMPERATURE, "llm_temperature"),
+        "timeout_s": SettingSpec(KEY_LLM_TIMEOUT_S, "llm_timeout_s"),
     },
     "ask": {
         "max_steps": SettingSpec(KEY_ASK_MAX_STEPS, "ask_max_steps"),
         "max_answer_tokens": SettingSpec(KEY_ASK_MAX_ANSWER_TOKENS, "ask_max_answer_tokens"),
+        "max_context_tokens": SettingSpec(KEY_ASK_MAX_CONTEXT_TOKENS, "ask_max_context_tokens"),
         "timeout_s": SettingSpec(KEY_ASK_TIMEOUT_S, "ask_timeout_s"),
         "enabled": SettingSpec(KEY_ASK_ENABLED, "ask_enabled"),
     },
     "index": {
+        "enabled": SettingSpec(KEY_INDEX_ENABLED, "index_enabled"),
         "java_xmx": SettingSpec(KEY_INDEX_JAVA_XMX, "decompile_memory"),
+        "java": SettingSpec(KEY_INDEX_JAVA, "java"),
+        "vineflower_jar": SettingSpec(KEY_INDEX_VINEFLOWER_JAR, "vineflower_jar"),
+        "specialsource_jar": SettingSpec(KEY_INDEX_SPECIALSOURCE_JAR, "specialsource_jar"),
         "summary_batch_size": SettingSpec(
             KEY_INDEX_SUMMARY_BATCH_SIZE, "summary_batch_size"
         ),
@@ -95,9 +111,6 @@ BLOCK_SPECS: Final[dict[str, dict[str, SettingSpec]]] = {
         "webhook_url": SettingSpec(KEY_ALERTS_WEBHOOK_URL, "alerts_webhook_url", encrypted=True),
         "daily_token_threshold": SettingSpec(
             KEY_ALERTS_DAILY_TOKEN_THRESHOLD, "alerts_daily_token_threshold"
-        ),
-        "daily_cost_threshold_usd": SettingSpec(
-            KEY_ALERTS_DAILY_COST_THRESHOLD_USD, "alerts_daily_cost_threshold_usd"
         ),
     },
 }

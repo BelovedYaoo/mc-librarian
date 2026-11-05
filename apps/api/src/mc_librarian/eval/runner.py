@@ -24,7 +24,6 @@ from mc_librarian.config import (
     LlmConfigError,
     Settings,
     resolve_llm_config,
-    resolve_llm_pricing,
 )
 from mc_librarian.db import utc_now
 from mc_librarian.eval.metrics import (
@@ -157,7 +156,6 @@ async def _measure_steps(
     """逐个问题跑 `/v1/ask` 的循环，数每题 `AskStep` 的条数。"""
     client = OpenAiCompatChatClient(config)
     toolbox = ToolBox(index, settings, version)
-    pricing = resolve_llm_pricing(settings)
     counts: list[int] = []
 
     for question in questions:
@@ -175,7 +173,6 @@ async def _measure_steps(
             max_context_tokens=settings.ask_max_context_tokens,
             timeout_s=float(settings.ask_timeout_s),
             llm_timeout_s=settings.llm_timeout_s,
-            pricing=pricing,
         )
 
         async for _event in run.stream():

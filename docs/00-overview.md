@@ -105,7 +105,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；省略 `options` 的任务从官方 jar 跑完整五段，给了 `source_dir` 则从 `parse` 起） |
 | `job_logs` | id, job_id, ts, level, message |
 | `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行；注册时数据根里没有 `src/<version>/` 则 `source_size_bytes` 保留原值，首次注册写 0） |
-| `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version, created_at |
+| `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, latency_ms, version, created_at（只审计 token，不含金额） |
 | `alert_events` | id, day, metric, value, threshold, fired_at；`UNIQUE(day, metric)` 就是「同日同指标只告警一次」的实现方式（`day` 是本地日期 UTC+8） |
 | `audit` | id, actor_id, action, target, detail_json, ip, created_at |
 | `settings` | key, value_json, encrypted, updated_at, updated_by（只存**被显式改过**的键，删一行 = 回退环境配置；`encrypted=1` 的行 `value_json` 是 AES-GCM 密文，主密钥 `MC_LIBRARIAN_SECRET` 缺失时服务启动失败） |

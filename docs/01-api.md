@@ -89,7 +89,7 @@ event: step      {"tool":"search","ok":true,"hits":3}
 event: step      {"tool":"read","args":{"path":"...","start":120,"end":260}}
 event: delta     {"text":"1.18 之后…"}
 event: citation  {"path":"net/minecraft/world/entity/MobCategory.java","lines":[12,88],"symbol":"..."}
-event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_usd":0.0021,"latency_ms":9300},"reason":"stop"}
+event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"latency_ms":9300},"reason":"stop"}
 ```
 
 - **工具集固定 5 个**（`search` / `symbol` / `references` / `outline` / `read`），参数与上面四个检索端点同义；
@@ -109,8 +109,8 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 - **并发上限是进程内的**：`AskLimiter` 只是在单个进程里数数，多 worker 部署（`uvicorn --workers N`）时
   实际能同时在跑的上限是 `max_concurrent_asks × worker 数`。当前是单进程部署（`JobRunner` 也在进程内），
   所以可接受；要改成多进程前得把这个计数挪到共享存储（或按 worker 数下调配置）。
-- 每次请求写**一行** `usage`（含降级的情况）：`cost_usd` 由 `MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` /
-  `MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M` 算，**未配单价时记 0**（只记 token、不计成本）。
+- 每次请求写**一行** `usage`（含降级的情况）：**只审计 token**，不算金额
+  （`usage.cost_usd` 已在迁移 v11 删除）。
 
 ## 6. 账号体系
 
@@ -145,14 +145,16 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | `GET /v1/admin/jobs/{id}/logs` | 分页日志；用 `?after=<id>` 增量拉取，前端据此轮询 |
 | `POST /v1/admin/jobs/{id}/cancel` | 只对 queued/running 有效，running 在当前阶段边界停止 |
 | `POST /v1/admin/jobs/{id}/retry` | 只对 failed/canceled 有效：保留 checkpoint 重新排队，从下一未完成阶段续跑 |
-| `GET/PUT /v1/admin/settings` | 模型、问答步数与输出上限、索引参数、会话时长、告警阈值；密钥 writeOnly。值 = `settings` 表里的覆盖 + `MC_LIBRARIAN_*` 环境配置兜底；`PUT` 是部分更新，保存后立即生效；`index.enabled` 只读 |
+| `GET/PUT /v1/admin/settings` | 模型（含超时）、问答步数 / 输出上限 / 上下文预算、索引参数与工具链路径、会话时长、告警阈值；密钥 writeOnly。值 = `settings` 表里的覆盖 + `MC_LIBRARIAN_*` 环境配置兜底；`PUT` 是部分更新，保存后立即生效 |
 | `GET /v1/admin/usage` | 按 `day`/`user`/`version`/`model` 聚合，`totals` 与 `buckets` 同源；区间内无数据返回零值 |
 | `GET /v1/admin/audit` | 审计日志 |
 
 **设置是「配置派生 + 数据库覆盖」**：`settings` 表（`key` / `value_json` / `encrypted` / `updated_at` / `updated_by`）
 只存**被显式改过**的键，没覆盖的键退回 `MC_LIBRARIAN_*` 环境配置，删一行就等于回退——因此不需要空值占位。
 读取**每次实时查库**，所以保存后立即生效（不需要重启）；`PUT` 只处理请求里给出的字段，未给的保持原值，
-值给 `null`（密钥给空字符串）= 清除该覆盖；`index.enabled` 是部署级闸门（只读，传了 422）。
+值给 `null`（密钥给空字符串）= 清除该覆盖。`data_dir` / `host` / `port` / `env` / `cookie_secure` / `secret`
+**不进设置表**（只能改环境变量）：前四个是启动参数（改了要换地方监听或换数据根），`cookie_secure`
+是安全护栏（放 DB 等于护栏可被关掉），`secret` 是解密 `settings` 表的主密钥（放进它自己加密的表里是循环依赖）。
 `llm.api_key` 与 `alerts.webhook_url` 只写不读：请求里可以传，响应里只有 `api_key_set` / `webhook_url_set`，
 库里存的是 **AES-GCM 密文**，主密钥来自 `MC_LIBRARIAN_SECRET`——缺失或短于 16 字符时**服务启动即失败**
 （自动生成并落盘会让重启后旧密文解不开）。每次 `PUT` 写一条 `settings.updated` 审计，
@@ -174,15 +176,15 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 
 **`download`/`decompile` 的完成状态以 `<data_dir>/cache/<version>/fetch.json` 为准**：`mc-librarian fetch` 与 `JobRunner` 写的是同一份（`JobRunner` 每跑完一段就并进去），因此两个入口共用同一个「源码树已就绪」的事实来源——该文件记着 `decompile` 已完成且 `<data_dir>/src/<version>/` 还在时，新任务不再重复反编译（`options.force=true` / `mc-librarian index --force` 一律重建；标记为真但源码树缺失或为空也重跑）。`jobs.checkpoint` 只负责**任务内部**的阶段续跑，两者不是一回事。
 
-**索引构建闸门：** `MC_LIBRARIAN_INDEX_ENABLED=false`（默认 `true`）时本实例不构建索引，`POST /v1/admin/jobs` 与 `POST /v1/admin/jobs/{jobId}/retry` 一律回 `403`（`detail` 指向「本地生成 + `POST /v1/admin/versions` 注册」）；runner 启动后若闸门关闭，会把遗留的 `queued` 任务直接置为 `failed` 并写清原因（不静默丢弃）；`GET /v1/admin/settings` 的 `index.enabled` 就是这个开关。生产节点内存不够跑反编译，靠它把索引留在本地工作站。
+**索引构建闸门：** `MC_LIBRARIAN_INDEX_ENABLED=false`（默认 `true`）时本实例不构建索引，`POST /v1/admin/jobs` 与 `POST /v1/admin/jobs/{jobId}/retry` 一律回 `403`（`detail` 指向「本地生成 + `POST /v1/admin/versions` 注册」）；runner 启动后若闸门关闭，会把遗留的 `queued` 任务直接置为 `failed` 并写清原因（不静默丢弃）；`GET /v1/admin/settings` 的 `index.enabled` 就是这个开关，且现在**可从设置页写**（`PUT`）。生产节点内存不够跑反编译，靠它把索引留在本地工作站。
 
 **版本统计的权威来源：** `POST /v1/admin/versions` 注册的是管理员声明的权威索引；任务产出只在版本尚未注册时插入一行，**已注册版本的任何字段都不因任务而改变**。若管理员想用任务产出替换已注册版本，重新注册即可。
 
 **版本写入分两条路径**：管理员 `POST /v1/admin/versions` 写全量字段（含 `db_path`/`has_summaries`）；任务产出仅在版本尚未注册时插入一行，并把产出的 `db_path`、`obfuscated` 与 `source_size_bytes`（`parse` 阶段写入）一并登记，`has_summaries` 按任务是否跑过 `summarize`（#7）写；已注册版本一个字段都不动。`obfuscated` 的取值：`options.obfuscated` 显式声明优先；未声明时跑过 `download` 用 checkpoint 里的真值，parse-only 缺省按「已 remap」（`true`）记录。`source_size_bytes` 的语义统一为**源码树字节数**（`.java` 与 `data/` 下 `.json` 的总字节数）：注册时若 `<data_dir>/src/<version>/` 不存在则**保留原值**（首次注册写 0），不拿索引 sqlite 的大小充数。
 
-**用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / cost_usd / latency_ms / version`；超阈值只推 Webhook 告警，是否暂停由管理员手动决定（D23）。
+**用量只记录、不设硬预算**：`usage` 表按请求记 `user / model / prompt_tokens / completion_tokens / latency_ms / version`（只审计 token，不算金额）；超阈值只推 Webhook 告警，是否暂停由管理员手动决定（D23）。
 
-**聚合与告警（#12）**：`GET /v1/admin/usage` 的 `totals` 与 `buckets` 由**同一个区间条件**在服务端算出来（用量页直接用这些数字，前端不再累加），分天口径是**本地日期（UTC+8）**，无数据区间返回零值而不是报错；`cost_configured=false`（未配单价）时 `cost_usd` 恒为 0，页面必须标注「未配置单价，仅统计 token」。告警阈值从环境配置 `MC_LIBRARIAN_ALERTS_WEBHOOK_URL` / `MC_LIBRARIAN_ALERTS_DAILY_TOKEN_THRESHOLD` / `MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHOLD_USD` 与 `settings` 表覆盖读（库里有覆盖时优先，见 §7），读取收敛在 `resolve_alerts_config(settings, conn)`，阈值下限是 0，写 0（或未配置，归一成 0）表示该指标不告警。检查在 usage 写入之后与 `GET /v1/admin/usage` 两处触发，都在**后台线程**里跑（不阻断请求）；Webhook 超时 5 秒，失败只 warn 且**不重试**（避免告警风暴），超阈值不做任何限制。同日同指标只告警一次靠 `alert_events` 的 `UNIQUE(day, metric)` + `INSERT ... ON CONFLICT DO NOTHING` + `rowcount` 判定。
+**聚合与告警（#12）**：`GET /v1/admin/usage` 的 `totals` 与 `buckets` 由**同一个区间条件**在服务端算出来（用量页直接用这些数字，前端不再累加），分天口径是**本地日期（UTC+8）**，无数据区间返回零值而不是报错；只统计 token，不含金额。告警阈值从环境配置 `MC_LIBRARIAN_ALERTS_WEBHOOK_URL` / `MC_LIBRARIAN_ALERTS_DAILY_TOKEN_THRESHOLD` 与 `settings` 表覆盖读（库里有覆盖时优先，见 §7），读取收敛在 `resolve_alerts_config(settings, conn)`，阈值下限是 0，写 0（或未配置，归一成 0）表示该指标不告警。检查在 usage 写入之后与 `GET /v1/admin/usage` 两处触发，都在**后台线程**里跑（不阻断请求）；Webhook 超时 5 秒，失败只 warn 且**不重试**（避免告警风暴），超阈值不做任何限制。同日同指标只告警一次靠 `alert_events` 的 `UNIQUE(day, metric)` + `INSERT ... ON CONFLICT DO NOTHING` + `rowcount` 判定。
 
 ## 8. 三种接入方式
 
@@ -225,3 +227,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"cost_u
 | 2026-11-04 | 0.2.0 | issue #11：迁移 v7 落地 `settings` 表（`key`/`value_json`/`encrypted`/`updated_at`/`updated_by`，只存被显式改过的键）；`GET/PUT /v1/admin/settings` 改为「配置派生 + 数据库覆盖」——`PUT` 是**部分更新**（只改请求里给出的字段，`null`/空串 = 清除覆盖），读取每次实时查库，保存后立即生效（`AskLimiter` 改为每次取当前有效并发上限，`AskRequest.max_steps`/`max_answer_tokens` 省略时用服务端设置，`JobRunner` 每个任务开始时读一次有效配置）；`llm.api_key` 与 `alerts.webhook_url` 只写不读（响应只回 `api_key_set`/`webhook_url_set`），库里存 AES-GCM 密文，主密钥 `MC_LIBRARIAN_SECRET` 缺失或短于 16 字符时**服务启动失败**（不自动生成）；每次 `PUT` 写一条 `settings.updated` 审计，只记改动的键不记值；新增 `resolve_alerts_config()`（`#12` 调用，数据库覆盖 + 环境配置兜底，未配置的阈值保持 `None`）；契约新增 `SettingsUpdate` 等六个更新 schema 并把 `Settings` 拆成五个块 schema，前端 `/settings` 扩展为五组表单（密钥显示「已设置/未设置」+ 重新设置/清除）；契约订正 `llm.temperature` 的默认值为实现的真实值 0（原先写 0.2，而两个客户端一直硬编码 0）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | 复审修复（#11 / #12 / #16 合并后）：`resolve_alerts_config()` 只留一份——签名取 `#11` 的 `(settings, conn=None)`（带 `settings` 表覆盖），返回语义取 `#12` 的（阈值非空 `int` / `float`，≤ 0 即该指标不告警），未配置的 `None` 归一成 0；删掉 `#12` 那份重复的 `AlertsConfig` 与只从环境读的 `alert_*` / `MC_LIBRARIAN_ALERT_*` 字段（环境变量名统一为 `MC_LIBRARIAN_ALERTS_*`，与契约块 `Settings.alerts` 对齐），告警阈值只剩 `alerts.*` 一个来源，`alerts.check` 改为带连接解析（`resolve_alerts_config(settings, conn)`），设置页改的阈值从此真的作用于告警；`eval` 跑问答时不再把 `AskRequest.max_steps` / `max_answer_tokens`（`int \| None`，`#11` 去掉了契约里的 default）直接当整数用，改为服务端设置 `settings.ask.max_steps` / `max_answer_tokens`，修掉 `range(None)` 崩溃；`bun run dev` / `bun run smoke` 在未设 `MC_LIBRARIAN_SECRET` 时注入固定的开发默认值并在日志里打印提示（生产仍必须显式设置，启动护栏不变）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | 复审修复（#11 / #12 / #16 关闭前）：`scripts/lib/secret.mjs` 在 `MC_LIBRARIAN_ENV=production` 时不再注入开发默认密钥，缺失密钥的启动护栏照常生效（拿 dev / smoke 脚本对生产实例跑不再有一条「能跑但不安全」的路）；启动时检查旧环境变量名 `MC_LIBRARIAN_ALERT_*`，存在就 warn 一行（写清旧名、新名与「旧名已失效」），不再让按旧名配置的部署静默失去告警；告警阈值下限从 1 / > 0 放宽为 0（与文档「阈值 0 = 关闭该指标告警」一致，环境变量写 0 不再启动失败，负数仍 422），契约与前端类型同步；`mc-librarian eval` 叠上 `settings` 表的覆盖（复用 `settings_store.effective_settings`，读不到时退回环境配置并 warn），设置页改的问答步数同样作用于 CLI 评测，`eval.runner` 里「与 `/v1/ask` 同值」的注释自此成立；补一条「`PUT /v1/admin/settings` 写阈值 → `alerts.check` 触发」的端到端用例。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-05 | 0.2.0 | 三项改动：**(A)** 彻底移除金额统计——迁移 v11 删 `usage.cost_usd`（SQLite `DROP COLUMN`），`usage` 只审计 token，删掉 `estimate_cost_usd` / `resolve_llm_pricing` / `pricing_configured` / `LlmPricing` 与 `MC_LIBRARIAN_LLM_*_PRICE_PER_M`、`MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHOLD_USD`、`Settings.llm` 单价字段、`Settings.alerts.daily_cost_threshold_usd`、`Usage.cost_usd` / `UsageReport.cost_configured` / `UsageReport.buckets[].cost_usd` 与 `METRIC_DAILY_COST_USD`，用量页与问答页不再显示成本。**(B)** 新增 `GET /v1/minecraft-versions`（admin）：从 Mojang 版本清单拉取，只返回 `type == "release"`、按发布时间倒序、进程内缓存 1 小时（网络失败退回缓存，否则 502）；版本页「注册索引」的手打版本号改成可搜索下拉框，已注册版本带「已注册」标记，对话框展示数据根绝对路径（`Settings.index.data_dir`，只读）说明文件往哪放；不做上传端点。**(C)** 把 6 项仅环境变量的配置提取到设置页：`llm.timeout_s`、`ask.max_context_tokens`、`index.enabled`（从只读改为可写）、`index.java`、`index.vineflower_jar`、`index.specialsource_jar`（路径类契约用 `string`，空 = 回退环境变量）；`data_dir` / `env` / `host` / `port` / `secret` / `cookie_secure` 保持只能改环境变量（启动参数、安全护栏、主密钥循环依赖）。属 v0.2 设计内的增量补齐，`info.version` 不变 |

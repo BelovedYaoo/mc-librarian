@@ -84,6 +84,8 @@ __all__ = [
     "LogLevel",
     "LoginRequest",
     "MemberKind",
+    "MinecraftVersion",
+    "MinecraftVersionList",
     "Outline",
     "OutlineClass",
     "OutlineMethod",
@@ -309,6 +311,19 @@ class VersionList(BaseModel):
     versions: list[VersionInfo]
 
 
+class MinecraftVersion(BaseModel):
+    """`GET /v1/minecraft-versions` 的一项：Mojang 清单里的一个 release 版本。"""
+
+    id: str
+    released_at: datetime
+
+
+class MinecraftVersionList(BaseModel):
+    """`GET /v1/minecraft-versions` 的 200：release 版本，按发布时间倒序。"""
+
+    versions: list[MinecraftVersion]
+
+
 class RegisterVersionRequest(BaseModel):
     version: str = Field(min_length=1, max_length=64, pattern=VERSION_PATTERN)
     obfuscated: bool = True
@@ -320,6 +335,7 @@ class LlmSettings(BaseModel):
     base_url: str | None = None
     model: str | None = None
     temperature: float
+    timeout_s: float
     api_key_set: bool
 
 
@@ -328,15 +344,24 @@ class AskSettings(BaseModel):
 
     max_steps: int
     max_answer_tokens: int
+    max_context_tokens: int
     timeout_s: int
     enabled: bool
 
 
 class IndexSettings(BaseModel):
-    """契约 `Settings.index`。`enabled` 是部署级闸门（只读），`java_xmx` 是反编译的 `-Xmx`。"""
+    """契约 `Settings.index`。`enabled` 是索引构建闸门，`java_xmx` 是反编译的 `-Xmx`。
+
+    `java` / `vineflower_jar` / `specialsource_jar` 是工具链路径（空字符串 = 回退环境变量）；
+    `data_dir` 是数据根绝对路径（只读）：注册索引时把 `db/<版本>.sqlite` 放进这里。
+    """
 
     enabled: bool
     java_xmx: str
+    java: str
+    vineflower_jar: str = ""
+    specialsource_jar: str = ""
+    data_dir: str
     summary_batch_size: int
     summary_concurrency: int
 
@@ -354,7 +379,6 @@ class AlertsSettings(BaseModel):
 
     webhook_url_set: bool
     daily_token_threshold: int | None = None
-    daily_cost_threshold_usd: float | None = None
 
 
 class Settings(BaseModel):
@@ -390,6 +414,7 @@ class LlmSettingsUpdate(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     api_key: str | None = Field(default=None, max_length=500)
     temperature: float | None = Field(default=None, ge=0, le=2)
+    timeout_s: float | None = Field(default=None, gt=0)
 
 
 class AskSettingsUpdate(BaseModel):
@@ -399,16 +424,25 @@ class AskSettingsUpdate(BaseModel):
 
     max_steps: int | None = Field(default=None, ge=1, le=12)
     max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
+    max_context_tokens: int | None = Field(default=None, ge=1000)
     timeout_s: int | None = Field(default=None, ge=1, le=3600)
     enabled: bool | None = None
 
 
 class IndexSettingsUpdate(BaseModel):
-    """契约 `IndexSettingsUpdate`。`enabled` 只读，不在可改项里。"""
+    """契约 `IndexSettingsUpdate`。
+
+    `enabled` 是索引构建闸门（可写：节点上关掉后不再构建索引）；`java` / 两个 jar 是工具链
+    路径，给空字符串 = 清除覆盖、回退环境变量。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool | None = None
     java_xmx: str | None = Field(default=None, pattern=JAVA_XMX_PATTERN)
+    java: str | None = Field(default=None, max_length=1000)
+    vineflower_jar: str | None = Field(default=None, max_length=1000)
+    specialsource_jar: str | None = Field(default=None, max_length=1000)
     summary_batch_size: int | None = Field(default=None, ge=1, le=500)
     summary_concurrency: int | None = Field(default=None, ge=1, le=64)
 
@@ -433,9 +467,6 @@ class AlertsSettingsUpdate(BaseModel):
 
     webhook_url: str | None = Field(default=None, max_length=500)
     daily_token_threshold: int | None = Field(
-        default=None, ge=0, description="写 0 = 关闭该指标告警"
-    )
-    daily_cost_threshold_usd: float | None = Field(
         default=None, ge=0, description="写 0 = 关闭该指标告警"
     )
 
@@ -611,7 +642,6 @@ class Usage(BaseModel):
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    cost_usd: float = 0
     latency_ms: int = 0
 
 
@@ -622,7 +652,6 @@ class UsageBucket(BaseModel):
     requests: int
     prompt_tokens: int
     completion_tokens: int
-    cost_usd: float
 
 
 class UsageReport(BaseModel):
@@ -630,7 +659,7 @@ class UsageReport(BaseModel):
 
     `totals` 是区间合计、`buckets` 是分组明细，两者同源（用量页直接用这里的数字，
     不再在前端算一遍）；`requests` 是区间请求数（顶部卡片的第四个数字）。
-    `cost_configured` 为 false 时 `cost_usd` 恒为 0（未配单价），页面必须标注成本口径。
+    只审计 token，不含金额（`usage.cost_usd` 已在迁移 v11 删除）。
 
     `from` 是 Python 关键字，字段写成 `from_` + `serialization_alias`：对外的 JSON 与
     OpenAPI 属性名仍是 `from`，构造时用 `from_=`（mypy 也认这个签名）。
@@ -639,7 +668,6 @@ class UsageReport(BaseModel):
     from_: date = Field(serialization_alias="from")
     to: date
     requests: int
-    cost_configured: bool
     totals: Usage
     buckets: list[UsageBucket]
 

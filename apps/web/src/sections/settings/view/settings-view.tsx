@@ -26,18 +26,23 @@ type FormState = {
   llmBaseUrl: string;
   llmModel: string;
   llmTemperature: string;
+  llmTimeoutS: string;
   askMaxSteps: string;
   askMaxAnswerTokens: string;
+  askMaxContextTokens: string;
   askTimeoutS: string;
   askEnabled: boolean;
+  indexEnabled: boolean;
   indexJavaXmx: string;
+  indexJava: string;
+  indexVineflowerJar: string;
+  indexSpecialsourceJar: string;
   indexSummaryBatchSize: string;
   indexSummaryConcurrency: string;
   sessionTtlHours: string;
   inviteTtlHours: string;
   maxConcurrentAsks: string;
   dailyTokenThreshold: string;
-  dailyCostThresholdUsd: string;
 };
 
 type BlockName = 'llm' | 'ask' | 'index' | 'security' | 'alerts';
@@ -58,7 +63,8 @@ type FieldSpec = {
  * 字段表：`name` 是表单状态，`block.field` 是契约路径。
  *
  * 保存时按这张表算出「改动过的字段」再提交——不整份回写，因为密钥永远拿不到原值。
- * `index.enabled` 不在这里：它是部署级闸门（契约标只读），只展示不可改。
+ * `kind: 'bool'` 的字段渲染成开关（`index.enabled` / `ask.enabled`）。
+ * `index.data_dir` 只读，不在这张表里。
  */
 const FIELDS: FieldSpec[] = [
   {
@@ -86,6 +92,21 @@ const FIELDS: FieldSpec[] = [
     helper: '0 = 确定性输出（摘要与问答都要求可复现）；留空 = 回退环境变量',
   },
   {
+    name: 'llmTimeoutS',
+    block: 'llm',
+    field: 'timeout_s',
+    kind: 'float',
+    label: '单次请求超时（秒）',
+    helper: '单次 LLM 请求的超时；留空 = 回退环境变量',
+  },
+  {
+    name: 'askEnabled',
+    block: 'ask',
+    field: 'enabled',
+    kind: 'bool',
+    label: '启用问答（/v1/ask）',
+  },
+  {
     name: 'askMaxSteps',
     block: 'ask',
     field: 'max_steps',
@@ -102,6 +123,14 @@ const FIELDS: FieldSpec[] = [
     helper: '问答请求省略 max_answer_tokens 时用它（500–32000）',
   },
   {
+    name: 'askMaxContextTokens',
+    block: 'ask',
+    field: 'max_context_tokens',
+    kind: 'int',
+    label: '上下文预算（token）',
+    helper: '工具结果累积的上限，超出时从最旧的开始丢弃（≥ 1000）',
+  },
+  {
     name: 'askTimeoutS',
     block: 'ask',
     field: 'timeout_s',
@@ -110,12 +139,43 @@ const FIELDS: FieldSpec[] = [
     helper: '超时走降级回答，不返回 500',
   },
   {
+    name: 'indexEnabled',
+    block: 'index',
+    field: 'enabled',
+    kind: 'bool',
+    label: '索引构建闸门（关掉后本实例不再构建索引）',
+  },
+  {
     name: 'indexJavaXmx',
     block: 'index',
     field: 'java_xmx',
     kind: 'text',
     label: '反编译内存（-Xmx）',
     helper: '形如 4G / 512M；只影响本实例跑的 download/decompile',
+  },
+  {
+    name: 'indexJava',
+    block: 'index',
+    field: 'java',
+    kind: 'text',
+    label: 'java 可执行路径',
+    helper: '留空 = 回退环境变量（默认 java）',
+  },
+  {
+    name: 'indexVineflowerJar',
+    block: 'index',
+    field: 'vineflower_jar',
+    kind: 'text',
+    label: 'Vineflower jar 路径',
+    helper: '反编译工具；留空 = 回退环境变量',
+  },
+  {
+    name: 'indexSpecialsourceJar',
+    block: 'index',
+    field: 'specialsource_jar',
+    kind: 'text',
+    label: 'SpecialSource jar 路径',
+    helper: 'remap 工具；留空 = 回退环境变量',
   },
   {
     name: 'indexSummaryBatchSize',
@@ -164,14 +224,6 @@ const FIELDS: FieldSpec[] = [
     label: '每日 token 阈值',
     helper: '留空 = 不告警（不是 0）',
   },
-  {
-    name: 'dailyCostThresholdUsd',
-    block: 'alerts',
-    field: 'daily_cost_threshold_usd',
-    kind: 'float',
-    label: '每日成本阈值（美元）',
-    helper: '留空 = 不告警',
-  },
 ];
 
 /** 密钥字段：只写不读，表单里永远从空开始。 */
@@ -206,7 +258,7 @@ const SECRETS: {
 const GROUPS: { block: BlockName; title: string; hint?: string }[] = [
   { block: 'llm', title: '模型', hint: '摘要生成与问答共用同一个 OpenAI 兼容端点。' },
   { block: 'ask', title: '问答', hint: '「启用」关掉后 /v1/ask 一律 429，检索不受影响。' },
-  { block: 'index', title: '索引', hint: '索引参数在下一个任务开始时生效。' },
+  { block: 'index', title: '索引', hint: '索引参数在下一个任务开始时生效；留空 = 回退环境变量。' },
   { block: 'security', title: '会话与并发' },
   { block: 'alerts', title: '用量告警' },
 ];
@@ -219,18 +271,23 @@ function toForm(settings: AdminSettings): FormState {
     llmBaseUrl: text(settings.llm?.base_url),
     llmModel: text(settings.llm?.model),
     llmTemperature: text(settings.llm?.temperature),
+    llmTimeoutS: text(settings.llm?.timeout_s),
     askMaxSteps: text(settings.ask?.max_steps),
     askMaxAnswerTokens: text(settings.ask?.max_answer_tokens),
+    askMaxContextTokens: text(settings.ask?.max_context_tokens),
     askTimeoutS: text(settings.ask?.timeout_s),
     askEnabled: settings.ask?.enabled === true,
+    indexEnabled: settings.index?.enabled === true,
     indexJavaXmx: text(settings.index?.java_xmx),
+    indexJava: text(settings.index?.java),
+    indexVineflowerJar: text(settings.index?.vineflower_jar),
+    indexSpecialsourceJar: text(settings.index?.specialsource_jar),
     indexSummaryBatchSize: text(settings.index?.summary_batch_size),
     indexSummaryConcurrency: text(settings.index?.summary_concurrency),
     sessionTtlHours: text(settings.security?.session_ttl_hours),
     inviteTtlHours: text(settings.security?.invite_ttl_hours),
     maxConcurrentAsks: text(settings.security?.max_concurrent_asks),
     dailyTokenThreshold: text(settings.alerts?.daily_token_threshold),
-    dailyCostThresholdUsd: text(settings.alerts?.daily_cost_threshold_usd),
   };
 }
 
@@ -340,7 +397,7 @@ export function SettingsView() {
     FIELDS.some((spec) => form[spec.name] !== snapshot[spec.name]) ||
     (Object.keys(secretInput) as SecretName[]).some((name) => secretInput[name].trim() !== '');
 
-  const set = <K extends keyof FormState>(name: K, value: FormState[K]) => {
+  const set = (name: keyof FormState, value: string | boolean) => {
     setForm((current) => (current ? { ...current, [name]: value } : current));
     setSaved(false);
   };
@@ -400,41 +457,31 @@ export function SettingsView() {
             <Divider sx={{ my: 2 }} />
 
             <Stack spacing={2}>
-              {group.block === 'ask' && (
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={form.askEnabled}
-                      onChange={(event) => set('askEnabled', event.target.checked)}
-                    />
-                  }
-                  label="启用问答（/v1/ask）"
-                />
-              )}
-
-              {group.block === 'index' && (
-                <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                  <Typography variant="body2">索引构建闸门（部署级，只读）</Typography>
-                  <Chip
-                    size="small"
-                    color={settings.index?.enabled ? 'success' : 'default'}
-                    label={settings.index?.enabled ? '已启用' : '已关闭'}
+              {FIELDS.filter((spec) => spec.block === group.block).map((spec) =>
+                spec.kind === 'bool' ? (
+                  <FormControlLabel
+                    key={spec.name}
+                    control={
+                      <Switch
+                        checked={form[spec.name] === true}
+                        onChange={(event) => set(spec.name, event.target.checked)}
+                      />
+                    }
+                    label={spec.label}
                   />
-                </Stack>
+                ) : (
+                  <TextField
+                    key={spec.name}
+                    label={spec.label}
+                    helperText={spec.helper}
+                    value={String(form[spec.name])}
+                    onChange={(event) => set(spec.name, event.target.value)}
+                    type={spec.kind === 'text' ? 'text' : 'number'}
+                    size="small"
+                    fullWidth
+                  />
+                )
               )}
-
-              {FIELDS.filter((spec) => spec.block === group.block).map((spec) => (
-                <TextField
-                  key={spec.name}
-                  label={spec.label}
-                  helperText={spec.helper}
-                  value={String(form[spec.name])}
-                  onChange={(event) => set(spec.name, event.target.value)}
-                  type={spec.kind === 'text' ? 'text' : 'number'}
-                  size="small"
-                  fullWidth
-                />
-              ))}
 
               {SECRETS.filter((secret) => secret.block === group.block).map((secret) => (
                 <SecretField

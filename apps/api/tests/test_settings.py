@@ -153,6 +153,7 @@ def test_get_returns_derived_values_without_overrides(
     assert body["ask"] == {
         "max_steps": settings.ask_max_steps,
         "max_answer_tokens": settings.ask_max_answer_tokens,
+        "max_context_tokens": settings.ask_max_context_tokens,
         "timeout_s": settings.ask_timeout_s,
         "enabled": True,
     }
@@ -170,7 +171,7 @@ def test_get_omits_unset_llm_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         login_admin(client)
         body = client.get("/v1/admin/settings").json()
 
-    assert body["llm"] == {"temperature": 0.0, "api_key_set": False}
+    assert body["llm"] == {"temperature": 0.0, "timeout_s": 120.0, "api_key_set": False}
 
 
 def test_override_wins_over_environment(
@@ -228,7 +229,7 @@ def test_partial_update_spans_blocks(admin_client: TestClient) -> None:
     assert body["alerts"]["daily_token_threshold"] == 1_000_000
     # 没给的字段保持派生值；未配置的可选字段直接省略（不填假默认值）。
     assert body["ask"]["timeout_s"] == 120
-    assert "daily_cost_threshold_usd" not in body["alerts"]
+    assert body["index"]["vineflower_jar"] == ""
 
 
 def test_empty_body_changes_nothing(admin_client: TestClient, settings: Settings) -> None:
@@ -243,11 +244,65 @@ def test_null_block_is_rejected(admin_client: TestClient) -> None:
     assert admin_client.put("/v1/admin/settings", json={"llm": None}).status_code == 422
 
 
-def test_read_only_index_enabled_is_rejected(admin_client: TestClient) -> None:
-    """`index.enabled` 是部署级闸门（契约标只读）：传了直接 422，不静默忽略。"""
-    response = admin_client.put("/v1/admin/settings", json={"index": {"enabled": False}})
+def test_index_enabled_is_writable(admin_client: TestClient) -> None:
+    """`index.enabled` 现在可从设置页关掉（改完立即作用于 `POST /v1/admin/jobs`）。"""
+    body = put(admin_client, {"index": {"enabled": False}})
 
-    assert response.status_code == 422, response.text
+    assert body["index"]["enabled"] is False
+
+    assert admin_client.get("/v1/admin/settings").json()["index"]["enabled"] is False
+
+
+def test_extracted_environment_settings_are_page_configurable(
+    admin_client: TestClient, settings: Settings
+) -> None:
+    """6 项原仅环境变量的配置已提取到设置页：GET 里有，PUT 后 GET 读回新值。"""
+    body = admin_client.get("/v1/admin/settings").json()
+
+    assert body["index"]["data_dir"] == str(settings.data_dir), "注册对话框要显示数据根绝对路径"
+
+    for block, field in (
+        ("llm", "timeout_s"),
+        ("ask", "max_context_tokens"),
+        ("index", "enabled"),
+        ("index", "java"),
+        ("index", "vineflower_jar"),
+        ("index", "specialsource_jar"),
+    ):
+        assert field in body[block], f"{block}.{field} 应出现在 GET 响应里"
+
+    put(
+        admin_client,
+        {
+            "llm": {"timeout_s": 30.5},
+            "ask": {"max_context_tokens": 12345},
+            "index": {
+                "enabled": False,
+                "java": "/opt/jdk/bin/java",
+                "vineflower_jar": "/opt/vineflower.jar",
+                "specialsource_jar": "/opt/specialsource.jar",
+            },
+        },
+    )
+
+    updated = admin_client.get("/v1/admin/settings").json()
+
+    assert updated["llm"]["timeout_s"] == 30.5
+    assert updated["ask"]["max_context_tokens"] == 12345
+    assert updated["index"]["enabled"] is False
+    assert updated["index"]["java"] == "/opt/jdk/bin/java"
+    # 路径类字段后端转 `Path`：Windows 上分隔符会被规范化，按 `str(Path(...))` 比。
+    assert updated["index"]["vineflower_jar"] == str(Path("/opt/vineflower.jar"))
+    assert updated["index"]["specialsource_jar"] == str(Path("/opt/specialsource.jar"))
+
+    # 空字符串 = 清除覆盖：路径字段重新省略（回退环境变量）。
+    cleared = put(
+        admin_client,
+        {"index": {"vineflower_jar": "", "specialsource_jar": ""}},
+    )
+
+    assert cleared["index"]["vineflower_jar"] == ""
+    assert cleared["index"]["specialsource_jar"] == ""
 
 
 def test_unknown_field_is_rejected(admin_client: TestClient) -> None:
@@ -348,7 +403,6 @@ def test_resolve_alerts_config_reads_database_overrides(
 
     assert empty.webhook_url is None
     assert empty.daily_token_threshold == 0
-    assert empty.daily_cost_threshold_usd == 0.0
     assert empty == resolve_alerts_config(settings), "库里没有覆盖时，带 conn 与不带 conn 等价"
 
     put(
@@ -360,7 +414,6 @@ def test_resolve_alerts_config_reads_database_overrides(
 
     assert configured.webhook_url == WEBHOOK_URL
     assert configured.daily_token_threshold == 500_000
-    assert configured.daily_cost_threshold_usd == 0.0, "没配的阈值归一成 0（≤ 0 即不告警）"
 
 
 # ----------------------------------------------------------------------

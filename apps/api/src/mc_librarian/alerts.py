@@ -1,4 +1,4 @@
-"""用量阈值告警（issue #12）：当日 token 数 / 成本超阈值就推一条 Webhook。
+"""用量阈值告警（issue #12）：当日 token 数超阈值就推一条 Webhook。
 
 三条硬约束（规格补充 §3–§7）：
 
@@ -9,6 +9,7 @@
 3. **不阻断请求**：`schedule` 把检查丢到后台线程，调用方（`/v1/ask`、`GET /v1/admin/usage`）
    立刻返回；Webhook 失败只写 warn，**不重试**（避免告警风暴），超阈值也不做任何限制（D23）。
 
+只审计 token，不算金额（`usage.cost_usd` 已在迁移 v11 删除）。
 `day` 是**本地日期（UTC+8）**，与用量页的分天口径一致（`usage.local_day`）。
 """
 
@@ -29,7 +30,6 @@ from mc_librarian.db import Database, utc_now
 logger = logging.getLogger("mc_librarian.alerts")
 
 METRIC_DAILY_TOKENS: Final = "daily_tokens"
-METRIC_DAILY_COST_USD: Final = "daily_cost_usd"
 
 # Webhook 超时 5 秒（规格 §7）；失败不重试。
 WEBHOOK_TIMEOUT_S: Final = 5.0
@@ -63,7 +63,7 @@ def _run(database: Database, settings: Settings) -> None:
 
 
 def check(database: Database, settings: Settings) -> None:
-    """检查当天的 token 数与成本是否超过阈值；超过且当天该指标还没告警过就推 Webhook。"""
+    """检查当天的 token 数是否超过阈值；超过且当天该指标还没告警过就推 Webhook。"""
     day = usage.local_day()
 
     with database.connect() as conn:
@@ -77,23 +77,21 @@ def check(database: Database, settings: Settings) -> None:
             return
 
         totals = usage.day_totals(conn, day=day)
+        value = float(totals.tokens)
+        threshold = float(config.daily_token_threshold)
 
-        for metric, value, threshold in (
-            (METRIC_DAILY_TOKENS, float(totals.tokens), float(config.daily_token_threshold)),
-            (METRIC_DAILY_COST_USD, totals.cost_usd, float(config.daily_cost_threshold_usd)),
-        ):
-            # 阈值 ≤ 0 = 该指标不告警（规格 §3）；严格大于阈值才算超（「超过阈值」）。
-            if threshold <= 0 or value <= threshold:
-                continue
+        # 阈值 ≤ 0 = 该指标不告警（规格 §3）；严格大于阈值才算超（「超过阈值」）。
+        if threshold <= 0 or value <= threshold:
+            return
 
-            fire(
-                conn,
-                day=day,
-                metric=metric,
-                value=value,
-                threshold=threshold,
-                webhook_url=config.webhook_url,
-            )
+        fire(
+            conn,
+            day=day,
+            metric=METRIC_DAILY_TOKENS,
+            value=value,
+            threshold=threshold,
+            webhook_url=config.webhook_url,
+        )
 
 
 def fire(
@@ -136,15 +134,10 @@ def fire(
 
 
 def payload(*, day: str, metric: str, value: float, threshold: float) -> dict[str, object]:
-    """Webhook 载荷（规格 §7）：token 是整数、成本保留 4 位小数（单价按每百万 token 计）。"""
-    if metric == METRIC_DAILY_TOKENS:
-        amount: int | float = round(value)
-        limit: int | float = round(threshold)
-        message = f"今日 token 用量已达 {amount:,}，超过阈值 {limit:,}"
-    else:
-        amount = round(value, 4)
-        limit = round(threshold, 4)
-        message = f"今日成本已达 ${amount:,.4f}，超过阈值 ${limit:,.4f}"
+    """Webhook 载荷（规格 §7）：token 是整数。"""
+    amount: int | float = round(value)
+    limit: int | float = round(threshold)
+    message = f"今日 token 用量已达 {amount:,}，超过阈值 {limit:,}"
 
     return {
         "day": day,

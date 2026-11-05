@@ -114,6 +114,26 @@ paths:
                     items: { $ref: "#/components/schemas/VersionInfo" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/minecraft-versions:
+    get:
+      tags: [admin]
+      summary: 可注册的 Minecraft 版本列表
+      description: |
+        版本页「注册索引」对话框的可搜索下拉框数据源。从 Mojang 版本清单
+        （`version_manifest_v2.json`）拉取，**只返回 `type == "release"`** 的版本，
+        按发布时间倒序；字段 `{id, released_at}`。
+        进程内缓存 1 小时；网络失败时若缓存可用就返回缓存（stale 也比空列表好），
+        否则返回 `502`。
+      operationId: listMinecraftVersions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MinecraftVersionList" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
   /v1/search:
     post:
       tags: [retrieve]
@@ -805,8 +825,7 @@ paths:
         - `from`/`to` 缺省为最近 7 天（含今天）；`from` 晚于 `to` 时自然为空，不报错。
         - `user_id` 按 `usage.user_id`（用户 id）过滤；`group_by=user` 的 `key` 优先显示用户名，
           取不到时退回 id。
-        - `cost_configured=false` 时 `cost_usd` 恒为 0（未配单价）：页面必须标注
-          「未配置单价，仅统计 token」，不要让用户以为成本是 0。
+        - 只审计 token，不含金额（`usage.cost_usd` 已在迁移 v11 删除）。
         - 调用时顺带做一次当日告警检查（幂等、不阻塞响应）。
       operationId: getUsage
       parameters:
@@ -929,6 +948,11 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
+    BadGateway:
+      description: 上游不可用（例如拉取 Mojang 版本清单失败且没有可用缓存）
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
 
   schemas:
     Problem:
@@ -959,6 +983,22 @@ components:
         source_size_bytes: { type: integer, description: 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） }
         summary_count: { type: integer, description: 已生成的摘要条数（从索引库实时读，`summaries` 的行数） }
         class_count: { type: integer, description: 类总数（摘要覆盖率的分母，从索引库实时读） }
+
+    MinecraftVersion:
+      type: object
+      required: [id, released_at]
+      properties:
+        id: { type: string, description: 版本号，例如 1.21.1 }
+        released_at: { type: string, format: date-time, description: 发布时间（Mojang 清单的 `releaseTime`） }
+
+    MinecraftVersionList:
+      type: object
+      required: [versions]
+      properties:
+        versions:
+          type: array
+          description: 仅 `type == "release"` 的版本，按发布时间倒序
+          items: { $ref: "#/components/schemas/MinecraftVersion" }
 
     SearchRequest:
       type: object
@@ -1246,7 +1286,6 @@ components:
       properties:
         prompt_tokens: { type: integer }
         completion_tokens: { type: integer }
-        cost_usd: { type: number, format: float }
         latency_ms: { type: integer }
 
     LoginRequest:
@@ -1393,7 +1432,7 @@ components:
     LlmSettings:
       type: object
       description: 生成模型配置。密钥只写不读：响应里只有 `api_key_set`，不回明文也不回密文。
-      required: [temperature, api_key_set]
+      required: [temperature, timeout_s, api_key_set]
       properties:
         base_url:
           type: [string, "null"]
@@ -1404,6 +1443,10 @@ components:
         temperature:
           type: number
           description: 采样温度；默认 0（确定性输出，摘要与问答都要求可复现），上限 2
+        timeout_s:
+          type: number
+          default: 120
+          description: 单次 LLM 请求的超时（秒）
         api_key_set:
           type: boolean
           readOnly: true
@@ -1411,7 +1454,7 @@ components:
 
     AskSettings:
       type: object
-      required: [max_steps, max_answer_tokens, timeout_s, enabled]
+      required: [max_steps, max_answer_tokens, max_context_tokens, timeout_s, enabled]
       properties:
         max_steps:
           type: integer
@@ -1421,6 +1464,10 @@ components:
           type: integer
           default: 8000
           description: "`AskRequest.max_answer_tokens` 省略时的服务端默认值"
+        max_context_tokens:
+          type: integer
+          default: 60000
+          description: 工具结果累积的上下文预算（token）；超出时从最旧的工具结果开始丢弃
         timeout_s: { type: integer, default: 120 }
         enabled:
           type: boolean
@@ -1429,20 +1476,34 @@ components:
 
     IndexSettings:
       type: object
-      required: [enabled, java_xmx, summary_batch_size, summary_concurrency]
+      required:
+        [enabled, java_xmx, java, data_dir, summary_batch_size, summary_concurrency]
       properties:
         enabled:
           type: boolean
           default: true
           description: |
-            索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
-            `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
-            `POST /v1/admin/versions` 注册。只读：值是部署级配置，不可通过 `PUT` 修改。
+            索引构建闸门。`false` 时本实例不构建索引：`POST /v1/admin/jobs` 返回 403，
+            索引改在本地工作站产出后用 `POST /v1/admin/versions` 注册。
         java_xmx:
           type: string
           default: "4G"
           pattern: '^\d+[kKmMgG]$'
           description: 反编译时传给 java 的 `-Xmx`
+        java:
+          type: string
+          default: "java"
+          description: java 可执行路径；留空 = 回退环境变量
+        vineflower_jar:
+          type: string
+          description: Vineflower 反编译工具 jar 路径；空字符串 = 回退环境变量
+        specialsource_jar:
+          type: string
+          description: SpecialSource remap 工具 jar 路径；空字符串 = 回退环境变量
+        data_dir:
+          type: string
+          readOnly: true
+          description: 数据根绝对路径；注册索引时把 `db/<版本>.sqlite` 放进这里
         summary_batch_size: { type: integer, default: 40 }
         summary_concurrency: { type: integer, default: 4 }
 
@@ -1475,9 +1536,6 @@ components:
         daily_token_threshold:
           type: [integer, "null"]
           description: 每日 token 告警阈值；未配置时整字段省略
-        daily_cost_threshold_usd:
-          type: [number, "null"]
-          description: 每日成本告警阈值（美元）；未配置时整字段省略
 
     SettingsUpdate:
       type: object
@@ -1485,7 +1543,7 @@ components:
       description: |
         `PUT /v1/admin/settings` 的请求体。**部分更新**：只有出现在请求里的字段会被写，
         未给的保持原值；值给 `null`（密钥给空字符串）= 清除该覆盖，回退环境配置。
-        未列出的字段（如 `index.enabled`）一律不可改，传了返回 422。
+        未列出的字段（如 `index.data_dir`）一律不可改，传了返回 422。
       properties:
         llm: { $ref: "#/components/schemas/LlmSettingsUpdate" }
         ask: { $ref: "#/components/schemas/AskSettingsUpdate" }
@@ -1505,6 +1563,7 @@ components:
           writeOnly: true
           description: 空字符串（或 `null`）= 清除密钥；明文只进不出
         temperature: { type: [number, "null"], minimum: 0, maximum: 2 }
+        timeout_s: { type: [number, "null"], exclusiveMinimum: 0 }
 
     AskSettingsUpdate:
       type: object
@@ -1512,6 +1571,7 @@ components:
       properties:
         max_steps: { type: [integer, "null"], minimum: 1, maximum: 12 }
         max_answer_tokens: { type: [integer, "null"], minimum: 500, maximum: 32000 }
+        max_context_tokens: { type: [integer, "null"], minimum: 1000 }
         timeout_s: { type: [integer, "null"], minimum: 1, maximum: 3600 }
         enabled: { type: [boolean, "null"] }
 
@@ -1519,7 +1579,11 @@ components:
       type: object
       additionalProperties: false
       properties:
+        enabled: { type: [boolean, "null"] }
         java_xmx: { type: [string, "null"], pattern: '^\d+[kKmMgG]$' }
+        java: { type: [string, "null"], maxLength: 1000 }
+        vineflower_jar: { type: [string, "null"], maxLength: 1000 }
+        specialsource_jar: { type: [string, "null"], maxLength: 1000 }
         summary_batch_size: { type: [integer, "null"], minimum: 1, maximum: 500 }
         summary_concurrency: { type: [integer, "null"], minimum: 1, maximum: 64 }
 
@@ -1541,35 +1605,27 @@ components:
           writeOnly: true
           description: 空字符串（或 `null`）= 清除；明文只进不出
         daily_token_threshold: { type: [integer, "null"], minimum: 0, description: 写 0 = 关闭该指标告警 }
-        daily_cost_threshold_usd: { type: [number, "null"], minimum: 0, description: 写 0 = 关闭该指标告警 }
 
     UsageReport:
       type: object
-      required: [from, to, requests, cost_configured, totals, buckets]
+      required: [from, to, requests, totals, buckets]
       properties:
         from: { type: string, format: date }
         to: { type: string, format: date }
         requests:
           type: integer
           description: 区间内的请求总数（顶部卡片的「请求数」直接用这个值）
-        cost_configured:
-          type: boolean
-          description: |
-            是否配置了单价（`MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` /
-            `MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M`）。false 时 `cost_usd` 恒为 0，
-            页面必须标注「未配置单价，仅统计 token」。
         totals: { $ref: "#/components/schemas/Usage" }
         buckets:
           type: array
           items:
             type: object
-            required: [key, requests, prompt_tokens, completion_tokens, cost_usd]
+            required: [key, requests, prompt_tokens, completion_tokens]
             properties:
               key: { type: string }
               requests: { type: integer }
               prompt_tokens: { type: integer }
               completion_tokens: { type: integer }
-              cost_usd: { type: number, format: float }
 
     AuditEntry:
       type: object

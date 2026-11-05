@@ -22,10 +22,8 @@ from typing import Any, Final
 
 from mc_librarian.answer.client import ChatClient, ChatCompletion, ChatError
 from mc_librarian.answer.tools import SEARCH_TOOL, TOOL_SCHEMAS, ToolBox, ToolOutcome
-from mc_librarian.config import LlmPricing
 from mc_librarian.indexing.text import count_tokens
 from mc_librarian.schemas import AskReason, AskStep, Citation, Usage
-from mc_librarian.usage import estimate_cost_usd
 
 logger = logging.getLogger("mc_librarian.answer")
 
@@ -70,7 +68,6 @@ class AskRun:
         max_context_tokens: int,
         timeout_s: float,
         llm_timeout_s: float,
-        pricing: LlmPricing,
         conversation_id: str | None = None,
     ) -> None:
         self.client = client
@@ -81,7 +78,6 @@ class AskRun:
         self.max_answer_tokens = max_answer_tokens
         self.max_context_tokens = max_context_tokens
         self.llm_timeout_s = llm_timeout_s
-        self.pricing = pricing
         self.started = time.monotonic()
         self.deadline = self.started + timeout_s
 
@@ -107,9 +103,6 @@ class AskRun:
         return Usage(
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
-            cost_usd=estimate_cost_usd(
-                self.prompt_tokens, self.completion_tokens, self.pricing
-            ),
             latency_ms=self.latency_ms,
         )
 

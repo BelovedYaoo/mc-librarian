@@ -38,7 +38,6 @@ from mc_librarian.config import (
     LlmConfigError,
     Settings,
     resolve_llm_config,
-    resolve_llm_pricing,
 )
 from mc_librarian.db import Database, transaction
 from mc_librarian.indexing import query
@@ -164,7 +163,6 @@ async def ask(
             max_context_tokens=settings.ask_max_context_tokens,
             timeout_s=float(settings.ask_timeout_s),
             llm_timeout_s=settings.llm_timeout_s,
-            pricing=resolve_llm_pricing(settings),
             conversation_id=conversation_id,
         )
     except LlmConfigError as error:
@@ -367,7 +365,6 @@ def _record_usage(
                 model=model,
                 prompt_tokens=run.prompt_tokens,
                 completion_tokens=run.completion_tokens,
-                cost_usd=run.usage.cost_usd,
                 latency_ms=run.latency_ms,
                 version=version,
             )

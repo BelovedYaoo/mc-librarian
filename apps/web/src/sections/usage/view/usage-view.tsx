@@ -35,9 +35,8 @@ const GROUP_LABELS: Record<UsageGroupBy, string> = {
 /**
  * `/usage`：管理员查看用量（后端 `GET /v1/admin/usage`）。
  *
- * 顶部卡片的四个数字与下方表格全部来自同一个响应（服务端算好的 `totals`/`buckets`），
- * 前端不再自己累加——聚合口径只有一份。未配单价时成本恒为 0，必须显式标注，
- * 否则会被读成「这段时间没花钱」。
+ * 顶部卡片的数字与下方表格全部来自同一个响应（服务端算好的 `totals`/`buckets`），
+ * 前端不再自己累加——聚合口径只有一份。只审计 token，不含金额。
  */
 export function UsageView() {
   const [from, setFrom] = useState(defaultRange().from);
@@ -146,15 +145,7 @@ function Report({ report, groupBy }: { report: UsageReport; groupBy: UsageGroupB
           label="completion tokens"
           value={(report.totals.completion_tokens ?? 0).toLocaleString('zh-CN')}
         />
-        <StatCard label="估算成本" value={formatCost(report.totals.cost_usd ?? 0)} />
       </Stack>
-
-      {!report.cost_configured && (
-        <Alert severity="warning">
-          未配置单价，仅统计 token：成本恒为 0，不代表真的没花钱。配置
-          MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M / MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M 后重新查看。
-        </Alert>
-      )}
 
       <Typography variant="body2" sx={{ color: 'text.secondary' }}>
         区间 {report.from} → {report.to}（含当天）
@@ -173,7 +164,6 @@ function Report({ report, groupBy }: { report: UsageReport; groupBy: UsageGroupB
                 <TableCell align="right">请求数</TableCell>
                 <TableCell align="right">prompt tokens</TableCell>
                 <TableCell align="right">completion tokens</TableCell>
-                <TableCell align="right">成本</TableCell>
               </TableRow>
             </TableHead>
 
@@ -196,7 +186,6 @@ function BucketRow({ bucket }: { bucket: UsageBucket }) {
       <TableCell align="right">{bucket.requests.toLocaleString('zh-CN')}</TableCell>
       <TableCell align="right">{bucket.prompt_tokens.toLocaleString('zh-CN')}</TableCell>
       <TableCell align="right">{bucket.completion_tokens.toLocaleString('zh-CN')}</TableCell>
-      <TableCell align="right">{formatCost(bucket.cost_usd)}</TableCell>
     </TableRow>
   );
 }
@@ -217,11 +206,6 @@ function StatCard({ label, value }: { label: string; value: string }) {
 }
 
 // ----------------------------------------------------------------------
-
-/** 成本口径是「未配单价时记 0」（后端 `cost_usd`）：数字照接口的显示，口径由上面的告警标注。 */
-function formatCost(value: number): string {
-  return `$${value.toFixed(4)}`;
-}
 
 /** 默认区间：最近 7 天（含今天），与后端缺省一致。 */
 function defaultRange(): { from: string; to: string } {

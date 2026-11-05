@@ -474,14 +474,42 @@ def test_settings_secrets_are_write_only() -> None:
         assert "webhook_url_set" in response_alerts
 
 
-def test_index_enabled_is_read_only() -> None:
-    """`index.enabled` 是部署级闸门：响应里有，更新请求里没有（传了 422）。"""
+def test_index_enabled_is_writable() -> None:
+    """`index.enabled` 现在可写（设置页能关掉索引构建）；`data_dir` 仍是只读。"""
     for spec in (_runtime(), _contract()):
         update = _request_schema(spec, "/v1/admin/settings", "put")
         index_update = _deref(spec, update["properties"]["index"])["properties"]
+        index_view = _deref(
+            spec, spec["components"]["schemas"]["Settings"]["properties"]["index"]
+        )["properties"]
 
-        assert "enabled" not in index_update
+        assert "enabled" in index_update
         assert "java_xmx" in index_update
+        assert "java" in index_update
+        assert "vineflower_jar" in index_update
+        assert "specialsource_jar" in index_update
+        # `data_dir` 是数据根绝对路径，只读：更新请求里没有。
+        assert "data_dir" not in index_update
+        assert "data_dir" in index_view
+
+
+def test_minecraft_versions_path_is_implemented() -> None:
+    """新增 `GET /v1/minecraft-versions`（admin）：Mojang release 列表，供版本页下拉框。"""
+    runtime = _operation(_runtime(), "/v1/minecraft-versions", "get")
+    contract = _operation(_contract(), "/v1/minecraft-versions", "get")
+
+    assert runtime["operationId"] == contract["operationId"] == "listMinecraftVersions"
+    assert runtime["tags"] == contract["tags"] == ["admin"]
+    assert {"200", "403", "502"} <= set(runtime["responses"])
+    assert {"200", "403", "502"} <= set(contract["responses"])
+    assert "security" not in runtime
+
+    for spec in (_runtime(), _contract()):
+        schema = _response_schema(spec, "/v1/minecraft-versions")
+        item = _deref(spec, schema["properties"]["versions"]["items"])
+
+        assert item["required"] == ["id", "released_at"]
+        assert set(item["properties"]) == {"id", "released_at"}
 
 
 @pytest.mark.parametrize(
@@ -1038,29 +1066,25 @@ def test_usage_query_parameters_match() -> None:
 
 
 def test_usage_report_schema_matches() -> None:
-    """`totals` 是区间合计、`buckets` 是分组明细；`requests`/`cost_configured` 是页面要的标量。"""
+    """`totals` 是区间合计、`buckets` 是分组明细；`requests` 是页面要的标量。不含金额。"""
     for spec in (_runtime(), _contract()):
         schema = _response_schema(spec, "/v1/admin/usage")
 
-        assert schema["required"] == [
-            "from",
-            "to",
-            "requests",
-            "cost_configured",
-            "totals",
-            "buckets",
-        ]
+        assert schema["required"] == ["from", "to", "requests", "totals", "buckets"]
         assert set(schema["properties"]) == {
             "from",
             "to",
             "requests",
-            "cost_configured",
             "totals",
             "buckets",
         }
         assert schema["properties"]["from"]["format"] == "date"
         assert schema["properties"]["to"]["format"] == "date"
         assert schema["properties"]["totals"]["$ref"].endswith("/Usage")
+
+        usage = _deref(spec, schema["properties"]["totals"])
+
+        assert "cost_usd" not in usage["properties"]
 
         bucket = _deref(spec, schema["properties"]["buckets"]["items"])
 
@@ -1069,8 +1093,8 @@ def test_usage_report_schema_matches() -> None:
             "requests",
             "prompt_tokens",
             "completion_tokens",
-            "cost_usd",
         ]
+        assert "cost_usd" not in bucket["properties"]
 
 
 def test_usage_declares_problem_responses() -> None:

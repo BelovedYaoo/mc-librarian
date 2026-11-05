@@ -11,7 +11,6 @@ from pydantic import ValidationError
 
 from conftest import TEST_SECRET
 from mc_librarian.config import (
-    ALERTS_DAILY_COST_THRESHOLD_ENV,
     ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
     ALERTS_WEBHOOK_URL_ENV,
     DATA_DIR_ENV,
@@ -20,7 +19,6 @@ from mc_librarian.config import (
     default_data_dir,
     find_repo_root,
     legacy_env_warnings,
-    pricing_configured,
     resolve_alerts_config,
     resolve_data_dir,
 )
@@ -176,7 +174,6 @@ def test_alerts_default_to_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     for name in (
         ALERTS_WEBHOOK_URL_ENV,
         ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
-        ALERTS_DAILY_COST_THRESHOLD_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -184,35 +181,17 @@ def test_alerts_default_to_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
     assert config.webhook_url is None
     assert config.daily_token_threshold == 0
-    assert config.daily_cost_threshold_usd == 0.0
 
 
 def test_resolve_alerts_config_reads_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """阈值与 Webhook 地址从 `MC_LIBRARIAN_ALERTS_*` 读（库里有覆盖时优先，见 test_settings）。"""
     monkeypatch.setenv(ALERTS_WEBHOOK_URL_ENV, "https://hook.example/alerts")
     monkeypatch.setenv(ALERTS_DAILY_TOKEN_THRESHOLD_ENV, "1000000")
-    monkeypatch.setenv(ALERTS_DAILY_COST_THRESHOLD_ENV, "5.5")
 
     config = resolve_alerts_config(Settings(data_dir=tmp_path / "data"))
 
     assert config.webhook_url == "https://hook.example/alerts"
     assert config.daily_token_threshold == 1_000_000
-    assert config.daily_cost_threshold_usd == 5.5
-
-
-def test_pricing_configured_needs_a_positive_price(tmp_path: Path) -> None:
-    """`cost_configured` 的口径：只有真的配了正单价才算「成本可读」，否则页面要标注只统计 token。"""
-    settings = Settings(data_dir=tmp_path / "data")
-
-    assert pricing_configured(settings) is False
-
-    settings.llm_input_price_per_m = 0.0
-
-    assert pricing_configured(settings) is False
-
-    settings.llm_input_price_per_m = 0.27
-
-    assert pricing_configured(settings) is True
 
 
 def test_zero_thresholds_are_accepted_and_disable_alerts(
@@ -221,12 +200,10 @@ def test_zero_thresholds_are_accepted_and_disable_alerts(
     """阈值 0 合法且表示不告警：环境变量写 0 不该让启动失败（与文档「0 = 关闭」一致）。"""
     monkeypatch.setenv(ALERTS_WEBHOOK_URL_ENV, "https://hook.example/alerts")
     monkeypatch.setenv(ALERTS_DAILY_TOKEN_THRESHOLD_ENV, "0")
-    monkeypatch.setenv(ALERTS_DAILY_COST_THRESHOLD_ENV, "0")
 
     config = resolve_alerts_config(Settings(data_dir=tmp_path / "data"))
 
     assert config.daily_token_threshold == 0
-    assert config.daily_cost_threshold_usd == 0.0
 
     # 负数仍被拒：语义是「0 = 关闭」，不是「随便给个非正数」。
     with pytest.raises(ValidationError):

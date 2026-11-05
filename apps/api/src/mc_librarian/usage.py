@@ -1,8 +1,7 @@
 """`usage` 表读写（issue #8 建表并写入；`#12` 做聚合与告警）。
 
 每次 `/v1/ask` 写**一行**（含降级的情况），`latency_ms` 是端到端耗时（含所有工具调用）。
-`cost_usd` 由单价算（`MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` / `..._OUTPUT_PRICE_PER_M`，每百万
-token 的美元价）；**未配单价时写 0**——只记 token、不计成本，不编一个假单价。
+只审计 **token**，不算金额（`usage.cost_usd` 已在迁移 v11 删除）。
 
 `#12` 只读：`report` 按 `day`/`user`/`version`/`model` 聚合出用量页要的全部数字，
 `day_totals` 给告警用。两个查询的**分天口径一致**：本地日期（UTC+8），
@@ -16,7 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Final, Literal
 
-from mc_librarian.config import LlmPricing
 from mc_librarian.db import utc_now
 from mc_librarian.schemas import Usage, UsageBucket, UsageReport
 
@@ -40,9 +38,8 @@ UNKNOWN_GROUP_KEY: Final = "（未知）"
 
 _INSERT = (
     "INSERT INTO usage"
-    " (user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms, version,"
-    "  created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " (user_id, kind, model, prompt_tokens, completion_tokens, latency_ms, version, created_at)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 # 分桶键的 SQL 表达式。`user` 优先显示用户名（同 `audit` 的口径），取不到才退回 id。
@@ -76,16 +73,6 @@ def resolve_range(start: date | None, end: date | None) -> tuple[date, date]:
     return resolved_start, resolved_end
 
 
-def estimate_cost_usd(prompt_tokens: int, completion_tokens: int, pricing: LlmPricing) -> float:
-    """按 token 数与单价算成本（美元）；单价未配置时对应项是 0。"""
-    cost = (
-        prompt_tokens / 1_000_000 * pricing.input_per_m
-        + completion_tokens / 1_000_000 * pricing.output_per_m
-    )
-
-    return round(cost, 6)
-
-
 def record(
     conn: sqlite3.Connection,
     *,
@@ -94,7 +81,6 @@ def record(
     model: str | None,
     prompt_tokens: int,
     completion_tokens: int,
-    cost_usd: float,
     latency_ms: int,
     version: str | None,
 ) -> None:
@@ -107,7 +93,6 @@ def record(
             model,
             prompt_tokens,
             completion_tokens,
-            cost_usd,
             latency_ms,
             version,
             utc_now(),
@@ -122,14 +107,12 @@ def report(
     end: date,
     user_id: str | None,
     group_by: GroupBy,
-    cost_configured: bool,
 ) -> UsageReport:
     """`GET /v1/admin/usage` 的聚合（规格 §2）。
 
     `totals` 与 `buckets` 用同一个 FROM/WHERE，因此页面上的合计与明细必然同源。
     区间内没有数据时 `totals` 全 0、`buckets` 为空数组（验收第 5 条：不是报错）。
     `totals.latency_ms` 是区间内所有请求的耗时**之和**（与其余字段同为合计口径）。
-    `cost_configured` 由调用方从单价配置派生，页面据此标注成本口径。
     """
     where_params: list[object] = [start.isoformat(), end.isoformat()]
     where = f"WHERE {_LOCAL_DAY_SQL} BETWEEN ? AND ?"
@@ -143,7 +126,6 @@ def report(
         "SELECT COUNT(*) AS requests,"
         " COALESCE(SUM(usage.prompt_tokens), 0) AS prompt_tokens,"
         " COALESCE(SUM(usage.completion_tokens), 0) AS completion_tokens,"
-        " COALESCE(SUM(usage.cost_usd), 0) AS cost_usd,"
         " COALESCE(SUM(usage.latency_ms), 0) AS latency_ms"
         f" {_FROM} {where}",
         where_params,
@@ -155,8 +137,7 @@ def report(
         f"SELECT {_KEY_SQL[group_by]} AS key,"
         " COUNT(*) AS requests,"
         " COALESCE(SUM(usage.prompt_tokens), 0) AS prompt_tokens,"
-        " COALESCE(SUM(usage.completion_tokens), 0) AS completion_tokens,"
-        " COALESCE(SUM(usage.cost_usd), 0) AS cost_usd"
+        " COALESCE(SUM(usage.completion_tokens), 0) AS completion_tokens"
         f" {_FROM} {where}"
         " GROUP BY key ORDER BY key",
         [*key_params, *where_params],
@@ -166,11 +147,9 @@ def report(
         from_=start,
         to=end,
         requests=int(totals_row["requests"]),
-        cost_configured=cost_configured,
         totals=Usage(
             prompt_tokens=int(totals_row["prompt_tokens"]),
             completion_tokens=int(totals_row["completion_tokens"]),
-            cost_usd=float(totals_row["cost_usd"]),
             latency_ms=int(totals_row["latency_ms"]),
         ),
         buckets=[
@@ -179,7 +158,6 @@ def report(
                 requests=int(row["requests"]),
                 prompt_tokens=int(row["prompt_tokens"]),
                 completion_tokens=int(row["completion_tokens"]),
-                cost_usd=float(row["cost_usd"]),
             )
             for row in bucket_rows
         ],
@@ -191,17 +169,14 @@ class DayTotals:
     """一天（本地日期）的用量合计，供告警判阈值。"""
 
     tokens: int
-    cost_usd: float
 
 
 def day_totals(conn: sqlite3.Connection, *, day: str) -> DayTotals:
-    """某一天的 token 总数与成本合计；没有数据时全 0。"""
+    """某一天的 token 总数；没有数据时全 0。"""
     row = conn.execute(
-        "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens,"
-        " COALESCE(SUM(cost_usd), 0) AS cost_usd"
+        "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens"
         f" FROM usage WHERE {_LOCAL_DAY_SQL} = ?",
         (day,),
     ).fetchone()
 
-    return DayTotals(tokens=int(row["tokens"]), cost_usd=float(row["cost_usd"]))
-
+    return DayTotals(tokens=int(row["tokens"]))

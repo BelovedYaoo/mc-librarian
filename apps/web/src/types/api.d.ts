@@ -65,6 +65,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/minecraft-versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 可注册的 Minecraft 版本列表
+         * @description 版本页「注册索引」对话框的可搜索下拉框数据源。从 Mojang 版本清单
+         *     （`version_manifest_v2.json`）拉取，**只返回 `type == "release"`** 的版本，
+         *     按发布时间倒序；字段 `{id, released_at}`。
+         *     进程内缓存 1 小时；网络失败时若缓存可用就返回缓存（stale 也比空列表好），
+         *     否则返回 `502`。
+         */
+        get: operations["listMinecraftVersions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/search": {
         parameters: {
             query?: never;
@@ -607,8 +631,7 @@ export interface paths {
          *     - `from`/`to` 缺省为最近 7 天（含今天）；`from` 晚于 `to` 时自然为空，不报错。
          *     - `user_id` 按 `usage.user_id`（用户 id）过滤；`group_by=user` 的 `key` 优先显示用户名，
          *       取不到时退回 id。
-         *     - `cost_configured=false` 时 `cost_usd` 恒为 0（未配单价）：页面必须标注
-         *       「未配置单价，仅统计 token」，不要让用户以为成本是 0。
+         *     - 只审计 token，不含金额（`usage.cost_usd` 已在迁移 v11 删除）。
          *     - 调用时顺带做一次当日告警检查（幂等、不阻塞响应）。
          */
         get: operations["getUsage"];
@@ -671,6 +694,19 @@ export interface components {
             summary_count?: number;
             /** @description 类总数（摘要覆盖率的分母，从索引库实时读） */
             class_count?: number;
+        };
+        MinecraftVersion: {
+            /** @description 版本号，例如 1.21.1 */
+            id: string;
+            /**
+             * Format: date-time
+             * @description 发布时间（Mojang 清单的 `releaseTime`）
+             */
+            released_at: string;
+        };
+        MinecraftVersionList: {
+            /** @description 仅 `type == "release"` 的版本，按发布时间倒序 */
+            versions: components["schemas"]["MinecraftVersion"][];
         };
         SearchRequest: {
             query: string;
@@ -883,8 +919,6 @@ export interface components {
         Usage: {
             prompt_tokens?: number;
             completion_tokens?: number;
-            /** Format: float */
-            cost_usd?: number;
             latency_ms?: number;
         };
         LoginRequest: {
@@ -1018,6 +1052,11 @@ export interface components {
             model?: string | null;
             /** @description 采样温度；默认 0（确定性输出，摘要与问答都要求可复现），上限 2 */
             temperature: number;
+            /**
+             * @description 单次 LLM 请求的超时（秒）
+             * @default 120
+             */
+            timeout_s: number;
             /** @description 是否已设置 `llm.api_key`（数据库覆盖或环境变量任一有值） */
             readonly api_key_set: boolean;
         };
@@ -1032,6 +1071,11 @@ export interface components {
              * @default 8000
              */
             max_answer_tokens: number;
+            /**
+             * @description 工具结果累积的上下文预算（token）；超出时从最旧的工具结果开始丢弃
+             * @default 60000
+             */
+            max_context_tokens: number;
             /** @default 120 */
             timeout_s: number;
             /**
@@ -1042,9 +1086,8 @@ export interface components {
         };
         IndexSettings: {
             /**
-             * @description 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）。`false` 时本实例不构建索引：
-             *     `POST /v1/admin/jobs` 返回 403，索引改在本地工作站产出后用
-             *     `POST /v1/admin/versions` 注册。只读：值是部署级配置，不可通过 `PUT` 修改。
+             * @description 索引构建闸门。`false` 时本实例不构建索引：`POST /v1/admin/jobs` 返回 403，
+             *     索引改在本地工作站产出后用 `POST /v1/admin/versions` 注册。
              * @default true
              */
             enabled: boolean;
@@ -1053,6 +1096,17 @@ export interface components {
              * @default 4G
              */
             java_xmx: string;
+            /**
+             * @description java 可执行路径；留空 = 回退环境变量
+             * @default java
+             */
+            java: string;
+            /** @description Vineflower 反编译工具 jar 路径；空字符串 = 回退环境变量 */
+            vineflower_jar?: string;
+            /** @description SpecialSource remap 工具 jar 路径；空字符串 = 回退环境变量 */
+            specialsource_jar?: string;
+            /** @description 数据根绝对路径；注册索引时把 `db/<版本>.sqlite` 放进这里 */
+            readonly data_dir: string;
             /** @default 40 */
             summary_batch_size: number;
             /** @default 4 */
@@ -1081,13 +1135,11 @@ export interface components {
             readonly webhook_url_set: boolean;
             /** @description 每日 token 告警阈值；未配置时整字段省略 */
             daily_token_threshold?: number | null;
-            /** @description 每日成本告警阈值（美元）；未配置时整字段省略 */
-            daily_cost_threshold_usd?: number | null;
         };
         /**
          * @description `PUT /v1/admin/settings` 的请求体。**部分更新**：只有出现在请求里的字段会被写，
          *     未给的保持原值；值给 `null`（密钥给空字符串）= 清除该覆盖，回退环境配置。
-         *     未列出的字段（如 `index.enabled`）一律不可改，传了返回 422。
+         *     未列出的字段（如 `index.data_dir`）一律不可改，传了返回 422。
          */
         SettingsUpdate: {
             llm?: components["schemas"]["LlmSettingsUpdate"];
@@ -1102,15 +1154,21 @@ export interface components {
             /** @description 空字符串（或 `null`）= 清除密钥；明文只进不出 */
             api_key?: string | null;
             temperature?: number | null;
+            timeout_s?: number | null;
         };
         AskSettingsUpdate: {
             max_steps?: number | null;
             max_answer_tokens?: number | null;
+            max_context_tokens?: number | null;
             timeout_s?: number | null;
             enabled?: boolean | null;
         };
         IndexSettingsUpdate: {
+            enabled?: boolean | null;
             java_xmx?: string | null;
+            java?: string | null;
+            vineflower_jar?: string | null;
+            specialsource_jar?: string | null;
             summary_batch_size?: number | null;
             summary_concurrency?: number | null;
         };
@@ -1124,8 +1182,6 @@ export interface components {
             webhook_url?: string | null;
             /** @description 写 0 = 关闭该指标告警 */
             daily_token_threshold?: number | null;
-            /** @description 写 0 = 关闭该指标告警 */
-            daily_cost_threshold_usd?: number | null;
         };
         UsageReport: {
             /** Format: date */
@@ -1134,20 +1190,12 @@ export interface components {
             to: string;
             /** @description 区间内的请求总数（顶部卡片的「请求数」直接用这个值） */
             requests: number;
-            /**
-             * @description 是否配置了单价（`MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M` /
-             *     `MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M`）。false 时 `cost_usd` 恒为 0，
-             *     页面必须标注「未配置单价，仅统计 token」。
-             */
-            cost_configured: boolean;
             totals: components["schemas"]["Usage"];
             buckets: {
                 key: string;
                 requests: number;
                 prompt_tokens: number;
                 completion_tokens: number;
-                /** Format: float */
-                cost_usd: number;
             }[];
         };
         AuditEntry: {
@@ -1207,6 +1255,15 @@ export interface components {
         };
         /** @description 资源不存在 */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description 上游不可用（例如拉取 Mojang 版本清单失败且没有可用缓存） */
+        BadGateway: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1329,6 +1386,28 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    listMinecraftVersions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MinecraftVersionList"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
         };
     };
     search: {

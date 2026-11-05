@@ -44,17 +44,11 @@ LLM_BASE_URL_ENV: Final = "MC_LIBRARIAN_LLM_BASE_URL"
 LLM_MODEL_ENV: Final = "MC_LIBRARIAN_LLM_MODEL"
 LLM_API_KEY_ENV: Final = "MC_LIBRARIAN_LLM_API_KEY"
 
-# 单价环境变量（每百万 token 的美元价）。未配置时 `cost_usd` 记 0：只记 token、不计成本，
-# 不编一个假单价。
-LLM_INPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_INPUT_PRICE_PER_M"
-LLM_OUTPUT_PRICE_ENV: Final = "MC_LIBRARIAN_LLM_OUTPUT_PRICE_PER_M"
-
 # 用量告警（#12）的环境变量，名字与契约块 `Settings.alerts` 对齐（`MC_LIBRARIAN_` 前缀由
 # `Settings` 补）。阈值 0 表示该指标不告警（默认 0，即默认不告警）；阈值下限是 0，写负数
 # 会被字段校验拒绝。
 ALERTS_WEBHOOK_URL_ENV: Final = "MC_LIBRARIAN_ALERTS_WEBHOOK_URL"
 ALERTS_DAILY_TOKEN_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_TOKEN_THRESHOLD"
-ALERTS_DAILY_COST_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHOLD_USD"
 
 # 旧环境变量名（`#11` / `#12` 合并前用过 `MC_LIBRARIAN_ALERT_*`）。`Settings` 是
 # `extra="ignore"`，旧名会被**无声忽略**——按旧名配置的部署会静默失去告警，所以启动时
@@ -62,7 +56,6 @@ ALERTS_DAILY_COST_THRESHOLD_ENV: Final = "MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHO
 LEGACY_ALERTS_ENV_NAMES: Final[dict[str, str]] = {
     "MC_LIBRARIAN_ALERT_WEBHOOK_URL": ALERTS_WEBHOOK_URL_ENV,
     "MC_LIBRARIAN_ALERT_DAILY_TOKEN_THRESHOLD": ALERTS_DAILY_TOKEN_THRESHOLD_ENV,
-    "MC_LIBRARIAN_ALERT_DAILY_COST_THRESHOLD_USD": ALERTS_DAILY_COST_THRESHOLD_ENV,
 }
 
 
@@ -169,15 +162,12 @@ class Settings(BaseSettings):
     # 同时在跑的问答数上限（`settings.security.max_concurrent_asks`）：超出返回 429。
     max_concurrent_asks: int = Field(default=4, ge=1, le=64)
 
-    # 单价（每百万 token 的美元价），只用于 `usage.cost_usd`；未配置时按 0 计。
-    llm_input_price_per_m: float | None = None
-    llm_output_price_per_m: float | None = None
-
     # 索引构建总闸门（`MC_LIBRARIAN_INDEX_ENABLED`）：关掉后 `POST /v1/admin/jobs` 返回 403。
     # 完整五段（下载 + 反编译 + 全树解析）跑在服务进程内，反编译一个版本要 3–4 GiB；
     # 生产节点内存不够，所以在节点上设 false，索引在本地工作站产出后用
     # `POST /v1/admin/versions` 注册。默认 true，保证本地开箱可用。
-    # 契约里 `settings.index.enabled` 标成只读：它是部署级配置，只能改环境变量。
+    # 契约里 `settings.index.enabled` 与 `Settings` 表里的覆盖一致：默认 true（本地开箱可用），
+    # 节点可以用环境变量或设置页关掉。
     index_enabled: bool = True
 
     # 用量告警（`#12` 读它）：超阈值只推 Webhook，不自动暂停服务（D23，不设自动预算上限）。
@@ -185,7 +175,6 @@ class Settings(BaseSettings):
     # 「写 0 = 关闭该指标告警」与文档一致，`resolve_alerts_config` 把 `None` 归一成 0 再交给 #12。
     alerts_webhook_url: str | None = None
     alerts_daily_token_threshold: int | None = Field(default=None, ge=0)
-    alerts_daily_cost_threshold_usd: float | None = Field(default=None, ge=0)
 
     @field_validator("decompile_memory")
     @classmethod
@@ -298,15 +287,6 @@ class AlertsConfig:
 
     webhook_url: str | None
     daily_token_threshold: int
-    daily_cost_threshold_usd: float
-
-
-@dataclass(frozen=True)
-class LlmPricing:
-    """每百万 token 的美元单价；未配置的那一侧是 0（只记 token、不计成本）。"""
-
-    input_per_m: float
-    output_per_m: float
 
 
 class LlmConfigError(RuntimeError):
@@ -364,23 +344,9 @@ def resolve_alerts_config(
     return AlertsConfig(
         webhook_url=_blank_to_none(settings.alerts_webhook_url),
         daily_token_threshold=settings.alerts_daily_token_threshold or 0,
-        daily_cost_threshold_usd=settings.alerts_daily_cost_threshold_usd or 0.0,
     )
 
 
 def _blank_to_none(value: str | None) -> str | None:
     """空串与「未配置」等价：环境变量设成空串是常见笔误，别让它变成一个假 URL。"""
     return value if value and value.strip() else None
-
-
-def resolve_llm_pricing(settings: Settings) -> LlmPricing:
-    """`usage.cost_usd` 用的单价；未配置的那一侧按 0 计，不编假单价。"""
-    return LlmPricing(
-        input_per_m=settings.llm_input_price_per_m or 0.0,
-        output_per_m=settings.llm_output_price_per_m or 0.0,
-    )
-
-
-def pricing_configured(settings: Settings) -> bool:
-    """是否配了**有效**单价（> 0）。未配时 `cost_usd` 恒为 0（只记 token），用量页据此标注口径。"""
-    return bool(settings.llm_input_price_per_m or settings.llm_output_price_per_m)

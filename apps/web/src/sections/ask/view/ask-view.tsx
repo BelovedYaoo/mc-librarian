@@ -681,8 +681,7 @@ function TurnBlock({
       {turn.usage && turn.status === 'done' && (
         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
           用量：prompt {turn.usage.prompt_tokens ?? 0} · completion{' '}
-          {turn.usage.completion_tokens ?? 0} · 成本 ${turn.usage.cost_usd ?? 0} · 耗时{' '}
-          {turn.usage.latency_ms ?? 0} ms
+          {turn.usage.completion_tokens ?? 0} · 耗时 {turn.usage.latency_ms ?? 0} ms
         </Typography>
       )}
     </Stack>

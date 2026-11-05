@@ -1,8 +1,8 @@
 """用量聚合与告警（issue #12）。
 
 覆盖规格补充 §2–§9：`GET /v1/admin/usage` 的聚合（四种 `group_by`）、无数据区间返回零值、
-成本口径标注、`user_id` 过滤、默认区间、以及告警去重（同一 `(day, metric)` 只发一次 Webhook）、
-阈值 ≤ 0 不告警、未配 Webhook 不检查、Webhook 失败只 warn。
+`user_id` 过滤、默认区间、以及告警去重（同一 `(day, metric)` 只发一次 Webhook）、
+阈值 ≤ 0 不告警、未配 Webhook 不检查、Webhook 失败只 warn。只审计 token，不含金额。
 
 `/v1/ask` 侧「Webhook 抛异常仍正常返回」在 `tests/test_ask.py`（那里有现成的索引 fixture）。
 
@@ -38,22 +38,20 @@ def insert_usage(
     version: str | None = None,
     prompt: int = 0,
     completion: int = 0,
-    cost: float = 0.0,
     latency: int = 0,
 ) -> None:
     """插一行用量；`day` 是本地日期，`created_at` 落成当天 04:00 UTC（本地 12:00）。"""
     conn.execute(
         "INSERT INTO usage"
-        " (user_id, kind, model, prompt_tokens, completion_tokens, cost_usd, latency_ms,"
+        " (user_id, kind, model, prompt_tokens, completion_tokens, latency_ms,"
         "  version, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id,
             usage.KIND_ASK,
             model,
             prompt,
             completion,
-            cost,
             latency,
             version,
             f"{day}T04:00:00Z",
@@ -83,13 +81,13 @@ def test_report_totals_and_day_buckets(
     admin_client: TestClient, conn: sqlite3.Connection, admin_id: str
 ) -> None:
     insert_usage(
-        conn, day=DAY_ONE, user_id=admin_id, prompt=100, completion=10, cost=0.5, latency=1000
+        conn, day=DAY_ONE, user_id=admin_id, prompt=100, completion=10, latency=1000
     )
     insert_usage(
-        conn, day=DAY_ONE, user_id=admin_id, prompt=200, completion=20, cost=1.0, latency=2000
+        conn, day=DAY_ONE, user_id=admin_id, prompt=200, completion=20, latency=2000
     )
     insert_usage(
-        conn, day=DAY_TWO, user_id=admin_id, prompt=300, completion=30, cost=2.5, latency=3000
+        conn, day=DAY_TWO, user_id=admin_id, prompt=300, completion=30, latency=3000
     )
 
     body = get_usage(admin_client, **{"from": DAY_ONE, "to": DAY_TWO, "group_by": "day"}).json()
@@ -100,7 +98,6 @@ def test_report_totals_and_day_buckets(
     assert body["totals"] == {
         "prompt_tokens": 600,
         "completion_tokens": 60,
-        "cost_usd": pytest.approx(4.0),
         "latency_ms": 6000,
     }
     assert [bucket["key"] for bucket in body["buckets"]] == [DAY_ONE, DAY_TWO]
@@ -109,14 +106,12 @@ def test_report_totals_and_day_buckets(
         "requests": 2,
         "prompt_tokens": 300,
         "completion_tokens": 30,
-        "cost_usd": pytest.approx(1.5),
     }
     assert body["buckets"][1] == {
         "key": DAY_TWO,
         "requests": 1,
         "prompt_tokens": 300,
         "completion_tokens": 30,
-        "cost_usd": pytest.approx(2.5),
     }
 
 
@@ -124,9 +119,9 @@ def test_report_totals_equal_sum_of_buckets(
     admin_client: TestClient, conn: sqlite3.Connection, admin_id: str
 ) -> None:
     """页面上的「总量卡片」与「分组明细」必须同源：合计 = 各桶之和。"""
-    insert_usage(conn, day=DAY_ONE, user_id=admin_id, model="a", prompt=1, completion=2, cost=0.1)
-    insert_usage(conn, day=DAY_ONE, user_id=admin_id, model="b", prompt=3, completion=4, cost=0.2)
-    insert_usage(conn, day=DAY_TWO, user_id=admin_id, model="a", prompt=5, completion=6, cost=0.3)
+    insert_usage(conn, day=DAY_ONE, user_id=admin_id, model="a", prompt=1, completion=2)
+    insert_usage(conn, day=DAY_ONE, user_id=admin_id, model="b", prompt=3, completion=4)
+    insert_usage(conn, day=DAY_TWO, user_id=admin_id, model="a", prompt=5, completion=6)
 
     body = get_usage(
         admin_client, **{"from": DAY_ONE, "to": DAY_TWO, "group_by": "model"}
@@ -138,9 +133,6 @@ def test_report_totals_equal_sum_of_buckets(
     )
     assert body["totals"]["completion_tokens"] == sum(
         bucket["completion_tokens"] for bucket in body["buckets"]
-    )
-    assert body["totals"]["cost_usd"] == pytest.approx(
-        sum(bucket["cost_usd"] for bucket in body["buckets"])
     )
 
 
@@ -206,7 +198,6 @@ def test_report_empty_range_returns_zero_values(admin_client: TestClient) -> Non
     assert body["totals"] == {
         "prompt_tokens": 0,
         "completion_tokens": 0,
-        "cost_usd": 0,
         "latency_ms": 0,
     }
     assert body["requests"] == 0
@@ -246,15 +237,15 @@ def test_report_defaults_to_last_seven_days(
     assert body["totals"]["prompt_tokens"] == 10
 
 
-def test_report_marks_cost_as_unconfigured(
-    admin_client: TestClient, settings: Settings
-) -> None:
-    """未配单价时 `cost_configured=false`：页面据此标注「未配置单价，仅统计 token」。"""
-    assert get_usage(admin_client).json()["cost_configured"] is False
+def test_report_omits_cost_fields(admin_client: TestClient, conn: sqlite3.Connection) -> None:
+    """彻底移除金额：响应里没有 `cost_usd` / `cost_configured`，只统计 token。"""
+    insert_usage(conn, day=DAY_ONE, prompt=10)
 
-    settings.llm_input_price_per_m = 1.0
+    body = get_usage(admin_client, **{"from": DAY_ONE, "to": DAY_ONE}).json()
 
-    assert get_usage(admin_client).json()["cost_configured"] is True
+    assert "cost_configured" not in body
+    assert "cost_usd" not in body["totals"]
+    assert all("cost_usd" not in bucket for bucket in body["buckets"])
 
 
 def test_report_requires_admin(user_client: TestClient) -> None:
@@ -347,26 +338,6 @@ def test_alert_fires_once_per_day_and_metric(
     assert [tuple(row) for row in rows] == [(usage.local_day(), "daily_tokens", 150.0, 100.0)]
 
 
-def test_alert_fires_per_metric(
-    client: TestClient,
-    conn: sqlite3.Connection,
-    admin_id: str,
-    settings: Settings,
-    webhook: RecordingWebhook,
-) -> None:
-    """两个指标各自去重：token 告警过不影响成本告警。"""
-    insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=150, cost=3.0)
-    alert_settings(settings, alerts_daily_cost_threshold_usd=1.0)
-
-    alerts.check(database_of(client), settings)
-
-    assert [call["payload"]["metric"] for call in webhook.calls] == [
-        alerts.METRIC_DAILY_TOKENS,
-        alerts.METRIC_DAILY_COST_USD,
-    ]
-    assert webhook.calls[1]["payload"]["message"] == "今日成本已达 $3.0000，超过阈值 $1.0000"
-
-
 def test_alert_threshold_from_settings_api_takes_effect(
     admin_client: TestClient,
     conn: sqlite3.Connection,
@@ -404,10 +375,9 @@ def test_alert_skips_non_positive_thresholds(
     webhook: RecordingWebhook,
 ) -> None:
     """规格 §3：阈值 ≤ 0 表示该指标不告警。"""
-    insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=10**9, cost=100.0)
+    insert_usage(conn, day=usage.local_day(), user_id=admin_id, prompt=10**9)
     settings.alerts_webhook_url = "https://hook.invalid/alerts"
     settings.alerts_daily_token_threshold = 0
-    settings.alerts_daily_cost_threshold_usd = 0.0
 
     alerts.check(database_of(client), settings)
 

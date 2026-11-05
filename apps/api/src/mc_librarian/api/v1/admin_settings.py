@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 
@@ -101,11 +102,13 @@ def _view(settings: RuntimeSettings) -> Settings:
             base_url=_blank_to_none(settings.llm_base_url),
             model=_blank_to_none(settings.llm_model),
             temperature=settings.llm_temperature,
+            timeout_s=settings.llm_timeout_s,
             api_key_set=_is_set(settings.llm_api_key),
         ),
         ask=AskSettings(
             max_steps=settings.ask_max_steps,
             max_answer_tokens=settings.ask_max_answer_tokens,
+            max_context_tokens=settings.ask_max_context_tokens,
             timeout_s=settings.ask_timeout_s,
             enabled=settings.ask_enabled,
         ),
@@ -113,6 +116,12 @@ def _view(settings: RuntimeSettings) -> Settings:
             # `Settings.index.java_xmx` 就是反编译时传给 java 的 `-Xmx`。
             enabled=settings.index_enabled,
             java_xmx=settings.decompile_memory,
+            java=settings.java,
+            # 路径类字段在契约里是 `string`：运行时是 `Path | None`，空字符串 = 未配置。
+            vineflower_jar=_path_to_str(settings.vineflower_jar),
+            specialsource_jar=_path_to_str(settings.specialsource_jar),
+            # 数据根的**绝对路径**：注册索引时把 `db/<版本>.sqlite` 放进这里。
+            data_dir=str(settings.data_dir),
             summary_batch_size=settings.summary_batch_size,
             summary_concurrency=settings.summary_concurrency,
         ),
@@ -124,7 +133,6 @@ def _view(settings: RuntimeSettings) -> Settings:
         alerts=AlertsSettings(
             webhook_url_set=_is_set(settings.alerts_webhook_url),
             daily_token_threshold=settings.alerts_daily_token_threshold,
-            daily_cost_threshold_usd=settings.alerts_daily_cost_threshold_usd,
         ),
     )
 
@@ -136,3 +144,8 @@ def _is_set(value: str | None) -> bool:
 
 def _blank_to_none(value: str | None) -> str | None:
     return value if value and value.strip() else None
+
+
+def _path_to_str(value: Path | None) -> str:
+    """路径类配置对外的形式：未配置回空字符串（前端留空 = 回退环境变量）。"""
+    return str(value) if value is not None else ""

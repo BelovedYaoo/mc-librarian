@@ -1,7 +1,8 @@
 """v1 路由聚合。
 
-已挂载：meta（health / versions）、auth（setup / login / logout / me / tokens / invites）、
-admin（users / audit / versions 注册 / jobs 任务框架 / settings 只读 / usage 用量聚合）、
+已挂载：meta（health / versions / minecraft-versions）、
+auth（setup / login / logout / me / tokens / invites）、
+admin（users / audit / versions 注册 / jobs 任务框架 / settings / usage 用量聚合）、
 retrieve+read（search 混合检索 / symbol / references / outline / read）、
 answer（`/v1/ask` 问答 + `/v1/conversations*` 历史会话）。
 """
@@ -21,6 +22,7 @@ from . import (
     conversations,
     health,
     invites,
+    minecraft_versions,
     retrieval,
     setup,
     tokens,
@@ -35,6 +37,7 @@ api_router.include_router(tokens.router)
 api_router.include_router(invites.router)
 api_router.include_router(admin.router)
 api_router.include_router(versions.router)
+api_router.include_router(minecraft_versions.router)
 api_router.include_router(admin_versions.router)
 api_router.include_router(admin_jobs.router)
 api_router.include_router(admin_settings.router)

@@ -76,7 +76,7 @@ def usage_rows(conn: sqlite3.Connection) -> Callable[[], list[sqlite3.Row]]:
     def read() -> list[sqlite3.Row]:
         return list(
             conn.execute(
-                "SELECT user_id, kind, model, prompt_tokens, completion_tokens, cost_usd,"
+                "SELECT user_id, kind, model, prompt_tokens, completion_tokens,"
                 " latency_ms, version FROM usage ORDER BY id"
             ).fetchall()
         )
@@ -385,8 +385,6 @@ def test_ask_writes_one_usage_row_per_request(
     assert row["model"] == "fake-model"
     assert row["prompt_tokens"] == 11 * 2
     assert row["completion_tokens"] == 7 * 2
-    # 未配单价：只记 token，不计成本（不编假单价）。
-    assert row["cost_usd"] == 0
     assert row["version"] == VERSION
     assert row["latency_ms"] >= 0
 
@@ -403,19 +401,6 @@ def test_ask_writes_usage_row_when_degraded(
     assert rows[0]["kind"] == "ask"
     # 那次失败的调用没有 usage，因此记 0。
     assert rows[0]["prompt_tokens"] == 0
-
-
-def test_ask_cost_uses_configured_prices(
-    user_client: TestClient, indexed: Path, fake_chat: FakeChat, settings: Settings, usage_rows: Any
-) -> None:
-    settings.llm_input_price_per_m = 1.0
-    settings.llm_output_price_per_m = 2.0
-    fake_chat.script = [final_answer("答案。")]
-
-    ask(user_client)
-
-    row = usage_rows()[0]
-    assert row["cost_usd"] == pytest.approx(11 / 1_000_000 * 1.0 + 7 / 1_000_000 * 2.0)
 
 
 def test_ask_returns_ok_when_alert_webhook_fails(

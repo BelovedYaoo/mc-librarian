@@ -17,7 +17,6 @@ from fastapi import APIRouter, Query
 
 from mc_librarian import alerts, usage
 from mc_librarian.auth.deps import CurrentAdmin, DatabaseDep, DbConn, SettingsDep
-from mc_librarian.config import pricing_configured
 from mc_librarian.problems import problem_response
 from mc_librarian.schemas import UsageReport
 
@@ -57,7 +56,6 @@ def get_usage(
         end=end,
         user_id=user_id,
         group_by=group_by,
-        cost_configured=pricing_configured(settings),
     )
 
     # 规格 §6.2：打开用量页也顺带检查一次（幂等，靠 `alert_events` 的唯一约束去重）。

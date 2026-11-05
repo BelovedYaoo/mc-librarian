@@ -57,6 +57,9 @@ export type AcceptInviteRequest =
 /** 版本注册表里的一行（`GET /v1/versions`）。 */
 export type VersionInfo = components['schemas']['VersionInfo'];
 
+/** Mojang 清单里的一个 release 版本（`GET /v1/minecraft-versions`）。 */
+export type MinecraftVersion = components['schemas']['MinecraftVersion'];
+
 /** 实例设置（`GET/PUT /v1/admin/settings`）：数据库覆盖 + 运行时配置兜底。 */
 export type AdminSettings = components['schemas']['Settings'];
 
@@ -359,6 +362,18 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 /** 已索引版本列表（登录后可读）。 */
 export async function listVersions(signal?: AbortSignal): Promise<VersionInfo[]> {
   const body = await request<{ versions?: VersionInfo[] }>('/v1/versions', { signal });
+
+  return body.versions ?? [];
+}
+
+/**
+ * 可注册的 Minecraft 版本（仅 admin）：从 Mojang 版本清单拉取的 release 列表，按发布时间倒序。
+ * 供版本页「注册索引」的可搜索下拉框使用，避免手打版本号打错。
+ */
+export async function listMinecraftVersions(signal?: AbortSignal): Promise<MinecraftVersion[]> {
+  const body = await request<{ versions?: MinecraftVersion[] }>('/v1/minecraft-versions', {
+    signal,
+  });
 
   return body.versions ?? [];
 }

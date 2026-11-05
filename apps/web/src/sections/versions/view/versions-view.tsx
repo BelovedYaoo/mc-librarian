@@ -2,6 +2,7 @@ import type { VersionInfo } from 'src/lib/api-client';
 
 import { useState } from 'react';
 import Alert from '@mui/material/Alert';
+import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Card from '@mui/material/Card';
@@ -23,7 +24,7 @@ import { useNavigate } from 'react-router';
 
 import { useAuth } from 'src/auth';
 
-import { useAdminSettings, useVersions } from 'src/hooks';
+import { useAdminSettings, useMinecraftVersions, useVersions } from 'src/hooks';
 
 import { ApiError, createJob, registerVersion } from 'src/lib/api-client';
 
@@ -90,6 +91,12 @@ export function VersionsView() {
           open={registerOpen}
           onClose={() => setRegisterOpen(false)}
           onRegistered={refresh}
+          registered={state.status === 'ready' ? state.versions.map((item) => item.version) : []}
+          dataDir={
+            settingsState.status === 'ready'
+              ? (settingsState.settings?.index?.data_dir ?? null)
+              : null
+          }
         />
       )}
 
@@ -186,19 +193,39 @@ function formatTime(value: string): string {
 
 // ----------------------------------------------------------------------
 
+/** 版本下拉的一项：版本号 + 是否已注册。 */
+type VersionOption = { id: string; registered: boolean };
+
 type RegisterDialogProps = {
   open: boolean;
   onClose: () => void;
   onRegistered: () => void;
+  /** 已注册的版本号：下拉里标注「已注册」，避免重复注册时的困惑。 */
+  registered: string[];
+  /** 数据根绝对路径（从设置读）：提示用户把 `db/<版本>.sqlite` 放到哪里。 */
+  dataDir: string | null;
 };
 
 /** 注册已上传的 `db/<version>.sqlite`：部署流程（D9）里索引在本地构建、上传后登记。 */
-function RegisterDialog({ open, onClose, onRegistered }: RegisterDialogProps) {
+function RegisterDialog({ open, onClose, onRegistered, registered, dataDir }: RegisterDialogProps) {
   const [version, setVersion] = useState('');
   // 缺省按「已 remap」：未声明时后端也按此记录，26.x 这类不混淆的版本请手动取消勾选。
   const [obfuscated, setObfuscated] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 只在对话框打开时才拉（后端有 1 小时缓存，关着不拉不浪费）。
+  const { state: versionsState } = useMinecraftVersions(open);
+  const registeredSet = new Set(registered);
+  const options: VersionOption[] =
+    versionsState.status === 'ready'
+      ? versionsState.versions.map((item) => ({
+          id: item.id,
+          registered: registeredSet.has(item.id),
+        }))
+      : [];
+  const dataDirHint = dataDir
+    ? `先把本地生成的 db/<版本>.sqlite 放进数据根：${dataDir}`
+    : '先把本地生成的 db/<版本>.sqlite 放进数据根';
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -223,16 +250,36 @@ function RegisterDialog({ open, onClose, onRegistered }: RegisterDialogProps) {
 
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              label="版本"
-              value={version}
-              onChange={(event) => setVersion(event.target.value)}
-              placeholder="26.3"
-              helperText="先把本地生成的 db/<版本>.sqlite 放进数据根，再在这里填版本号"
-              autoFocus
-              required
-              fullWidth
+            <Autocomplete
+              freeSolo
+              options={options}
+              inputValue={version}
+              onInputChange={(_, value) => setVersion(value)}
+              loading={versionsState.status === 'loading'}
+              getOptionLabel={(option) => (typeof option === 'string' ? option : option.id)}
+              renderOption={(props, option) => (
+                <li {...props} key={option.id}>
+                  {option.registered ? `${option.id}（已注册）` : option.id}
+                </li>
+              )}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="版本"
+                  placeholder="26.3"
+                  helperText={dataDirHint}
+                  autoFocus
+                  required
+                  fullWidth
+                />
+              )}
             />
+
+            {versionsState.status === 'error' && (
+              <Alert severity="warning">
+                拉取版本列表失败（{versionsState.message}），可以直接手输版本号。
+              </Alert>
+            )}
 
             <FormControlLabel
               control={
