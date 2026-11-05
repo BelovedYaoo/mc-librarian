@@ -149,6 +149,13 @@ export function BrowseView() {
     setSlice(null);
     setSliceError(null);
 
+    // 补丁命中的 `path` 是补丁文件（不在 `<data_dir>/src/<version>/` 里）：`/v1/outline` 与
+    // `/v1/read` 都打不开它，片段已在 `hit.snippet`（hunk 正文）里，直接跳过骨架与切片，
+    // 别弹一个注定 404 的错误（issue #24 的 `Hit.type = patch`）。
+    if (hit.type === 'patch') {
+      return;
+    }
+
     if (hit.symbol) {
       try {
         const body = await getSymbol({ version, name: hit.symbol, fuzzy: false });
@@ -416,6 +423,7 @@ function HitRow({
 
         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
           {hit.path}:{hit.lines.join('-')}
+          {hit.target ? ` → ${hit.target}` : ''}
         </Typography>
 
         <Chip size="small" variant="outlined" label={`score ${hit.score.toFixed(3)}`} />
