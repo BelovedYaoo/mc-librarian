@@ -182,7 +182,7 @@ def insert_job_row(
 def test_migration_creates_job_tables(tmp_path: Path) -> None:
     database = Database.for_data_dir(tmp_path / "data")
 
-    assert database.initialize() == LATEST_VERSION == 11
+    assert database.initialize() == LATEST_VERSION == 12
 
     with database.connect() as conn:
         tables = {
@@ -215,7 +215,7 @@ def test_v5_migration_preserves_existing_jobs_and_logs(tmp_path: Path) -> None:
             ("legacy", "2026-11-03T00:00:00Z", "旧日志"),
         )
 
-    assert database.initialize() == LATEST_VERSION == 11
+    assert database.initialize() == LATEST_VERSION == 12
 
     with database.connect() as conn:
         assert conn.execute("SELECT count(*) AS c FROM job_logs").fetchone()["c"] == 1
@@ -1637,3 +1637,92 @@ def test_checkpoint_int_falls_back_for_bad_values() -> None:
     assert checkpoint_int({"files": None}, "files") == 0
     assert checkpoint_int({"files": "6"}, "files") == 0
     assert checkpoint_int({"files": True}, "files") == 0
+
+
+# ----------------------------------------------------------------------
+# 加载器版本元数据（issue #24 规格 §1）
+# ----------------------------------------------------------------------
+
+
+def test_version_identity_derives_loader_metadata() -> None:
+    """加载器形式 `neoforge-21.1.265+1.21.1` 拆成三列；原版版本三列退化为 `mc_version == version`。"""
+    loader = store.version_identity("neoforge-21.1.265+1.21.1")
+
+    assert (loader.loader, loader.loader_version, loader.mc_version) == (
+        "neoforge",
+        "21.1.265",
+        "1.21.1",
+    )
+
+    plain = store.version_identity("26.3")
+
+    assert (plain.loader, plain.loader_version, plain.mc_version) == (None, None, "26.3")
+
+
+def test_validate_version_identity_rejects_inconsistent_metadata() -> None:
+    """`version` 与三列必须自洽（规格 §1）：加载器版本拼不回去就拒绝。"""
+    store.validate_version_identity("neoforge-1.0+1.21.1", "neoforge", "1.0", "1.21.1")
+    store.validate_version_identity("26.3", None, None, "26.3")
+
+    with pytest.raises(ValueError):
+        store.validate_version_identity("neoforge-1.0+1.21.1", "neoforge", "1.0", "1.20.1")
+
+    with pytest.raises(ValueError):
+        store.validate_version_identity("26.3", None, "1.0", "26.3")
+
+    with pytest.raises(ValueError):
+        store.validate_version_identity("26.3", None, None, "1.21.1")
+
+
+def test_v12_backfills_loader_metadata_for_existing_versions(tmp_path: Path) -> None:
+    """已部署的 v11 库升到 v12：三列以追加列补上，老行按原版 MC 回填（`mc_version = version`）。"""
+    database = Database.for_data_dir(tmp_path / "data")
+
+    with database.connect() as conn:
+        schema_version(conn)
+
+        for migration in MIGRATIONS[:11]:
+            for statement in migration.statements:
+                conn.execute(statement)
+
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (migration.version, "2026-11-03T00:00:00Z"),
+            )
+
+        conn.execute(
+            "INSERT INTO versions (version, files, tokens, indexed_at) VALUES (?, ?, ?, ?)",
+            ("26.3", 10, 100, "2026-11-03T00:00:00Z"),
+        )
+
+    assert database.initialize() == LATEST_VERSION == 12
+
+    with database.connect() as conn:
+        row = conn.execute(
+            "SELECT version, loader, loader_version, mc_version FROM versions"
+        ).fetchone()
+
+    assert row["version"] == "26.3"
+    assert row["loader"] is None
+    assert row["loader_version"] is None
+    assert row["mc_version"] == "26.3"
+
+
+def test_register_version_records_loader_metadata(
+    admin_client: TestClient, settings: Settings
+) -> None:
+    """注册加载器版本：`/v1/versions` 回 loader / loader_version / mc_version。"""
+    version = "neoforge-21.1.265+1.21.1"
+    write_index(settings.data_dir / "db" / f"{version}.sqlite", tokens=4096)
+
+    created = admin_client.post("/v1/admin/versions", json={"version": version})
+
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["loader"] == "neoforge"
+    assert body["loader_version"] == "21.1.265"
+    assert body["mc_version"] == "1.21.1"
+
+    listed = admin_client.get("/v1/versions").json()["versions"][0]
+    assert listed["loader"] == "neoforge"
+    assert listed["mc_version"] == "1.21.1"

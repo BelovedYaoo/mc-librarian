@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from mc_librarian.db import utc_now
@@ -17,14 +19,73 @@ from mc_librarian.schemas import Job, JobLog, LogLevel, VersionInfo
 # 可以重试的终态：保留 checkpoint 重新入队，从下一个未完成阶段续跑。
 RETRYABLE_STATUSES: tuple[str, ...] = ("failed", "canceled")
 
+# 加载器版本的标识形式：`<loader>-<loader_version>+<mc_version>`（issue #24 规格 §1）。
+# 加载器名只允许字母/数字（NeoForge / Forge / Fabric），因此第一个 `-` 一定是分隔符。
+LOADER_VERSION_PATTERN = re.compile(
+    r"^(?P<loader>[A-Za-z][A-Za-z0-9]*)-(?P<loader_version>[^+]+)\+(?P<mc_version>[^+]+)$"
+)
+
 _JOB_COLUMNS = (
     "id, kind, version, status, stage, progress, message, error,"
     " checkpoint, options, cancel_requested, created_at, started_at, finished_at, created_by"
 )
 
 _VERSION_COLUMNS = (
-    "version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path"
+    "version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path,"
+    " loader, loader_version, mc_version"
 )
+
+
+@dataclass(frozen=True)
+class VersionIdentity:
+    """`version` 字符串推导出的加载器元数据（issue #24 规格 §1）。
+
+    原版 MC（`26.3` / `1.21.1`）的 `loader`/`loader_version` 为 `None`，`mc_version == version`；
+    加载器版本（`neoforge-21.1.265+1.21.1`）三列都非空，且 `version` 必须等于拼出来的形式。
+    """
+
+    loader: str | None
+    loader_version: str | None
+    mc_version: str
+
+
+def version_identity(version: str) -> VersionIdentity:
+    """从 `version` 字符串推导加载器元数据；不是加载器形式就当作原版 MC。"""
+    matched = LOADER_VERSION_PATTERN.match(version)
+
+    if matched is None:
+        return VersionIdentity(loader=None, loader_version=None, mc_version=version)
+
+    return VersionIdentity(
+        loader=matched.group("loader"),
+        loader_version=matched.group("loader_version"),
+        mc_version=matched.group("mc_version"),
+    )
+
+
+def validate_version_identity(
+    version: str, loader: str | None, loader_version: str | None, mc_version: str | None
+) -> None:
+    """校验 `version` 与三列自洽（issue #24 规格 §1），不自洽时抛 `ValueError`。
+
+    写入路径先用 `version_identity` 推导再回写，本函数是「推导结果真的能拼回 `version`」的
+    最后一道闸门：加载器名里混进 `-`/`+` 之类的字符会在这里暴露，而不是静默登记一行
+    拼不回去的版本。
+    """
+    if loader is None:
+        if loader_version is not None:
+            raise ValueError(f"原版版本的 loader_version 必须为空：{version}")
+
+        if mc_version != version:
+            raise ValueError(f"原版版本的 mc_version 必须等于 version：{version} != {mc_version}")
+
+        return
+
+    if not loader_version or not mc_version:
+        raise ValueError(f"加载器版本的 loader_version/mc_version 不能为空：{version}")
+
+    if version != f"{loader}-{loader_version}+{mc_version}":
+        raise ValueError(f"version 与三列不自洽：{version} != {loader}-{loader_version}+{mc_version}")
 
 
 def _loads(raw: object) -> dict[str, Any]:
@@ -452,6 +513,9 @@ def row_to_version(row: sqlite3.Row) -> VersionInfo:
         obfuscated=bool(row["obfuscated"]),
         has_summaries=bool(row["has_summaries"]),
         source_size_bytes=int(row["source_size_bytes"]),
+        loader=row["loader"],
+        loader_version=row["loader_version"],
+        mc_version=row["mc_version"],
     )
 
 
@@ -470,13 +534,18 @@ def register_version(
 
     `source_size_bytes` 为 `None` 表示源码树不在数据根（注册时只上传了 `db/`）：upsert **不
     参与更新**，保留已注册行里的原值；首次注册写 0。传具体值时才覆盖，避免二次注册把之前
-    算出的非零值清零。
+    算出的非零值清零。加载器元数据三列由 `version` 推导（`version_identity`），写入前校验自洽。
     """
+    identity = version_identity(version)
+    validate_version_identity(
+        version, identity.loader, identity.loader_version, identity.mc_version
+    )
     conn.execute(
         """
         INSERT INTO versions (
-          version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
-        ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?)
+          version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path,
+          loader, loader_version, mc_version
+        ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?, ?)
         ON CONFLICT (version) DO UPDATE SET
           files = excluded.files,
           tokens = excluded.tokens,
@@ -484,7 +553,10 @@ def register_version(
           obfuscated = excluded.obfuscated,
           has_summaries = excluded.has_summaries,
           source_size_bytes = COALESCE(?, source_size_bytes),
-          db_path = excluded.db_path
+          db_path = excluded.db_path,
+          loader = excluded.loader,
+          loader_version = excluded.loader_version,
+          mc_version = excluded.mc_version
         """,
         (
             version,
@@ -495,6 +567,9 @@ def register_version(
             1 if has_summaries else 0,
             source_size_bytes,
             db_path,
+            identity.loader,
+            identity.loader_version,
+            identity.mc_version,
             source_size_bytes,
         ),
     )
@@ -523,13 +598,18 @@ def insert_version_if_absent(
     `source_size_bytes` 来自 checkpoint（`download` / `parse` 阶段写入），`has_summaries` 按
     任务是否跑过 `summarize`（#7）传。版本已存在（管理员注册过）时**一个字段都不动**，
     返回 `None` 让调用方知道没写；任务产出不是权威索引，想替换已注册版本请重新注册
-    （docs/01-api.md §7）。
+    （docs/01-api.md §7）。加载器元数据三列由 `version` 推导（`version_identity`）。
     """
+    identity = version_identity(version)
+    validate_version_identity(
+        version, identity.loader, identity.loader_version, identity.mc_version
+    )
     cursor = conn.execute(
         """
         INSERT INTO versions (
-          version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path,
+          loader, loader_version, mc_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (version) DO NOTHING
         """,
         (
@@ -541,6 +621,9 @@ def insert_version_if_absent(
             1 if has_summaries else 0,
             source_size_bytes,
             db_path,
+            identity.loader,
+            identity.loader_version,
+            identity.mc_version,
         ),
     )
 

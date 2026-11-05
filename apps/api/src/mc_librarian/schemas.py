@@ -22,8 +22,9 @@ LogLevel = Literal["debug", "info", "warn", "error"]
 
 # 版本号允许的字符（契约 `JobCreate.version` / `RegisterVersionRequest.version` 的 pattern）。
 # 版本号会进文件路径（`db/<version>.sqlite`、`cache/<version>/`），带 `/` 会跑出数据根，
-# 所以 `mc-librarian index` 的 CLI 也用同一条正则先校验一次。
-VERSION_PATTERN: Final = r"^[A-Za-z0-9._-]+$"
+# 所以 `mc-librarian index` 的 CLI 也用同一条正则先校验一次。`+` 给加载器版本
+# （`neoforge-21.1.265+1.21.1`，issue #24 规格 §1）。
+VERSION_PATTERN: Final = r"^[A-Za-z0-9._+-]+$"
 
 # `-Xmx` 的值：数字 + 单位，避免把任意字符串拼进 java 命令行（设置页与 `config.Settings`
 # 的校验共用同一条；`config` 从这里 import，避免 schemas → config 的模块级循环）。
@@ -35,6 +36,8 @@ SymbolDetailKind = Literal["class", "method", "field"]
 ClassKind = Literal["class", "interface", "enum", "record", "annotation"]
 ReferenceKind = Literal["call", "field", "type", "other"]
 MemberKind = Literal["method", "field"]
+# 索引来源（issue #24 规格 §2）：`patched` 打过补丁的 MC、`loader` 加载器自身、`patch` 补丁 hunk。
+SourceKind = Literal["patched", "loader", "patch"]
 
 __all__ = [
     "VERSION_PATTERN",
@@ -104,6 +107,7 @@ __all__ = [
     "SettingsUpdate",
     "SetupRequest",
     "SetupStatus",
+    "SourceKind",
     "SymbolDetail",
     "SymbolDetailKind",
     "SymbolKind",
@@ -293,7 +297,12 @@ class JobLogList(BaseModel):
 
 
 class VersionInfo(BaseModel):
-    """契约 `components.schemas.VersionInfo`。"""
+    """契约 `components.schemas.VersionInfo`。
+
+    `loader`/`loader_version`/`mc_version` 是加载器元数据（issue #24 规格 §1）：原版 MC 的
+    `loader`/`loader_version` 为 `None`、`mc_version` 等于 `version`；加载器版本
+    （`neoforge-21.1.265+1.21.1`）三列都非空。三者由 `version` 推导（`jobs.store.version_identity`）。
+    """
 
     version: str
     files: int
@@ -305,6 +314,10 @@ class VersionInfo(BaseModel):
     # 摘要覆盖率（#7 规格 §8）：已生成的摘要条数 / 类总数，从索引库实时读。
     summary_count: int | None = None
     class_count: int | None = None
+    # 加载器元数据（issue #24）：原版版本的前两列为 None、`mc_version` 等于 `version`。
+    loader: str | None = None
+    loader_version: str | None = None
+    mc_version: str | None = None
 
 
 class VersionList(BaseModel):

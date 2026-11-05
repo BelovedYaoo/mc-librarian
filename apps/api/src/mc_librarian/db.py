@@ -58,6 +58,9 @@ class Migration:
 # v9：历史会话（conversations/messages，问答页左栏）；
 # v10：`messages.version`（历史引用的版本口径）。
 # v11：删 `usage.cost_usd`（用户决定只审计 token、不算金额）。
+# v12：`versions` 加加载器元数据三列（issue #24）：`loader`（原版为 NULL）、`loader_version`、
+# `mc_version`。三列由 `version` 字符串推导（见 `jobs.store.version_identity`），写入时自洽。
+# 老行（v12 之前注册的版本）都是原版 MC：`mc_version = version`、`loader`/`loader_version` 为 NULL。
 # 后续 ticket 在末尾继续追加，不改已有版本。
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
@@ -361,6 +364,16 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
         version=11,
         statements=("ALTER TABLE usage DROP COLUMN cost_usd",),
+    ),
+    Migration(
+        version=12,
+        statements=(
+            "ALTER TABLE versions ADD COLUMN loader TEXT",
+            "ALTER TABLE versions ADD COLUMN loader_version TEXT",
+            "ALTER TABLE versions ADD COLUMN mc_version TEXT",
+            # 老行都是原版 MC（加载器版本是本票才引入的）：`mc_version` 回填成 `version`。
+            "UPDATE versions SET mc_version = version WHERE mc_version IS NULL",
+        ),
     ),
 )
 

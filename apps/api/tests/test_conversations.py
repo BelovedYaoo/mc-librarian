@@ -352,7 +352,7 @@ def test_v10_adds_the_version_column_to_existing_messages(tmp_path: Path) -> Non
             " VALUES ('m1', 'c1', 'assistant', '旧答案', '2026-11-03T00:00:00Z')"
         )
 
-    assert database.initialize() == LATEST_VERSION == 11
+    assert database.initialize() == LATEST_VERSION == 12
 
     with database.connect() as conn:
         loaded = conversations.messages(conn, conversation_id="c1")

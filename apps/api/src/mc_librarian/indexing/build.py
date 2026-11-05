@@ -7,6 +7,9 @@
 `MAX_PARSE_FAILURE_RATIO` 则整体失败，说明环境有问题（例如 tree-sitter 语法版本不匹配）。
 
 另提供 `read_index_totals`：只读读回已有索引库的统计，供流水线复用已有索引与 `index` CLI 汇总。
+
+issue #24：一个任务可以同时索引多类内容（`sources`），按 `kind` 分派——Java 目录（`patched` /
+`loader`）走 tree-sitter，patch 目录（`patch`）走 hunk 切块（`indexing.patches`）。
 """
 
 from __future__ import annotations
@@ -15,14 +18,15 @@ import json
 import os
 import shutil
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from mc_librarian.indexing import java
+from mc_librarian.indexing import java, patches
+from mc_librarian.indexing.summarize import segment
 from mc_librarian.indexing.text import count_lines, count_tokens
-from mc_librarian.schemas import LogLevel
+from mc_librarian.schemas import LogLevel, SourceKind
 
 JAVA_SUFFIX: Final = ".java"
 JSON_SUFFIX: Final = ".json"
@@ -32,6 +36,10 @@ DATA_DIR_NAME: Final = "data"
 MAX_PARSE_FAILURE_RATIO: Final = 0.2
 
 # 规格 §1 的 schema。`classes(fqn)` 由 UNIQUE 约束隐式建索引，不再重复建一条。
+#
+# issue #24：`files`/`classes`/`methods`/`fields`/`refs` 各加 `source`（`patched`/`loader`），
+# 原版 MC 的索引所有行 `source = 'patched'`；`patches`/`patches_fts` 是加载器补丁的切块索引
+# （切块单位是 hunk，见 `indexing.patches`）。
 SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     """
     CREATE TABLE files (
@@ -39,7 +47,8 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
       path   TEXT NOT NULL UNIQUE,
       pkg    TEXT,
       loc    INTEGER NOT NULL DEFAULT 0,
-      tokens INTEGER NOT NULL DEFAULT 0
+      tokens INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL
     )
     """,
     """
@@ -54,7 +63,8 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
       interfaces  TEXT NOT NULL DEFAULT '[]',
       annotations TEXT NOT NULL DEFAULT '[]',
       start_line  INTEGER NOT NULL,
-      end_line    INTEGER NOT NULL
+      end_line    INTEGER NOT NULL,
+      source      TEXT NOT NULL
     )
     """,
     """
@@ -68,7 +78,8 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
       modifiers   TEXT NOT NULL DEFAULT '[]',
       annotations TEXT NOT NULL DEFAULT '[]',
       start_line  INTEGER NOT NULL,
-      end_line    INTEGER NOT NULL
+      end_line    INTEGER NOT NULL,
+      source      TEXT NOT NULL
     )
     """,
     """
@@ -80,7 +91,8 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
       modifiers   TEXT NOT NULL DEFAULT '[]',
       annotations TEXT NOT NULL DEFAULT '[]',
       start_line  INTEGER NOT NULL,
-      end_line    INTEGER NOT NULL
+      end_line    INTEGER NOT NULL,
+      source      TEXT NOT NULL
     )
     """,
     """
@@ -89,7 +101,8 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
       from_method_id INTEGER NOT NULL REFERENCES methods (id),
       target_name    TEXT NOT NULL,
       kind           TEXT NOT NULL,
-      line           INTEGER NOT NULL
+      line           INTEGER NOT NULL,
+      source         TEXT NOT NULL
     )
     """,
     "CREATE INDEX idx_classes_simple ON classes (simple)",
@@ -97,6 +110,26 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     "CREATE INDEX idx_methods_class ON methods (class_id)",
     "CREATE INDEX idx_fields_name ON fields (name)",
     "CREATE INDEX idx_refs_target ON refs (target_name)",
+    # 补丁 hunk（issue #24 规格 §2）：`context` 是 hunk 头 + diff 正文；`tokens` 与 `files` 同口径。
+    """
+    CREATE TABLE patches (
+      id         INTEGER PRIMARY KEY,
+      path       TEXT NOT NULL,
+      target     TEXT NOT NULL,
+      hunk_index INTEGER NOT NULL,
+      old_start  INTEGER,
+      old_lines  INTEGER,
+      new_start  INTEGER,
+      new_lines  INTEGER,
+      context    TEXT NOT NULL,
+      tokens     INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX idx_patches_target ON patches (target)",
+    "CREATE INDEX idx_patches_path ON patches (path)",
+    # FTS5 + jieba 预分词（与 `summaries_fts` 同口径）：`rowid` 钉成 `patches.id`。
+    "CREATE VIRTUAL TABLE patches_fts"
+    " USING fts5(path, target, context, tokenize = 'unicode61')",
 )
 
 
@@ -105,14 +138,31 @@ class BuildError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SourceSpec:
+    """一类待索引的内容：`kind` 是 `patched`/`loader`/`patch`，`root` 是它的目录。
+
+    `patched`/`loader` 是 Java 源码目录（走 tree-sitter，行写 `source` 列）；`patch` 是补丁目录
+    （走 hunk 切块，写 `patches` 表，不写 `source` 列）。
+    """
+
+    kind: SourceKind
+    root: Path
+
+
+@dataclass(frozen=True)
 class BuildResult:
-    """一次构建的汇总；前三个字段与 `#4` 的 checkpoint 口径一致。"""
+    """一次构建的汇总；前三个字段与 `#4` 的 checkpoint 口径一致。
+
+    `patch_files`/`patch_hunks` 是补丁切块的计数（issue #24），非补丁索引时为 0。
+    """
 
     files: int
     tokens: int
     source_size_bytes: int
     parsed: int
     skipped: int
+    patch_files: int = 0
+    patch_hunks: int = 0
 
 
 @dataclass(frozen=True)
@@ -132,6 +182,7 @@ class _FileRecord:
     loc: int
     tokens: int
     parsed: java.ParsedFile | None
+    source: SourceKind
 
 
 def iter_source_files(root: Path) -> Iterator[Path]:
@@ -242,16 +293,90 @@ def source_tree_size_bytes(root: Path) -> int:
 def build_index(
     root: Path, db_path: Path, *, log: Callable[[LogLevel, str], None]
 ) -> BuildResult:
-    """解析 `root` 下的源码并写出 `db_path`；返回汇总统计。"""
+    """单目录入口（既有调用）：等价于 `sources: [{kind: "patched", root}]`。
+
+    保留这个签名，让 #4/#5/#7 的调用点与测试不需要知道多来源。
+    """
+    return build_index_from_sources(
+        [SourceSpec(kind="patched", root=root)], db_path, log=log
+    )
+
+
+def build_index_from_sources(
+    sources: Sequence[SourceSpec],
+    db_path: Path,
+    *,
+    log: Callable[[LogLevel, str], None],
+) -> BuildResult:
+    """解析 `sources` 里的各类内容并写出 `db_path`；返回汇总统计（issue #24 规格 §3）。
+
+    Java 目录按 `kind` 标记每行的 `source`；patch 目录切成 hunk 写 `patches` 表。
+    """
     records: list[_FileRecord] = []
+    hunks: list[patches.PatchHunk] = []
+    patch_files = 0
     java_total = 0
     parsed = 0
     skipped = 0
     total_tokens = 0
     total_size = 0
 
-    for path in iter_source_files(root):
-        relative = path.relative_to(root).as_posix()
+    for source in sources:
+        if source.kind == "patch":
+            file_count, file_hunks = _collect_patches(source.root, log=log)
+            patch_files += file_count
+            hunks.extend(file_hunks)
+            continue
+
+        collected, stats = _collect_java(source, log=log)
+        records.extend(collected)
+        java_total += stats.java_total
+        parsed += stats.parsed
+        skipped += stats.skipped
+        total_tokens += stats.tokens
+        total_size += stats.size_bytes
+
+    if java_total and skipped / java_total > MAX_PARSE_FAILURE_RATIO:
+        raise BuildError(
+            f"解析失败率过高：{skipped}/{java_total} 个 .java 文件失败"
+            f"（阈值 {MAX_PARSE_FAILURE_RATIO:.0%}），请检查 tree-sitter 语法包是否匹配"
+        )
+
+    _write_index(db_path, records, hunks)
+
+    return BuildResult(
+        files=len(records),
+        tokens=total_tokens,
+        source_size_bytes=total_size,
+        parsed=parsed,
+        skipped=skipped,
+        patch_files=patch_files,
+        patch_hunks=len(hunks),
+    )
+
+
+@dataclass(frozen=True)
+class _JavaStats:
+    java_total: int
+    parsed: int
+    skipped: int
+    tokens: int
+    size_bytes: int
+
+
+def _collect_java(
+    source: SourceSpec, *, log: Callable[[LogLevel, str], None]
+) -> tuple[list[_FileRecord], _JavaStats]:
+    """一个 Java 源码目录 → 文件记录 + 计数。"""
+    records: list[_FileRecord] = []
+    java_total = 0
+    parsed = 0
+    skipped = 0
+    tokens_total = 0
+    size_total = 0
+
+    for path in iter_source_files(source.root):
+        relative = path.relative_to(source.root).as_posix()
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -262,8 +387,8 @@ def build_index(
             continue
 
         tokens = count_tokens(text)
-        total_tokens += tokens
-        total_size += size_bytes
+        tokens_total += tokens
+        size_total += size_bytes
         parsed_file: java.ParsedFile | None = None
 
         if path.suffix == JAVA_SUFFIX:
@@ -285,27 +410,44 @@ def build_index(
                 loc=count_lines(text),
                 tokens=tokens,
                 parsed=parsed_file,
+                source=source.kind,
             )
         )
 
-    if java_total and skipped / java_total > MAX_PARSE_FAILURE_RATIO:
-        raise BuildError(
-            f"解析失败率过高：{skipped}/{java_total} 个 .java 文件失败"
-            f"（阈值 {MAX_PARSE_FAILURE_RATIO:.0%}），请检查 tree-sitter 语法包是否匹配"
-        )
-
-    _write_index(db_path, records)
-
-    return BuildResult(
-        files=len(records),
-        tokens=total_tokens,
-        source_size_bytes=total_size,
+    return records, _JavaStats(
+        java_total=java_total,
         parsed=parsed,
         skipped=skipped,
+        tokens=tokens_total,
+        size_bytes=size_total,
     )
 
 
-def _write_index(db_path: Path, records: list[_FileRecord]) -> None:
+def _collect_patches(
+    root: Path, *, log: Callable[[LogLevel, str], None]
+) -> tuple[int, list[patches.PatchHunk]]:
+    """一个补丁目录 → (补丁文件数, 全部 hunk)。"""
+    hunks: list[patches.PatchHunk] = []
+    files = 0
+
+    for path in patches.iter_patch_files(root):
+        relative = path.relative_to(root).as_posix()
+
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            log("warn", f"parse：跳过补丁 {relative}（{error}）")
+            continue
+
+        files += 1
+        hunks.extend(patches.parse_patch_file(text, path=relative))
+
+    return files, hunks
+
+
+def _write_index(
+    db_path: Path, records: list[_FileRecord], hunks: list[patches.PatchHunk]
+) -> None:
     """建库 + 写数据 + 原子替换。临时文件与目标同目录，`os.replace` 才是原子的。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     temp = db_path.parent / f".{db_path.name}.{os.getpid()}.tmp"
@@ -322,6 +464,7 @@ def _write_index(db_path: Path, records: list[_FileRecord]) -> None:
             connection.execute(statement)
 
         _insert_records(connection, records)
+        _insert_patches(connection, hunks)
         connection.commit()
     except BaseException:
         connection.close()
@@ -336,8 +479,8 @@ def _write_index(db_path: Path, records: list[_FileRecord]) -> None:
 def _insert_records(connection: sqlite3.Connection, records: list[_FileRecord]) -> None:
     for record in records:
         cursor = connection.execute(
-            "INSERT INTO files (path, pkg, loc, tokens) VALUES (?, ?, ?, ?)",
-            (record.relative, record.package, record.loc, record.tokens),
+            "INSERT INTO files (path, pkg, loc, tokens, source) VALUES (?, ?, ?, ?, ?)",
+            (record.relative, record.package, record.loc, record.tokens, record.source),
         )
 
         if record.parsed is None:
@@ -346,13 +489,13 @@ def _insert_records(connection: sqlite3.Connection, records: list[_FileRecord]) 
         file_id = int(cursor.lastrowid or 0)
 
         for parsed_class in record.parsed.classes:
-            class_id = _insert_class(connection, file_id, parsed_class)
+            class_id = _insert_class(connection, file_id, parsed_class, record.source)
 
             for method in parsed_class.methods:
                 method_cursor = connection.execute(
                     "INSERT INTO methods (class_id, name, signature, return_type, params,"
-                    " modifiers, annotations, start_line, end_line)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " modifiers, annotations, start_line, end_line, source)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         class_id,
                         method.name,
@@ -363,14 +506,17 @@ def _insert_records(connection: sqlite3.Connection, records: list[_FileRecord]) 
                         _dumps(method.annotations),
                         method.start_line,
                         method.end_line,
+                        record.source,
                     ),
                 )
-                _insert_refs(connection, int(method_cursor.lastrowid or 0), method.refs)
+                _insert_refs(
+                    connection, int(method_cursor.lastrowid or 0), method.refs, record.source
+                )
 
             for parsed_field in parsed_class.fields:
                 connection.execute(
                     "INSERT INTO fields (class_id, name, type, modifiers, annotations,"
-                    " start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " start_line, end_line, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         class_id,
                         parsed_field.name,
@@ -379,16 +525,55 @@ def _insert_records(connection: sqlite3.Connection, records: list[_FileRecord]) 
                         _dumps(parsed_field.annotations),
                         parsed_field.start_line,
                         parsed_field.end_line,
+                        record.source,
                     ),
                 )
 
 
+def _insert_patches(
+    connection: sqlite3.Connection, hunks: list[patches.PatchHunk]
+) -> None:
+    """写 `patches` 表 + `patches_fts`（jieba 预分词，`rowid` 钉成 `patches.id`）。
+
+    此时还没有摘要（`summarize` 阶段才生成）：`patches_fts.context` 先只含 hunk 正文，
+    `summarize` 跑完会把按文件生成的摘要再注入一遍（`refresh_patch_fts`）。
+    """
+    for hunk in hunks:
+        cursor = connection.execute(
+            "INSERT INTO patches (path, target, hunk_index, old_start, old_lines, new_start,"
+            " new_lines, context, tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                hunk.path,
+                hunk.target,
+                hunk.hunk_index,
+                hunk.old_start,
+                hunk.old_lines,
+                hunk.new_start,
+                hunk.new_lines,
+                hunk.context,
+                hunk.tokens,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO patches_fts (rowid, path, target, context) VALUES (?, ?, ?, ?)",
+            (
+                int(cursor.lastrowid or 0),
+                hunk.path,
+                hunk.target,
+                segment(hunk.context),
+            ),
+        )
+
+
 def _insert_class(
-    connection: sqlite3.Connection, file_id: int, parsed_class: java.ParsedClass
+    connection: sqlite3.Connection,
+    file_id: int,
+    parsed_class: java.ParsedClass,
+    source: SourceKind,
 ) -> int:
     cursor = connection.execute(
         "INSERT INTO classes (file_id, fqn, simple, kind, signature, superclass, interfaces,"
-        " annotations, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " annotations, start_line, end_line, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             file_id,
             parsed_class.fqn,
@@ -400,6 +585,7 @@ def _insert_class(
             _dumps(parsed_class.annotations),
             parsed_class.start_line,
             parsed_class.end_line,
+            source,
         ),
     )
 
@@ -407,7 +593,10 @@ def _insert_class(
 
 
 def _insert_refs(
-    connection: sqlite3.Connection, method_id: int, refs: list[java.ParsedRef]
+    connection: sqlite3.Connection,
+    method_id: int,
+    refs: list[java.ParsedRef],
+    source: SourceKind,
 ) -> None:
     """同一方法内相同的 `(target_name, kind)` 只留一条，取最小行号（规格 §5）。"""
     best: dict[tuple[str, str], int] = {}
@@ -420,8 +609,9 @@ def _insert_refs(
 
     for (target_name, kind), line in sorted(best.items(), key=lambda item: (item[1], item[0])):
         connection.execute(
-            "INSERT INTO refs (from_method_id, target_name, kind, line) VALUES (?, ?, ?, ?)",
-            (method_id, target_name, kind, line),
+            "INSERT INTO refs (from_method_id, target_name, kind, line, source)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (method_id, target_name, kind, line, source),
         )
 
 

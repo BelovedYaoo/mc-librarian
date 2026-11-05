@@ -314,9 +314,9 @@ def test_build_index_writes_the_specified_schema(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    assert {"files", "classes", "methods", "fields", "refs"} <= tables
+    assert {"files", "classes", "methods", "fields", "refs", "patches", "patches_fts"} <= tables
     assert {"idx_classes_simple", "idx_methods_name", "idx_methods_class", "idx_fields_name",
-            "idx_refs_target"} <= indexes
+            "idx_refs_target", "idx_patches_target", "idx_patches_path"} <= indexes
     assert columns == {
         "id",
         "file_id",
@@ -329,6 +329,7 @@ def test_build_index_writes_the_specified_schema(tmp_path: Path) -> None:
         "annotations",
         "start_line",
         "end_line",
+        "source",
     }
     assert row["fqn"] == "net.A"
     assert row["kind"] == "class"

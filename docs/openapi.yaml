@@ -552,7 +552,7 @@ paths:
               type: object
               required: [version]
               properties:
-                version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$", examples: ["26.3"] }
+                version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._+-]+$", examples: ["26.3"] }
                 obfuscated: { type: boolean, default: true }
       responses:
         "201":
@@ -983,6 +983,15 @@ components:
         source_size_bytes: { type: integer, description: 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） }
         summary_count: { type: integer, description: 已生成的摘要条数（从索引库实时读，`summaries` 的行数） }
         class_count: { type: integer, description: 类总数（摘要覆盖率的分母，从索引库实时读） }
+        loader:
+          type: [string, "null"]
+          description: 加载器名（`neoforge` / `forge` / `fabric`）；原版 MC 为 null
+        loader_version:
+          type: [string, "null"]
+          description: 加载器自身版本（例如 `21.1.265`）；原版 MC 为 null
+        mc_version:
+          type: [string, "null"]
+          description: 对应的 MC 版本；原版 MC 等于 `version`
 
     MinecraftVersion:
       type: object
@@ -1380,7 +1389,7 @@ components:
       required: [kind, version]
       properties:
         kind: { type: string, enum: [index] }
-        version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._-]+$", examples: ["26.3"] }
+        version: { type: string, minLength: 1, maxLength: 64, pattern: "^[A-Za-z0-9._+-]+$", examples: ["26.3"] }
         options:
           type: object
           properties:
