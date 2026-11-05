@@ -14,7 +14,12 @@ const codeTokenColors = {
     text: '#24292E',
     keyword: '#D73A49',
     string: '#032F62',
-    comment: '#6A737D',
+    /**
+     * github 的官方注释色是 `#6A737D`，但那是配它自己的底色（`#FFFFFF`）的；本项目的代码块底是
+     * `background.neutral`（`#F1F7F4`），`#6A737D` 在它上面只有 4.44:1，低于 AA 的 4.5。
+     * 改用 `grey[700]`（`#454F5B`）→ 7.67:1。与 dark 侧同一处理（官方色配的不是我们的底色）。
+     */
+    comment: '#454F5B',
     number: '#005CC5',
     title: '#6F42C1',
     builtIn: '#E36209',
@@ -26,7 +31,7 @@ const codeTokenColors = {
     /**
      * github-dark 的官方注释色是 `#8B949E`，但那是配它自己的底色（`#0D1117`）的；本项目的代码块底
      * 是 `background.neutral`（`#22322B`，亮度高于 `#0D1117`），`#8B949E` 在它上面只有 4.38:1，
-     * 低于 AA 的 4.5。改用 `grey[500]`（`#919EAB`）→ 4.93:1。light 的注释色不动。
+     * 低于 AA 的 4.5。改用 `grey[500]`（`#919EAB`）→ 4.93:1。
      */
     comment: '#919EAB',
     number: '#79C0FF',
