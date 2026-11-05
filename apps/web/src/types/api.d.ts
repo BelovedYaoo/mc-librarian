@@ -99,8 +99,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 混合检索（摘要 / 符号 / 字面量）
-         * @description 四路召回在服务端融合，调用方不需要知道该用哪条通道：
+         * 混合检索（摘要 / 符号 / 字面量 / 补丁）
+         * @description 五路召回在服务端融合，调用方不需要知道该用哪条通道：
          *
          *     - **symbol** — 索引库的类/方法/字段，复用 `/v1/symbol` 的四级匹配（fqn → simple → 后缀 → 编辑距离）
          *     - **literal** — ripgrep 子进程扫 `<data_dir>/src/<version>/`，按文件路径 + 行号排序

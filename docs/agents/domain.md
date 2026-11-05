@@ -36,7 +36,7 @@ Terms currently in use and their meanings — until `CONTEXT.md` exists, treat t
 - **summary** — the three-line Chinese description of a class, plus its key English identifiers.
 - **symbol** — a class, method, or field extracted from the AST.
 - **hit** — one retrieval result, carrying `why` (which channel recalled it) and a line range.
-- **why** — the recall channel(s) for a hit: `summary`, `symbol`, `literal`, `reference`.
+- **why** — the recall channel(s) for a hit: `summary`, `symbol`, `literal`, `reference`, `patch`.
 - **suggestion** — a follow-up symbol name offered to the caller to rewrite its query.
 - **PAT** — personal access token, `mcl_` prefixed, per user, revocable.
 

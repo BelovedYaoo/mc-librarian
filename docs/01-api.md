@@ -46,7 +46,7 @@
 
 响应里两个字段是刻意设计的：
 
-- **`why`**：`summary` 说明是语义命中（可以信摘要）、`symbol` 说明是名字命中（可能同名不同义）、`literal` 说明只是字面量巧合、`reference` 说明来自引用表反查到的调用点（召回优先、允许误报，`read` 可证伪）。模型据此判断要不要继续 `read`。
+- **`why`**：`summary` 说明是语义命中（可以信摘要）、`symbol` 说明是名字命中（可能同名不同义）、`literal` 说明只是字面量巧合、`reference` 说明来自引用表反查到的调用点（召回优先、允许误报，`read` 可证伪）、`patch` 说明是加载器补丁的 hunk（`path` 是补丁文件，`target` 是被改的源文件）。模型据此判断要不要继续 `read`。
 - **`suggestions`**：从同批命中的方法名/字段名里挑出区分度最高的几个，把「查询改写」变成「挑一个建议」。
 
 `detail=locate` 只返回 `path + lines`，用于「先定位、后精读」的两段式调用，比直接给片段省 5–10 倍 token。
@@ -55,12 +55,13 @@
 的预算会被不存在的片段成本吃掉（实测 26.3：同一 query 下 `locate` 的 token 之和是 `snippet`
 的 1/3–1/8.5，`max_tokens=400` 时能装下 12 条 vs 5 条）。计数口径是 `cl100k_base` 真分词。
 
-**四路候选在服务端用 RRF 融合**：三路的分数量纲不可比（FTS5 的 bm25、符号匹配级别、ripgrep 无分数），
+**五路候选在服务端用 RRF 融合**：各路的分数量纲不可比（FTS5 的 bm25、符号匹配级别、ripgrep 无分数），
 所以不做分数加权，而是 `score(d) = Σ 1/(60 + rank_c(d))`，每路各取前 50 条候选，再按本次最高分
 归一化到 `[0, 1]`。同一实体被多路召回时累加，因此 `why` 会有多个值（顺序固定
-`summary → symbol → literal → reference`）。`total` 是**融合前的候选总数**，不因 `limit` / `max_tokens`
+`summary → symbol → literal → reference → patch`）。`total` 是**融合前的候选总数**，不因 `limit` / `max_tokens`
 截断而变。`max_tokens` 按 score 降序累加 `tokens`，超出预算即丢弃当前及之后的条目，但**至少保留第一条**。
-`path_prefix` 在候选阶段过滤（三路各自带 path 条件），而不是融合之后。
+`path_prefix` 在候选阶段过滤（各路各自带 path 条件），而不是融合之后；`source` 可选过滤
+`patched` / `loader` / `patch`（不传 = 全部来源）。
 
 字面量通道是 ripgrep 子进程（`--json --max-count 50 --max-columns 200 --max-filesize 2M --no-ignore`，
 超时 5 秒）；超时或不可用时该路返回空并写 `warn`，不影响另外几路。引用通道在 query 命中某个符号名时
@@ -228,3 +229,4 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"latenc
 | 2026-11-04 | 0.2.0 | 复审修复（#11 / #12 / #16 合并后）：`resolve_alerts_config()` 只留一份——签名取 `#11` 的 `(settings, conn=None)`（带 `settings` 表覆盖），返回语义取 `#12` 的（阈值非空 `int` / `float`，≤ 0 即该指标不告警），未配置的 `None` 归一成 0；删掉 `#12` 那份重复的 `AlertsConfig` 与只从环境读的 `alert_*` / `MC_LIBRARIAN_ALERT_*` 字段（环境变量名统一为 `MC_LIBRARIAN_ALERTS_*`，与契约块 `Settings.alerts` 对齐），告警阈值只剩 `alerts.*` 一个来源，`alerts.check` 改为带连接解析（`resolve_alerts_config(settings, conn)`），设置页改的阈值从此真的作用于告警；`eval` 跑问答时不再把 `AskRequest.max_steps` / `max_answer_tokens`（`int \| None`，`#11` 去掉了契约里的 default）直接当整数用，改为服务端设置 `settings.ask.max_steps` / `max_answer_tokens`，修掉 `range(None)` 崩溃；`bun run dev` / `bun run smoke` 在未设 `MC_LIBRARIAN_SECRET` 时注入固定的开发默认值并在日志里打印提示（生产仍必须显式设置，启动护栏不变）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-04 | 0.2.0 | 复审修复（#11 / #12 / #16 关闭前）：`scripts/lib/secret.mjs` 在 `MC_LIBRARIAN_ENV=production` 时不再注入开发默认密钥，缺失密钥的启动护栏照常生效（拿 dev / smoke 脚本对生产实例跑不再有一条「能跑但不安全」的路）；启动时检查旧环境变量名 `MC_LIBRARIAN_ALERT_*`，存在就 warn 一行（写清旧名、新名与「旧名已失效」），不再让按旧名配置的部署静默失去告警；告警阈值下限从 1 / > 0 放宽为 0（与文档「阈值 0 = 关闭该指标告警」一致，环境变量写 0 不再启动失败，负数仍 422），契约与前端类型同步；`mc-librarian eval` 叠上 `settings` 表的覆盖（复用 `settings_store.effective_settings`，读不到时退回环境配置并 warn），设置页改的问答步数同样作用于 CLI 评测，`eval.runner` 里「与 `/v1/ask` 同值」的注释自此成立；补一条「`PUT /v1/admin/settings` 写阈值 → `alerts.check` 触发」的端到端用例。属 v0.2 设计内的增量补齐，`info.version` 不变 |
 | 2026-11-05 | 0.2.0 | 三项改动：**(A)** 彻底移除金额统计——迁移 v11 删 `usage.cost_usd`（SQLite `DROP COLUMN`），`usage` 只审计 token，删掉 `estimate_cost_usd` / `resolve_llm_pricing` / `pricing_configured` / `LlmPricing` 与 `MC_LIBRARIAN_LLM_*_PRICE_PER_M`、`MC_LIBRARIAN_ALERTS_DAILY_COST_THRESHOLD_USD`、`Settings.llm` 单价字段、`Settings.alerts.daily_cost_threshold_usd`、`Usage.cost_usd` / `UsageReport.cost_configured` / `UsageReport.buckets[].cost_usd` 与 `METRIC_DAILY_COST_USD`，用量页与问答页不再显示成本。**(B)** 新增 `GET /v1/minecraft-versions`（admin）：从 Mojang 版本清单拉取，只返回 `type == "release"`、按发布时间倒序、进程内缓存 1 小时（网络失败退回缓存，否则 502）；版本页「注册索引」的手打版本号改成可搜索下拉框，已注册版本带「已注册」标记，对话框展示数据根绝对路径（`Settings.index.data_dir`，只读）说明文件往哪放；不做上传端点。**(C)** 把 6 项仅环境变量的配置提取到设置页：`llm.timeout_s`、`ask.max_context_tokens`、`index.enabled`（从只读改为可写）、`index.java`、`index.vineflower_jar`、`index.specialsource_jar`（路径类契约用 `string`，空 = 回退环境变量）；`data_dir` / `env` / `host` / `port` / `secret` / `cookie_secure` 保持只能改环境变量（启动参数、安全护栏、主密钥循环依赖）。属 v0.2 设计内的增量补齐，`info.version` 不变 |
+| 2026-11-05 | 0.2.0 | issue #24：支持加载器源码（NeoForge/Forge/Fabric）——多来源索引 + patch 切块。迁移 v12 给 `versions` 追加 `loader`/`loader_version`/`mc_version`（由 `version` 推导并校验自洽：原版 MC 前两列为 NULL、`mc_version` 等于 `version`；加载器版本形如 `neoforge-21.1.265+1.21.1`），版本号正则放宽以容纳 `+`。索引库的 `files`/`classes`/`methods`/`fields`/`refs` 各加 `source`（`patched`/`loader`；原版索引全部为 `patched`，向后兼容），新增 `patches`/`patches_fts`（切块单位是 hunk：一个 patch 常含多个不相干的改动，整文件当一块给不出位置；`context` 是 hunk 头 + diff 正文）。`JobOptions` 增加 `sources`（`[{kind, dir}]`，`patched`/`loader`/`patch`），`source_dir` 保留为单来源等价形式，两者同时给 / kind 重复 / 必居其一不满足都 422；CLI 新增可重复的 `--sources <kind>=<dir>`。摘要按来源分型（三套 prompt 共用同一个 3 行格式与 `validate_summary` 闸门）：`patched` 沿用 MC 游戏机制导向，`loader` 走加载器语境（事件/注入/转换/注册/生命周期），`patch` 按 **patch 文件**生成（不是一个 hunk 一条）并注入 `patches_fts`——hunk 正文是英文/代码，不注入中文摘要的话中文提问命中不了它；覆盖率只算类摘要。检索层：`POST /v1/search` 与 `/v1/symbol` 增加可选 `source` 过滤（不传 = 全部），新增第五路 `patch` 通道（查 `patches_fts`），`why` 与 `Hit.type` 加 `patch`，`Hit` 加 `target`（补丁改的源文件，`path` 是补丁文件路径、`lines` 是新行号区间），patch 命中的 `snippet` 直接给 hunk 正文。实测：`neoforge-21.1.265+1.21.1` 索引出 patched 7,219 + loader 1,297 个类（5,364 + 954 个 `.java`）、747 个补丁的 2,159 个 hunk，摘要 9,263 条（类 8,516 + 补丁 747，覆盖率 100%）；26.3 / 1.21.1 的检索结果与改动前逐字节一致。属 v0.2 设计内的增量补齐，`info.version` 不变 |

@@ -77,7 +77,7 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | 证书 | OHTTPS 自动续期的 `*.belovedyaoo.top` 泛域名 |
 | 发版 | **不接 CI/CD**。发版频率低，手工 `docker compose up -d` + 网关 conf 变更 |
 
-**索引不在节点上构建。** 节点只有 3.5 GiB 内存，而反编译一个 5–7M token 的版本**实测内存峰值是 4.5 GiB**（口径：psutil 进程树 RSS、1s 采样、含 java 子进程），硬跑会拖垮同机的其它服务。本地工作站上的流程是：`mc-librarian index --version <v>` 一条命令从官方 jar 跑完 `download → decompile → parse → summarize → finalize` 五段，直接产出 `db/<version>.sqlite` 并登记版本（已有源码树时加 `--source-dir <dir>` 跳过前两段；`cache/<version>/fetch.json` 记着源码树已反编译完成时跳过 `decompile`；未给 `--force` 时复用已有索引）；也可以先 `mc-librarian fetch --version <v> --out <src dir>` 取源码树，再调 `POST /v1/admin/jobs`（省略 `options` 走完整五段，给了 `options.source_dir` 则从 `parse` 开始）。把 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与「注册索引」入口。
+**索引不在节点上构建。** 节点只有 3.5 GiB 内存，而反编译一个 5–7M token 的版本**实测内存峰值是 4.5 GiB**（口径：psutil 进程树 RSS、1s 采样、含 java 子进程），硬跑会拖垮同机的其它服务。本地工作站上的流程是：`mc-librarian index --version <v>` 一条命令从官方 jar 跑完 `download → decompile → parse → summarize → finalize` 五段，直接产出 `db/<version>.sqlite` 并登记版本（已有源码树时加 `--source-dir <dir>` 跳过前两段；加载器版本用可重复的 `--sources <kind>=<dir>` 同时索引 patched / loader / patch 三类内容，如 `--sources patched=… --sources loader=… --sources patch=…`；`cache/<version>/fetch.json` 记着源码树已反编译完成时跳过 `decompile`；未给 `--force` 时复用已有索引）；也可以先 `mc-librarian fetch --version <v> --out <src dir>` 取源码树，再调 `POST /v1/admin/jobs`（省略 `options` 走完整五段，给了 `options.source_dir` / `options.sources` 则从 `parse` 开始）。把 `db/<version>.sqlite` 上传到节点数据根，再调 `POST /v1/admin/versions` 注册。节点侧用 `MC_LIBRARIAN_INDEX_ENABLED=false` 关掉服务进程内的索引构建（默认 `true`，本地开箱可用），版本页只显示状态与「注册索引」入口。
 节点上还必须给 `MC_LIBRARIAN_SECRET`（`settings` 表里密钥值的 AES-GCM 主密钥）：缺失时服务启动失败，
 且不能事后临时生成（重启后旧密文解不开）。
 
@@ -102,9 +102,9 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 | `pats` | id, user_id, name, token_hash, prefix, expires_at, last_used_at, revoked_at |
 | `invites` | id, user_id, token_hash, expires_at, used_at |
 | `sessions` | id, user_id, token_hash(sha256), created_at, expires_at, ip, user_agent |
-| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；省略 `options` 的任务从官方 jar 跑完整五段，给了 `source_dir` 则从 `parse` 起） |
+| `jobs` | id, kind, version, status, stage, progress, message, error, checkpoint, options, cancel_requested, created_by, timestamps（`stage` 取 download/decompile/parse/summarize/finalize；省略 `options` 的任务从官方 jar 跑完整五段，给了 `source_dir` / `sources` 则从 `parse` 起） |
 | `job_logs` | id, job_id, ts, level, message |
-| `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行；注册时数据根里没有 `src/<version>/` 则 `source_size_bytes` 保留原值，首次注册写 0） |
+| `versions` | version, files, tokens, indexed_at, obfuscated, has_summaries, source_size_bytes, db_path, loader, loader_version, mc_version（管理员注册写全量；任务产出仅在未注册时插入，一并写 `db_path`/`obfuscated`/`source_size_bytes`，不改已注册行；注册时数据根里没有 `src/<version>/` 则 `source_size_bytes` 保留原值，首次注册写 0。加载器元数据三列由 `version` 推导：原版 MC 的 `loader`/`loader_version` 为 NULL、`mc_version` 等于 `version`；加载器版本形如 `neoforge-21.1.265+1.21.1`） |
 | `usage` | id, user_id, kind, model, prompt_tokens, completion_tokens, latency_ms, version, created_at（只审计 token，不含金额） |
 | `alert_events` | id, day, metric, value, threshold, fired_at；`UNIQUE(day, metric)` 就是「同日同指标只告警一次」的实现方式（`day` 是本地日期 UTC+8） |
 | `audit` | id, actor_id, action, target, detail_json, ip, created_at |
@@ -118,19 +118,28 @@ TLS 在边界终止：边缘节点上的 `gateway-nginx` 持有泛域名证书�
 ### 5.2 单版本索引 `db/<version>.sqlite`
 
 ```sql
-files(id, path, pkg, loc, tokens)
-classes(id, file_id, fqn, simple, kind, superclass, interfaces, annotations, start_line, end_line)
-methods(id, class_id, name, signature, return_type, params, modifiers, annotations, start_line, end_line)
-fields(id, class_id, name, type, modifiers, annotations, start_line, end_line)
-refs(id, from_method_id, target_name, kind, line)   -- 启发式；行号 1-based 闭区间
-summaries(id, class_id, fqn, text_zh, content_hash, tokens, created_at)   -- 类级摘要（#7）
+files(id, path, pkg, loc, tokens, source)
+classes(id, file_id, fqn, simple, kind, superclass, interfaces, annotations, start_line, end_line, source)
+methods(id, class_id, name, signature, return_type, params, modifiers, annotations, start_line, end_line, source)
+fields(id, class_id, name, type, modifiers, annotations, start_line, end_line, source)
+refs(id, from_method_id, target_name, kind, line, source)   -- 启发式；行号 1-based 闭区间
+summaries(id, class_id, fqn, text_zh, content_hash, tokens, created_at, source)   -- 类级摘要（#7）；source='patch' 时是补丁文件摘要（class_id 为 NULL）
 summaries_fts(fqn, text_zh)   -- FTS5（unicode61），存 jieba 预分词后的 text_zh
+patches(id, path, target, hunk_index, old_start, old_lines, new_start, new_lines, context, tokens)   -- 加载器补丁的 hunk（#24）
+patches_fts(path, target, context)   -- FTS5（unicode61），存 jieba 预分词的 hunk 正文 + 该补丁文件的中文摘要
 ```
 
 `files.path` 相对 `<data_dir>/src/<version>/`；数组字段（`interfaces`/`annotations`/`params`/`modifiers`）
 存 JSON 文本。`summaries` 两张表由 #7 的 `summarize` 阶段创建：普通表记 `content_hash`（幂等），
 FTS5 表存 jieba 预分词结果——`trigram` 对两字词（「刷怪」）不友好，`unicode61` 又不切中文，
 所以入库前切好、查询时对 query 做同样切分。
+
+**多来源（#24）**：`source` 取 `patched`（打过补丁的 MC）/ `loader`（加载器自身）；原版 MC 的索引
+所有行都是 `patched`（语义上「这个版本的那棵树」），保持向后兼容。补丁单独一张 `patches` 表，
+**切块单位是 hunk**（一个 patch 常含多个不相干的改动，整文件当一块会让命中后给不出位置）；
+补丁摘要**按 patch 文件**生成（不是一个 hunk 一条），写完注入 `patches_fts`——hunk 正文是英文/代码，
+不注入中文摘要的话中文提问命中不了它。`base`（未修改的 MC）不建索引：`patches` 已经回答「改了什么」，
+base 会让索引翻倍且与 patched 高度重叠。
 
 `summaries.text_zh` 固定 3 行：
 
