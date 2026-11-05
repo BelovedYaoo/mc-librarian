@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 
-import 'highlight.js/styles/github.css';
+import { markdownContainerSx } from 'src/theme';
 
 // ----------------------------------------------------------------------
 
@@ -28,7 +28,7 @@ export function AnswerMarkdown({ text, streaming }: { text: string; streaming: b
   const source = streaming ? throttled : text;
 
   return (
-    <Box sx={markdownSx}>
+    <Box sx={markdownContainerSx}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
@@ -95,8 +95,7 @@ function closeOpenFence(markdown: string): string {
 // ----------------------------------------------------------------------
 
 /**
- * 表格需要横向滚动容器；其余元素靠 `markdownSx` 的后代选择器统一上样式。
- * 行内代码与代码块的区分交给 CSS（`& pre code` 覆盖 `& code`），不靠 JS 猜父节点。
+ * 表格需要横向滚动容器；其余元素靠 `markdownContainerSx` 的后代选择器统一上样式。
  */
 const markdownComponents: Components = {
   table: ({ node: _node, ...props }) => (
@@ -104,72 +103,6 @@ const markdownComponents: Components = {
       <table {...props} />
     </Box>
   ),
-};
-
-const markdownSx = {
-  // 用 `:first-of-type` 而不是 `:first-child`：后者会触发 emotion 的 SSR 不安全告警（console.error）。
-  '& > :first-of-type': { mt: 0 },
-  '& > :last-child': { mb: 0 },
-  '& h1, & h2, & h3, & h4, & h5, & h6': { mt: 2, mb: 1, fontWeight: 700, lineHeight: 1.3 },
-  '& h1': { fontSize: '1.5rem' },
-  '& h2': { fontSize: '1.3rem' },
-  '& h3': { fontSize: '1.15rem' },
-  '& h4, & h5, & h6': { fontSize: '1rem' },
-  // 段落与列表项限宽提升可读性；表格/代码块**不限**（答案里的宽表与长代码行靠可用宽度）。
-  '& p': { my: 1, lineHeight: 1.7, maxWidth: 900 },
-  '& ul, & ol': { my: 1, pl: 3 },
-  '& li': { my: 0.5, lineHeight: 1.7, maxWidth: 900 },
-  '& li > p': { my: 0 },
-  '& blockquote': {
-    my: 1,
-    pl: 2,
-    borderLeft: '3px solid',
-    borderColor: 'divider',
-    color: 'text.secondary',
-  },
-  '& a': { color: 'primary.main' },
-  '& hr': { my: 2, border: 0, borderTop: '1px solid', borderColor: 'divider' },
-  '& del': { color: 'text.secondary' },
-  // 行内代码。底色用主色（`#00A76F`）8% 的淡绿，与「凹陷」表面同一色系：
-  // `action.hover`（grey 8%）偏蓝，在白色消息区上既弱又和绿色主色不搭。
-  '& code': {
-    fontFamily: 'monospace',
-    fontSize: '0.875em',
-    px: 0.5,
-    py: 0.25,
-    borderRadius: 0.5,
-    bgcolor: 'rgba(0, 167, 111, 0.08)',
-  },
-  // 代码块：底色 + 等宽 + 横向滚动。
-  // Minimal 的 markdown 用 `grey[900]` 深底 + 白字；本项目代码高亮用 highlight.js 的
-  // github.css（浅色 token），深底会读不出来，所以底色改用调色板里的「凹陷」表面。
-  '& pre': {
-    my: 1.5,
-    p: 1.5,
-    bgcolor: 'background.neutral',
-    borderRadius: 1,
-    overflowX: 'auto',
-  },
-  // 覆盖 highlight.js 主题自带的 `.hljs` 底色 / 内边距，只留 token 配色。
-  '& pre code': {
-    display: 'block',
-    bgcolor: 'transparent',
-    p: 0,
-    fontSize: '0.8125rem',
-    lineHeight: 1.6,
-    whiteSpace: 'pre',
-    overflowX: 'visible',
-  },
-  '& table': { borderCollapse: 'collapse', fontSize: '0.875rem' },
-  '& th, & td': {
-    border: '1px solid',
-    borderColor: 'divider',
-    px: 1.5,
-    py: 0.75,
-    textAlign: 'left',
-  },
-  // 表头用「凹陷」表面：Minimal 的 `MuiTableCell.head` 也是 `background.neutral`。
-  '& thead th': { bgcolor: 'background.neutral', fontWeight: 600 },
 };
 
 const cursorSx = {

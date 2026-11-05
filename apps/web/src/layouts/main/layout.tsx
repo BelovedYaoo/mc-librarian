@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router';
 
 import { useAuth } from 'src/auth';
+import { ThemeModeToggle } from 'src/components/theme-mode-toggle';
 import { CONFIG } from 'src/global-config';
 
 import { paths } from 'src/routes/paths';
@@ -69,6 +70,8 @@ export function MainLayout({ children, maxWidth = 'xl' }: MainLayoutProps) {
           </Typography>
 
           <Box sx={{ flex: '1 1 auto' }} />
+
+          <ThemeModeToggle sx={{ mr: 1 }} />
 
           <Button size="small" color="inherit" onClick={() => navigate(paths.home)} sx={{ mr: 1 }}>
             首页

@@ -66,5 +66,8 @@ const NavItemLink = styled(NavLink)(({ theme }) => ({
     // `primary.dark`（#007867）在同一底色上是 4.39:1，绿色标识还在。
     color: theme.palette.primary.dark,
     fontWeight: theme.typography.fontWeightMedium,
+    // 暗色下反过来：`primary.dark`（#007867）在 `action.selected` 上只有 2.40:1，
+    // 换成 `primary.light`（#5BE49B）→ 8.05:1，绿色标识还在。
+    ...theme.applyStyles('dark', { color: theme.palette.primary.light }),
   },
 }));

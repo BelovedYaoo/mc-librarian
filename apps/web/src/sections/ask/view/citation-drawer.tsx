@@ -27,6 +27,17 @@ const OVERSCAN = 200;
 /** 高亮前的防抖窗口：连续滚动时不为每一帧都跑一次 tokenizer。 */
 const HIGHLIGHT_DEBOUNCE_MS = 80;
 
+/**
+ * 引用区间的底色（暗色）。浅色用 `warning.light`（`#FFD666`）——亮黄底配 github-light 的深色 token。
+ * 暗色下那个亮黄底配 Shiki github-dark 的浅色 token 只有 ~1.1:1，读不出来；`warning.dark`
+ * （`#B76E00`）也只有 ~3.1:1。改用低饱和暗黄 `#33290D`：正文 token `#E1E4E8` → 11.25:1、
+ * 关键字 `#F97583` → 5.40:1、行号（`text.secondary` `#919EAB`）→ 5.25:1。
+ *
+ * 唯一例外是 Shiki github-dark 的注释色 `#6A737D`（2.98:1）——它在纯黑上也只到 4.36:1，换任何
+ * 底色都上不了 AA，不是这一处底色能修的。
+ */
+const HIGHLIGHT_DARK = '#33290D';
+
 type LoadState =
   | { status: 'idle' }
   | { status: 'loading' }
@@ -222,6 +233,8 @@ function FileViewer({
   const startLine = slice.start;
 
   const { palette } = useTheme();
+  // 引用区间底色按模式取：浅色亮黄、暗色低饱和暗黄（见 `HIGHLIGHT_DARK`）。
+  const highlightBg = palette.mode === 'dark' ? HIGHLIGHT_DARK : palette.warning.light;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const frame = useRef<number | null>(null);
   const [view, setView] = useState({ top: 0, height: 0 });
@@ -315,7 +328,7 @@ function FileViewer({
             sx={{
               display: 'flex',
               lineHeight: `${LINE_HEIGHT}px`,
-              bgcolor: marked ? 'warning.light' : 'transparent',
+              bgcolor: marked ? highlightBg : 'transparent',
             }}
           >
             <Box

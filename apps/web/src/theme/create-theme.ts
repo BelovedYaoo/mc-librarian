@@ -81,6 +81,9 @@ const grey = {
  */
 const grey500 = '145, 158, 171';
 
+/** `common.black` 的通道值：暗色卡片阴影用它，深底上灰白阴影会发灰。 */
+const blackChannel = '0, 0, 0';
+
 /**
  * 「凹陷」表面（`background.neutral`）的底色。
  *
@@ -88,18 +91,56 @@ const grey500 = '145, 158, 171';
  * `#00A76F`（色相约 160°），两者相差 50°，冷灰底与绿色主色并排显得脏。改用与主色同系
  * （色相约 152°）的淡绿，亮度与 `grey[200]` 几乎一致，所以原有对比度不受影响。
  */
-const NEUTRAL_BACKGROUND = '#F1F7F4';
+const NEUTRAL_BACKGROUND_LIGHT = '#F1F7F4';
+
+/**
+ * 暗色的「凹陷」表面。**这是暗色调色板里唯一偏离 Minimal 的值。**
+ *
+ * Minimal 的 dark 用 `#28323D`（色相 211° 的冷蓝灰），与主色 `#00A76F`（色相 160°）差 51°；
+ * 浅色模式已经因为同样的偏蓝冷灰（`#F4F6F8` → `#F1F7F4`）被用户否过一次。暗色同理换成与浅色
+ * `#F1F7F4` 同系（色相 154°）的 `#22322B`。亮度 0.0280 ≈ Minimal `#28323D` 的 0.0307，
+ * 所以对比度不受影响。
+ */
+const NEUTRAL_BACKGROUND_DARK = '#22322B';
 
 /**
  * 卡片阴影：照抄 minimal-vite-ts 的 `core/custom-shadows.ts` 里 `customShadows.card`
- * （`0 0 2px 0` + `0 12px 24px -4px`，都是 `grey[500]` 的低透明度）。
+ * （`0 0 2px 0` + `0 12px 24px -4px`，都是低透明度）。
  *
  * Minimal 的卡片就靠这一层阴影在白底上「浮」起来，本身没有边框；这里额外补一条 `divider`
  * 细边框，让卡片在同样纯白的页面底上也有一圈看得见的边界。
+ *
+ * 取色按模式走：浅色用 `grey[500]`（现状），暗色改用 `common.black`——Minimal 的
+ * `createCustomShadows(common.blackChannel)` 也是这么做的，灰白阴影在深底上会发灰。
  */
-const CARD_SHADOW = `0 0 2px 0 rgba(${grey500}, 0.2), 0 12px 24px -4px rgba(${grey500}, 0.12)`;
+function cardShadow(colorChannel: string): string {
+  return `0 0 2px 0 rgba(${colorChannel}, 0.2), 0 12px 24px -4px rgba(${colorChannel}, 0.12)`;
+}
 
-/** 浅色（light-only，本项目不做暗色模式与主题切换）调色板，照抄 Minimal 的 light 定义。 */
+/** 明暗两态（`createTheme` 的入参、`ThemeProvider` 持有的状态）。 */
+export type ThemeMode = 'light' | 'dark';
+
+/**
+ * `action` 的 alpha 与模式无关，只有 `active` 变：Minimal 的 `action('light' | 'dark')`
+ * 也是 `grey[600]` / `grey[500]` 两档。
+ */
+function actionPalette(mode: ThemeMode) {
+  return {
+    active: mode === 'dark' ? grey[500] : grey[600],
+    hover: `rgba(${grey500}, 0.08)`,
+    selected: `rgba(${grey500}, 0.16)`,
+    focus: `rgba(${grey500}, 0.24)`,
+    disabled: `rgba(${grey500}, 0.8)`,
+    disabledBackground: `rgba(${grey500}, 0.24)`,
+    hoverOpacity: 0.08,
+    selectedOpacity: 0.08,
+    focusOpacity: 0.12,
+    activatedOpacity: 0.12,
+    disabledOpacity: 0.48,
+  };
+}
+
+/** 浅色调色板，照抄 Minimal 的 light 定义。 */
 const lightPalette: PaletteOptions = {
   mode: 'light',
   ...semanticColors,
@@ -118,35 +159,45 @@ const lightPalette: PaletteOptions = {
   background: {
     paper: '#FFFFFF',
     default: '#FFFFFF',
-    neutral: NEUTRAL_BACKGROUND,
+    neutral: NEUTRAL_BACKGROUND_LIGHT,
   },
-  action: {
-    active: grey[600],
-    hover: `rgba(${grey500}, 0.08)`,
-    selected: `rgba(${grey500}, 0.16)`,
-    focus: `rgba(${grey500}, 0.24)`,
-    disabled: `rgba(${grey500}, 0.8)`,
-    disabledBackground: `rgba(${grey500}, 0.24)`,
-    hoverOpacity: 0.08,
-    selectedOpacity: 0.08,
-    focusOpacity: 0.12,
-    activatedOpacity: 0.12,
-    disabledOpacity: 0.48,
+  action: actionPalette('light'),
+};
+
+/**
+ * 暗色调色板：`text` / `background` / `action` 照抄 Minimal 的 dark 定义（`core/palette.ts`），
+ * 唯一例外是 `background.neutral`（见 `NEUTRAL_BACKGROUND_DARK`）。语义色六色五档不动。
+ */
+const darkPalette: PaletteOptions = {
+  mode: 'dark',
+  ...semanticColors,
+  grey,
+  common: { black: '#000000', white: '#FFFFFF' },
+  divider: `rgba(${grey500}, 0.2)`,
+  text: {
+    primary: '#FFFFFF',
+    secondary: grey[500],
+    disabled: grey[600],
   },
+  background: {
+    paper: grey[800],
+    default: grey[900],
+    neutral: NEUTRAL_BACKGROUND_DARK,
+  },
+  action: actionPalette('dark'),
 };
 
 const baseOptions: ThemeOptions = {
-  palette: lightPalette,
   shape: { borderRadius: 8 },
   components: {
     // 卡片：细边框 + 极淡阴影。边框用 `divider`（grey[500] 20%），阴影用 Minimal 的卡片
-    // token，圆角按 Minimal 的 `Number(shape.borderRadius) * 2`（8 → 16px）。
+    // token（按模式取色），圆角按 Minimal 的 `Number(shape.borderRadius) * 2`（8 → 16px）。
     MuiCard: {
       styleOverrides: {
         root: ({ theme }) => ({
           border: `1px solid ${theme.palette.divider}`,
           borderRadius: Number(theme.shape.borderRadius) * 2,
-          boxShadow: CARD_SHADOW,
+          boxShadow: cardShadow(theme.palette.mode === 'dark' ? blackChannel : grey500),
         }),
       },
     },
@@ -167,10 +218,10 @@ const baseOptions: ThemeOptions = {
   },
 };
 
-export function createTheme(options: ThemeOptions = {}) {
+/** 按模式建主题；`ThemeProvider` 切换模式时重建。 */
+export function createTheme(mode: ThemeMode = 'light') {
   return createMuiTheme({
     ...baseOptions,
-    ...options,
-    palette: { ...baseOptions.palette, ...options.palette },
+    palette: mode === 'dark' ? darkPalette : lightPalette,
   });
 }
