@@ -760,6 +760,7 @@ def test_search_request_schema_matches() -> None:
         "query",
         "version",
         "path_prefix",
+        "source",
         "kind",
         "detail",
         "limit",
@@ -801,6 +802,7 @@ def test_search_response_schema_matches() -> None:
             "lines",
             "score",
             "why",
+            "target",
             "summary",
             "snippet",
             "tokens",
@@ -810,6 +812,7 @@ def test_search_response_schema_matches() -> None:
             "symbol",
             "literal",
             "reference",
+            "patch",
         ]
 
 

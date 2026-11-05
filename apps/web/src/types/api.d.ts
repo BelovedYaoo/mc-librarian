@@ -108,12 +108,15 @@ export interface paths {
          *     - **summary** — `summaries_fts`（FTS5，`#7` 落地；表不存在时该路为空，不报错）。
          *       query 与入库时一样先过 jieba 分词：`unicode61` 不切中文，不预分词的话两字词
          *       （「刷怪」）命中不了
+         *     - **patch** — `patches_fts`（FTS5，`#24` 落地）：加载器补丁的 hunk，`Hit.path` 是补丁文件
+         *       路径，另给 `target`（被改的源文件）与 `lines`（新行号区间）；表不存在时该路为空
          *
          *     融合用 RRF（`1/(60+rank)` 逐路累加，再按本次最高分归一化到 `[0, 1]`），
          *     每路各取前 50 条候选。`why` 是去重后的来源数组，顺序固定 `summary → symbol →
-         *     literal → reference`，至少含一个值。`detail=locate` 只返回定位信息（不含
+         *     literal → reference → patch`，至少含一个值。`detail=locate` 只返回定位信息（不含
          *     `snippet` 与 `summary`），`snippet` 额外附带源码片段。`max_tokens` 按 score 降序累加
-         *     `tokens` 截断，至少保留第一条。`path_prefix` 在候选阶段过滤（三路各自带 path 条件）。
+         *     `tokens` 截断，至少保留第一条。`path_prefix` 在候选阶段过滤（各路各自带 path 条件）；
+         *     `source`（issue #24）可选过滤 `patched` / `loader` / `patch`（不传 = 全部）。
          *     任何一路为空都不算错误：无命中时返回 `200` + 空 `hits` / `suggestions`。
          */
         post: operations["search"];
@@ -133,7 +136,8 @@ export interface paths {
         /**
          * 符号查找
          * @description 按「全限定名 → 简单名 → 后缀 → 编辑距离」四级依次尝试，**先命中先返回，不跨级别混合**；
-         *     `fuzzy=false` 只做前两级。结果上限 50 条。
+         *     `fuzzy=false` 只做前两级。结果上限 50 条。`source`（issue #24）可选过滤
+         *     `patched` / `loader`；不传 = 全部来源。
          */
         get: operations["getSymbol"];
         put?: never;
@@ -492,9 +496,10 @@ export interface paths {
         /**
          * 创建索引任务
          * @description 立即返回 202，实际执行由 JobRunner 串行消费（并发 1）。
-         *     阶段序列由 `options.source_dir` 决定：给了源目录走 `parse → summarize → finalize`；
-         *     省略 `options` 则从官方 jar 起跑完整五段 `download → decompile → parse → summarize → finalize`；
-         *     给了 `options` 但 `source_dir` 为空返回 422。见 `JobCreate`。
+         *     阶段序列由 `options.source_dir` / `options.sources` 决定：给了源目录走
+         *     `parse → summarize → finalize`；省略 `options` 则从官方 jar 起跑完整五段
+         *     `download → decompile → parse → summarize → finalize`；
+         *     给了 `options` 但既无 `source_dir` 也无 `sources` 返回 422；两者同时给也返回 422。见 `JobCreate`。
          *     本实例关闭索引构建（`settings.index.enabled=false`）时返回 403。
          */
         post: operations["createJob"];
@@ -677,6 +682,12 @@ export interface components {
          * @enum {string}
          */
         SymbolKind: "any" | "class" | "method" | "field";
+        /**
+         * @description 索引来源（issue #24 规格 §2）：`patched` 打过补丁的 MC、`loader` 加载器自身、
+         *     `patch` 补丁 hunk。检索时作为可选过滤条件（不传 = 全部来源）。
+         * @enum {string}
+         */
+        SourceKind: "patched" | "loader" | "patch";
         VersionInfo: {
             version: string;
             files: number;
@@ -694,6 +705,12 @@ export interface components {
             summary_count?: number;
             /** @description 类总数（摘要覆盖率的分母，从索引库实时读） */
             class_count?: number;
+            /** @description 加载器名（`neoforge` / `forge` / `fabric`）；原版 MC 为 null */
+            loader?: string | null;
+            /** @description 加载器自身版本（例如 `21.1.265`）；原版 MC 为 null */
+            loader_version?: string | null;
+            /** @description 对应的 MC 版本；原版 MC 等于 `version` */
+            mc_version?: string | null;
         };
         MinecraftVersion: {
             /** @description 版本号，例如 1.21.1 */
@@ -712,6 +729,7 @@ export interface components {
             query: string;
             version: string;
             path_prefix?: string;
+            source?: components["schemas"]["SourceKind"];
             kind?: components["schemas"]["SymbolKind"];
             /**
              * @default snippet
@@ -740,14 +758,18 @@ export interface components {
              */
             id: string;
             /** @enum {string} */
-            type: "class" | "method" | "field" | "file";
+            type: "class" | "method" | "field" | "file" | "patch";
             version: string;
+            /** @description 文件路径；`type = patch` 时是补丁文件路径（被改的源文件在 `target`） */
             path: string;
             symbol?: string;
+            /** @description 行区间（1-based 闭区间）；`type = patch` 时是新行号区间 */
             lines: number[];
             /** Format: float */
             score: number;
-            why: ("summary" | "symbol" | "literal" | "reference")[];
+            why: ("summary" | "symbol" | "literal" | "reference" | "patch")[];
+            /** @description 只对 `type = patch` 给出：补丁改的源文件（从 patch 头解析） */
+            target?: string | null;
             summary?: string;
             snippet?: string;
             /**
@@ -1004,13 +1026,29 @@ export interface components {
                  * @description 源码根目录；相对路径按数据根解析。**可省略**：
                  *
                  *     - 给 `source_dir` → 阶段序列 `parse → summarize → finalize`，任务从 `parse` 开始；
-                 *     - 省略 `options`（或不给 `source_dir`）→ 阶段序列
+                 *     - 省略 `options`（或不给 `source_dir` / `sources`）→ 阶段序列
                  *       `download → decompile → parse → summarize → finalize`，从官方 jar 一路产出索引；
-                 *     - 给了 `options` 但 `source_dir` 为空字符串 → 422（空值属于笔误）。
+                 *     - 给了 `options` 但既无 `source_dir` 也无 `sources` → 422（空值属于笔误）；
+                 *     - `source_dir` 与 `sources` 同时给 → 422（后者是它的多来源形式）。
                  *
                  *     `parse` 只统计 `.java` 与 `data/` 的文件数与 token 估算。
                  */
                 source_dir?: string;
+                /**
+                 * @description 多来源索引（issue #24 规格 §3）：一个任务同时索引三类内容。
+                 *
+                 *     - `patched` → 打过补丁的 MC 源码目录（`net/minecraft/**`）；
+                 *     - `loader` → 加载器自身源码目录（`net/neoforged/**`）；
+                 *     - `patch` → 补丁目录（`*.patch`，按 hunk 切块）。
+                 *
+                 *     给了 `sources` 就走 `parse → summarize → finalize`；
+                 *     `kind` 重复或 `dir` 为空 → 422。等价单来源写法是 `source_dir`。
+                 */
+                sources?: {
+                    /** @enum {string} */
+                    kind: "patched" | "loader" | "patch";
+                    dir: string;
+                }[];
                 /**
                  * @description 该版本源码是否经官方映射 remap（写入注册表 `VersionInfo.obfuscated`）。**可省略**：
                  *
@@ -1445,6 +1483,7 @@ export interface operations {
                 name: string;
                 fuzzy?: boolean;
                 kind?: components["schemas"]["SymbolKind"];
+                source?: components["schemas"]["SourceKind"];
             };
             header?: never;
             path?: never;

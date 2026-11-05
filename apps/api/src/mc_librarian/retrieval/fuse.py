@@ -5,7 +5,8 @@
     score(d) = Σ_over_channels 1 / (k + rank_c(d))        k = 60
 
 同一实体被多路召回时累加；再除以「本次融合的最高分」归一化到 `[0, 1]`，最高分为 1.0。
-`why` 是去重后的通道数组，顺序固定为 `summary → symbol → literal → reference`（规格 §4）。
+`why` 是去重后的通道数组，顺序固定为 `summary → symbol → literal → reference → patch`（规格 §4；
+`patch` 是 issue #24 追加的第五路）。
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Final
 from mc_librarian.retrieval.channels import Candidate, Channel
 
 RRF_K: Final = 60
-WHY_ORDER: Final[tuple[Channel, ...]] = ("summary", "symbol", "literal", "reference")
+WHY_ORDER: Final[tuple[Channel, ...]] = ("summary", "symbol", "literal", "reference", "patch")
 
 
 @dataclass(frozen=True)

@@ -147,12 +147,15 @@ paths:
         - **summary** — `summaries_fts`（FTS5，`#7` 落地；表不存在时该路为空，不报错）。
           query 与入库时一样先过 jieba 分词：`unicode61` 不切中文，不预分词的话两字词
           （「刷怪」）命中不了
+        - **patch** — `patches_fts`（FTS5，`#24` 落地）：加载器补丁的 hunk，`Hit.path` 是补丁文件
+          路径，另给 `target`（被改的源文件）与 `lines`（新行号区间）；表不存在时该路为空
 
         融合用 RRF（`1/(60+rank)` 逐路累加，再按本次最高分归一化到 `[0, 1]`），
         每路各取前 50 条候选。`why` 是去重后的来源数组，顺序固定 `summary → symbol →
-        literal → reference`，至少含一个值。`detail=locate` 只返回定位信息（不含
+        literal → reference → patch`，至少含一个值。`detail=locate` 只返回定位信息（不含
         `snippet` 与 `summary`），`snippet` 额外附带源码片段。`max_tokens` 按 score 降序累加
-        `tokens` 截断，至少保留第一条。`path_prefix` 在候选阶段过滤（三路各自带 path 条件）。
+        `tokens` 截断，至少保留第一条。`path_prefix` 在候选阶段过滤（各路各自带 path 条件）；
+        `source`（issue #24）可选过滤 `patched` / `loader` / `patch`（不传 = 全部）。
         任何一路为空都不算错误：无命中时返回 `200` + 空 `hits` / `suggestions`。
       operationId: search
       requestBody:
@@ -176,7 +179,8 @@ paths:
       summary: 符号查找
       description: |
         按「全限定名 → 简单名 → 后缀 → 编辑距离」四级依次尝试，**先命中先返回，不跨级别混合**；
-        `fuzzy=false` 只做前两级。结果上限 50 条。
+        `fuzzy=false` 只做前两级。结果上限 50 条。`source`（issue #24）可选过滤
+        `patched` / `loader`；不传 = 全部来源。
       operationId: getSymbol
       parameters:
         - $ref: "#/components/parameters/Version"
@@ -190,6 +194,9 @@ paths:
         - name: kind
           in: query
           schema: { $ref: "#/components/schemas/SymbolKind" }
+        - name: source
+          in: query
+          schema: { $ref: "#/components/schemas/SourceKind" }
       responses:
         "200":
           description: OK
@@ -971,6 +978,13 @@ components:
       enum: [any, class, method, field]
       default: any
 
+    SourceKind:
+      type: string
+      enum: [patched, loader, patch]
+      description: |
+        索引来源（issue #24 规格 §2）：`patched` 打过补丁的 MC、`loader` 加载器自身、
+        `patch` 补丁 hunk。检索时作为可选过滤条件（不传 = 全部来源）。
+
     VersionInfo:
       type: object
       required: [version, files, tokens, indexed_at]
@@ -1017,6 +1031,7 @@ components:
         query: { type: string, minLength: 1, maxLength: 512 }
         version: { type: string }
         path_prefix: { type: string }
+        source: { $ref: "#/components/schemas/SourceKind" }
         kind: { $ref: "#/components/schemas/SymbolKind" }
         detail:
           type: string
@@ -1050,15 +1065,25 @@ components:
             融合实体键（`<version>:<path>#<symbol>:<start>-<end>`，文件级命中为 `<version>:<path>:<line>`）。
             带行区间是为了让同名重载方法拿到不同的 id（前端列表靠它做 key）。
           example: "1.20.1:net/minecraft/world/entity/MobCategory.java#MobCategory:6-68"
-        type: { type: string, enum: [class, method, field, file] }
+        type: { type: string, enum: [class, method, field, file, patch] }
         version: { type: string }
-        path: { type: string }
+        path:
+          type: string
+          description: 文件路径；`type = patch` 时是补丁文件路径（被改的源文件在 `target`）
         symbol: { type: string }
-        lines: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+        lines:
+          type: array
+          items: { type: integer }
+          minItems: 2
+          maxItems: 2
+          description: 行区间（1-based 闭区间）；`type = patch` 时是新行号区间
         score: { type: number, format: float }
         why:
           type: array
-          items: { type: string, enum: [summary, symbol, literal, reference] }
+          items: { type: string, enum: [summary, symbol, literal, reference, patch] }
+        target:
+          type: [string, "null"]
+          description: 只对 `type = patch` 给出：补丁改的源文件（从 patch 头解析）
         summary: { type: string }
         snippet: { type: string }
         tokens:

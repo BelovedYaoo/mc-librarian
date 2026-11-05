@@ -607,18 +607,24 @@ class FileSlice(BaseModel):
 # ----------------------------------------------------------------------
 
 SearchDetail = Literal["locate", "snippet"]
-# `file` 是没有任何符号覆盖的位置（如 `package` 行 / `data/` 下的 JSON）。
-HitType = Literal["class", "method", "field", "file"]
-# `why` 的取值域与固定顺序（issue #6 规格 §4）；`summary` 需要索引库里有 `summaries_fts`（#7）。
-WhyChannel = Literal["summary", "symbol", "literal", "reference"]
+# `file` 是没有任何符号覆盖的位置（如 `package` 行 / `data/` 下的 JSON）；
+# `patch` 是加载器补丁的 hunk 命中（issue #24）。
+HitType = Literal["class", "method", "field", "file", "patch"]
+# `why` 的取值域与固定顺序（issue #6 规格 §4；`patch` 由 issue #24 追加）。
+# `summary` 需要索引库里有 `summaries_fts`（#7），`patch` 需要 `patches_fts`（#24）。
+WhyChannel = Literal["summary", "symbol", "literal", "reference", "patch"]
 
 
 class SearchRequest(BaseModel):
-    """契约 `components.schemas.SearchRequest`；`kind` 只作用于 symbol 通道。"""
+    """契约 `components.schemas.SearchRequest`；`kind` 只作用于 symbol 通道。
+
+    `source`（issue #24 规格 §5）可选过滤 `patched` / `loader` / `patch`；不传 = 全部来源。
+    """
 
     query: str = Field(min_length=1, max_length=512)
     version: str
     path_prefix: str | None = None
+    source: SourceKind | None = None
     kind: SymbolKind = "any"
     detail: SearchDetail = "snippet"
     limit: int = Field(default=10, ge=1, le=50)
@@ -626,7 +632,11 @@ class SearchRequest(BaseModel):
 
 
 class Hit(BaseModel):
-    """契约 `components.schemas.Hit`；`detail=locate` 时不带 `snippet` / `summary`。"""
+    """契约 `components.schemas.Hit`；`detail=locate` 时不带 `snippet` / `summary`。
+
+    `target` 只对 `type = patch` 的命中给出：`path` 是补丁文件路径，`target` 是被改的源文件
+    （issue #24 规格 §5）。
+    """
 
     id: str
     type: HitType
@@ -636,6 +646,7 @@ class Hit(BaseModel):
     lines: list[int] = Field(min_length=2, max_length=2)
     score: float
     why: list[WhyChannel]
+    target: str | None = None
     summary: str | None = None
     snippet: str | None = None
     tokens: int | None = None

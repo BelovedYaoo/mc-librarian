@@ -6,6 +6,7 @@
 | `literal` | ripgrep 子进程扫 `<data_dir>/src/<version>/` | 文件路径 + 行号 |
 | `reference` | `refs` 表反查引用点 | `path, line` |
 | `summary` | `summaries_fts`（FTS5，由 #7 建） | bm25 升序；表不存在时返回空 |
+| `patch` | `patches_fts`（FTS5，issue #24 建） | bm25 升序；表不存在时返回空 |
 
 `literal` / `reference` 拿到的是「文件 + 行号」，统一经 `query.symbol_at` 归一化成所在的最内层
 符号：同一实体被多路召回时才能被 RRF 累加，`why` 也才会有多个值（规格 §1）。任何一路为空
@@ -36,7 +37,7 @@ from mc_librarian.schemas import HitType, SymbolKind
 
 logger = logging.getLogger("mc_librarian.retrieval")
 
-Channel = Literal["summary", "symbol", "literal", "reference"]
+Channel = Literal["summary", "symbol", "literal", "reference", "patch"]
 
 # 每路各取前 50 条候选（规格 §1）。
 CHANNEL_LIMIT: Final = 50
@@ -86,7 +87,11 @@ def hit_type(kind: str) -> HitType:
 
 @dataclass(frozen=True)
 class Candidate:
-    """一路候选；`symbol` 为 None 表示没有任何符号覆盖这个位置（`type=file`）。"""
+    """一路候选；`symbol` 为 None 表示没有任何符号覆盖这个位置（`type=file`）。
+
+    `target`/`patch_context` 只对 patch 命中有意义（issue #24 规格 §5）：`target` 是被改的源文件，
+    `patch_context` 是 hunk 头 + diff 正文（直接当 `snippet` 用，不再读盘）。
+    """
 
     channel: Channel
     path: str
@@ -95,6 +100,8 @@ class Candidate:
     start_line: int
     end_line: int
     summary: str | None = None
+    target: str | None = None
+    patch_context: str | None = None
 
     @property
     def key(self) -> str:
@@ -116,6 +123,7 @@ def symbol_candidates(
     *,
     kind: SymbolKind,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[Candidate]:
     """符号通道：复用 #5 的四级匹配（fqn → simple → 后缀 → 编辑距离）。"""
     hits = query.find_symbols(
@@ -125,6 +133,7 @@ def symbol_candidates(
         kind=kind,
         limit=CHANNEL_LIMIT,
         path_prefix=path_prefix,
+        source=source,
     )
 
     return [
@@ -141,15 +150,22 @@ def symbol_candidates(
 
 
 def reference_candidates(
-    connection: sqlite3.Connection, name: str, *, path_prefix: str | None
+    connection: sqlite3.Connection,
+    name: str,
+    *,
+    path_prefix: str | None,
+    source: str | None = None,
 ) -> list[Candidate]:
     """引用通道：query 命中某个符号名时，反查 `refs` 表里的引用点。"""
     hits = query.find_references(
-        connection, name, limit=CHANNEL_LIMIT, path_prefix=path_prefix
+        connection, name, limit=CHANNEL_LIMIT, path_prefix=path_prefix, source=source
     )
 
     return [
-        _location_candidate(connection, "reference", hit.path, hit.line) for hit in hits
+        candidate
+        for hit in hits
+        if (candidate := _location_candidate(connection, "reference", hit.path, hit.line, source))
+        is not None
     ]
 
 
@@ -159,6 +175,7 @@ def literal_candidates(
     name: str,
     *,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[Candidate]:
     """字面量通道：ripgrep 子进程扫源码树，超时 / 不可用时返回空并写 warn。
 
@@ -172,8 +189,10 @@ def literal_candidates(
         return []
 
     return [
-        _location_candidate(connection, "literal", path, line)
+        candidate
         for path, line in _ripgrep(source_root, pattern, path_prefix=path_prefix)
+        if (candidate := _location_candidate(connection, "literal", path, line, source))
+        is not None
     ]
 
 
@@ -197,7 +216,7 @@ def literal_pattern(name: str) -> str | None:
 
 
 def summary_candidates(
-    connection: sqlite3.Connection, text: str, *, path_prefix: str | None
+    connection: sqlite3.Connection, text: str, *, path_prefix: str | None, source: str | None = None
 ) -> list[Candidate]:
     """摘要通道：查 `summaries_fts`（#7 建），命中时 `why` 含 `summary`（规格 §7）。
 
@@ -207,6 +226,9 @@ def summary_candidates(
     于是「刷怪，掉落」这种带中文标点的 query 照常命中，`"`/`*`/`-` 也不会把整路打成空。
     整路包 `try/except sqlite3.Error`：表不是 FTS5 时 SQL 会抛 `OperationalError`，那是
     「这一路没结果」，不是请求失败（规格 §8）。
+
+    `source`（issue #24 规格 §5）过滤 `summaries.source`；老索引没有该列时不过滤（保持
+    改动前的行为）。
     """
     try:
         if not query.has_table(connection, "summaries_fts"):
@@ -228,6 +250,10 @@ def summary_candidates(
             " WHERE summaries_fts MATCH ?"
         )
         params: list[object] = [match]
+
+        if source is not None and query.has_column(connection, "summaries", "source"):
+            sql += " AND s.source = ?"
+            params.append(source)
 
         if path_prefix:
             sql += " AND substr(f.path, 1, length(?)) = ?"
@@ -260,10 +286,103 @@ def summary_candidates(
     ]
 
 
+def patch_candidates(
+    connection: sqlite3.Connection,
+    text: str,
+    *,
+    path_prefix: str | None,
+    source: str | None = None,
+) -> list[Candidate]:
+    """补丁通道（issue #24 规格 §5）：查 `patches_fts`（hunk 级），命中时 `why` 含 `patch`。
+
+    `source` 传了 `patched`/`loader` 时这一路直接返回空（补丁只在 `patch` 来源里）；
+    `source` 为 `patch` 或不传时照常查。`patches_fts` 不存在（原版索引）时静默返回空。
+    命中给的是 hunk 级位置：`path` 是补丁文件路径，`target` 是被改的源文件，行区间是新行号。
+    """
+    if source is not None and source != "patch":
+        return []
+
+    if not query.has_table(connection, "patches_fts"):
+        return []
+
+    match = fts_match_query(text)
+
+    if not match:
+        return []
+
+    has_patch_summaries = query.has_table(connection, "summaries") and query.has_column(
+        connection, "summaries", "source"
+    )
+    summary_expr = "s.text_zh AS summary" if has_patch_summaries else "NULL AS summary"
+    summary_join = (
+        " LEFT JOIN summaries s ON s.fqn = p.path AND s.source = 'patch'"
+        if has_patch_summaries
+        else ""
+    )
+
+    sql = (
+        f"SELECT p.path AS path, p.target AS target, p.context AS context,"
+        f" p.old_start AS old_start, p.old_lines AS old_lines,"
+        f" p.new_start AS new_start, p.new_lines AS new_lines, {summary_expr}"
+        " FROM patches_fts"
+        " JOIN patches p ON p.id = patches_fts.rowid"
+        f"{summary_join}"
+        " WHERE patches_fts MATCH ?"
+    )
+    params: list[object] = [match]
+
+    if path_prefix:
+        sql += " AND substr(p.path, 1, length(?)) = ?"
+        params.extend([path_prefix, path_prefix])
+
+    sql += " ORDER BY bm25(patches_fts) LIMIT ?"
+    params.append(CHANNEL_LIMIT)
+
+    try:
+        rows = connection.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        logger.warning("补丁通道查询失败（patches_fts 不是 FTS5 表），该路返回空")
+        return []
+
+    return [_patch_candidate(row) for row in rows]
+
+
+def _patch_candidate(row: sqlite3.Row) -> Candidate:
+    """`patches` 行 → 候选：行区间取新行号（重建不出来时回退 `old_start`，见 `indexing.patches`）。
+    """
+    start = row["new_start"] if row["new_start"] is not None else row["old_start"]
+    lines = row["new_lines"] if row["new_lines"] is not None else row["old_lines"]
+    start_line = 1 if start is None else int(start)
+    end_line = start_line + max(int(lines or 1), 1) - 1
+
+    return Candidate(
+        channel="patch",
+        path=str(row["path"]),
+        symbol=None,
+        kind="patch",
+        start_line=start_line,
+        end_line=end_line,
+        summary=None if row["summary"] is None else str(row["summary"]),
+        target=str(row["target"]),
+        patch_context=str(row["context"]),
+    )
+
+
 def _location_candidate(
-    connection: sqlite3.Connection, channel: Channel, path: str, line: int
-) -> Candidate:
-    """把「文件 + 行号」归一化成所在的最内层符号；没有符号时退化为 `type=file`。"""
+    connection: sqlite3.Connection,
+    channel: Channel,
+    path: str,
+    line: int,
+    source: str | None = None,
+) -> Candidate | None:
+    """把「文件 + 行号」归一化成所在的最内层符号；没有符号时退化为 `type=file`。
+
+    `source` 给定时按文件来源过滤（issue #24 规格 §5）：不属于该来源的文件直接丢弃（返回
+    `None`）。
+    """
+    if source is not None and query.file_source(connection, path) != source:
+        return None
+
     symbol = query.symbol_at(connection, path, line)
 
     if symbol is None:

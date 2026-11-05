@@ -21,6 +21,7 @@ from mc_librarian.retrieval.channels import (
     Candidate,
     Channel,
     literal_candidates,
+    patch_candidates,
     reference_candidates,
     summary_candidates,
     symbol_candidates,
@@ -62,19 +63,33 @@ def search(
     started = time.perf_counter()
     channels: dict[Channel, list[Candidate]] = {
         "summary": summary_candidates(
-            connection, request.query, path_prefix=request.path_prefix
+            connection,
+            request.query,
+            path_prefix=request.path_prefix,
+            source=request.source,
         ),
         "symbol": symbol_candidates(
-            connection, request.query, kind=request.kind, path_prefix=request.path_prefix
+            connection,
+            request.query,
+            kind=request.kind,
+            path_prefix=request.path_prefix,
+            source=request.source,
         ),
         "literal": literal_candidates(
             connection,
             source_root(settings.data_dir, request.version),
             request.query,
             path_prefix=request.path_prefix,
+            source=request.source,
         ),
         "reference": reference_candidates(
-            connection, request.query, path_prefix=request.path_prefix
+            connection, request.query, path_prefix=request.path_prefix, source=request.source
+        ),
+        "patch": patch_candidates(
+            connection,
+            request.query,
+            path_prefix=request.path_prefix,
+            source=request.source,
         ),
     }
     # `total` 是融合前的候选总数（各路候选之和），不因 `limit` / `max_tokens` 截断而变（规格 §6）。
@@ -100,10 +115,15 @@ def search(
 
 
 def symbol_matches(
-    connection: sqlite3.Connection, name: str, *, fuzzy: bool = True, kind: str = "any"
+    connection: sqlite3.Connection,
+    name: str,
+    *,
+    fuzzy: bool = True,
+    kind: str = "any",
+    source: str | None = None,
 ) -> SymbolMatches:
-    """`GET /v1/symbol` 与 ask 的 `symbol` 工具共用的符号查找。"""
-    hits = query.find_symbols(connection, name, fuzzy=fuzzy, kind=kind)
+    """`GET /v1/symbol` 与 ask 的 `symbol` 工具共用的符号查找（`source` 见 issue #24 规格 §5）。"""
+    hits = query.find_symbols(connection, name, fuzzy=fuzzy, kind=kind, source=source)
 
     return SymbolMatches(matches=[_to_symbol_detail(connection, hit) for hit in hits])
 
@@ -268,6 +288,7 @@ def _to_hit(request: SearchRequest, hit: FusedHit, snippet: str | None, tokens: 
         lines=[candidate.start_line, candidate.end_line],
         score=round(hit.score, 6),
         why=list(hit.channels),
+        target=candidate.target,
         summary=candidate.summary if include_body else None,
         snippet=snippet if include_body else None,
         tokens=tokens,
@@ -298,6 +319,7 @@ def _content_text(request: SearchRequest, hit: FusedHit, snippet: str | None) ->
         f"{request.version}:{candidate.path}",
         f"{candidate.start_line}-{candidate.end_line}",
         candidate.symbol or "",
+        candidate.target or "",
         *hit.channels,
     ]
 
@@ -309,7 +331,14 @@ def _content_text(request: SearchRequest, hit: FusedHit, snippet: str | None) ->
 
 
 def _snippet(reader: _SourceReader, hit: FusedHit) -> str | None:
-    """源码截断：取命中符号的行区间（文件级命中就是那一行），行数与字符数都设上限。"""
+    """源码截断：取命中符号的行区间（文件级命中就是那一行），行数与字符数都设上限。
+
+    补丁命中（`type = patch`）直接给 hunk 正文（`patch_context`，hunk 头 + diff）：补丁文件不在
+    `<data_dir>/src/<version>/` 里（不复制进去，避免污染 ripgrep 的源码扫描），读盘路径不适用。
+    """
+    if hit.candidate.patch_context is not None:
+        return hit.candidate.patch_context[:SNIPPET_MAX_CHARS]
+
     lines = reader.lines(hit.candidate.path)
 
     if lines is None:

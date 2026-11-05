@@ -37,6 +37,7 @@ from mc_librarian.schemas import (
     ReferenceResponse,
     SearchRequest,
     SearchResponse,
+    SourceKind,
     SymbolKind,
     SymbolMatches,
 )
@@ -82,10 +83,10 @@ def require_index(conn: sqlite3.Connection, settings: Settings, version: str) ->
     tags=["retrieve"],
     summary="混合检索（摘要 / 符号 / 字面量）",
     description=(
-        "四路召回（summary / symbol / literal / reference）在服务端用 RRF 融合，"
+        "五路召回（summary / symbol / literal / reference / patch）在服务端用 RRF 融合，"
         "调用方不需要知道该用哪条通道。`detail=locate` 只返回定位信息（省 token），"
         "`snippet` 额外附带源码片段与摘要；`max_tokens` 按 score 降序截断；"
-        "`path_prefix` 在候选阶段过滤。"
+        "`path_prefix` 在候选阶段过滤；`source`（issue #24）可选过滤 patched / loader / patch。"
     ),
     operation_id="search",
     response_model_exclude_none=True,
@@ -128,11 +129,12 @@ def get_symbol(
     name: Annotated[str, Query(min_length=1, max_length=256)],
     fuzzy: Annotated[bool, Query()] = True,
     kind: Annotated[SymbolKind, Query()] = "any",
+    source: Annotated[SourceKind | None, Query()] = None,
 ) -> SymbolMatches:
     index = query.open_readonly(require_index(conn, settings, version))
 
     try:
-        return symbol_matches(index, name, fuzzy=fuzzy, kind=kind)
+        return symbol_matches(index, name, fuzzy=fuzzy, kind=kind, source=source)
     finally:
         index.close()
 

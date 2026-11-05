@@ -21,7 +21,12 @@ from fastapi.testclient import TestClient
 
 from mc_librarian.config import Settings
 from mc_librarian.indexing import query, summarize
-from mc_librarian.indexing.build import build_index, place_source_tree
+from mc_librarian.indexing.build import (
+    SourceSpec,
+    build_index,
+    build_index_from_sources,
+    place_source_tree,
+)
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
 from mc_librarian.retrieval import channels
@@ -687,3 +692,204 @@ def test_search_rejects_empty_query(user_client: TestClient, indexed: Path) -> N
     response = user_client.post("/v1/search", json={"query": "", "version": VERSION})
 
     assert response.status_code == 422
+
+
+# ----------------------------------------------------------------------
+# 多来源检索：source 过滤 + patch 通道（issue #24 规格 §5）
+# ----------------------------------------------------------------------
+
+LOADER_VERSION = "neoforge-21.1.265+1.21.1"
+PATCH_PATH = "net/minecraft/world/Mob.java.patch"
+PATCH_TARGET = "net/minecraft/world/Mob.java"
+PATCH_FILE = """\
+--- a/net/minecraft/world/Mob.java
++++ b/net/minecraft/world/Mob.java
+@@ -10,3 +_,6 @@
+     public void tick() {
++        this.checkDespawn();
++        this.customServerAiStep();
+     }
+"""
+
+
+def build_multi_source(settings: Settings, conn: sqlite3.Connection) -> Path:
+    """patched + loader + patch 三类来源各一份，建索引并注册成加载器版本。"""
+    patched = settings.data_dir / "sources" / "patched"
+    loader = settings.data_dir / "sources" / "loader"
+    patch_dir = settings.data_dir / "sources" / "patches"
+
+    for relative, content in {
+        "net/minecraft/world/Mob.java": (
+            "package net.minecraft.world;\n\npublic class Mob {\n    public void tick() {}\n}\n"
+        ),
+        "net/minecraft/world/World.java": (
+            "package net.minecraft.world;\n\npublic class World {\n    public void tick() {}\n}\n"
+        ),
+    }.items():
+        path = patched / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    loader_file = loader / "net" / "neoforged" / "EventBus.java"
+    loader_file.parent.mkdir(parents=True, exist_ok=True)
+    loader_file.write_text(
+        "package net.neoforged;\n\npublic class EventBus {\n"
+        "    public void tick() {}\n\n    public void post() {}\n}\n",
+        encoding="utf-8",
+    )
+
+    patch_file = patch_dir / PATCH_PATH
+    patch_file.parent.mkdir(parents=True, exist_ok=True)
+    patch_file.write_text(PATCH_FILE, encoding="utf-8")
+
+    index = index_path(settings.data_dir, LOADER_VERSION)
+    result = build_index_from_sources(
+        [
+            SourceSpec(kind="patched", root=patched),
+            SourceSpec(kind="loader", root=loader),
+            SourceSpec(kind="patch", root=patch_dir),
+        ],
+        index,
+        log=silent,
+    )
+    # 与 `parse` 阶段同口径：Java 源码就位到 `src/<version>/`（literal 通道据此扫源码）。
+    destination = source_root(settings.data_dir, LOADER_VERSION)
+    place_source_tree(patched, destination)
+    place_source_tree(loader, destination)
+    store.register_version(
+        conn,
+        version=LOADER_VERSION,
+        files=result.files,
+        tokens=result.tokens,
+        obfuscated=False,
+        has_summaries=False,
+        source_size_bytes=0,
+        db_path=str(index),
+    )
+    conn.commit()
+
+    return index
+
+
+@pytest.fixture
+def multi_index(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection
+) -> Path:
+    return build_multi_source(settings, conn)
+
+
+def search_multi(client: TestClient, body: dict[str, Any]) -> dict[str, Any]:
+    response = client.post("/v1/search", json={"version": LOADER_VERSION, **body})
+
+    assert response.status_code == 200, response.text
+
+    return cast("dict[str, Any]", response.json())
+
+
+def test_patch_channel_returns_hunks_with_target_and_new_lines(
+    settings: Settings, multi_index: Path
+) -> None:
+    """patch 通道查 `patches_fts`，命中给补丁路径 + target + 新行号区间（规格 §5）。"""
+    connection = query.open_readonly(multi_index)
+
+    try:
+        candidates = channels.patch_candidates(
+            connection, "checkDespawn", path_prefix=None, source=None
+        )
+    finally:
+        connection.close()
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.channel == "patch"
+    assert candidate.kind == "patch"
+    assert candidate.path == PATCH_PATH
+    assert candidate.target == PATCH_TARGET
+    assert (candidate.start_line, candidate.end_line) == (10, 15)
+    assert candidate.patch_context is not None and "checkDespawn" in candidate.patch_context
+
+
+def test_patch_channel_respects_source_filter(settings: Settings, multi_index: Path) -> None:
+    connection = query.open_readonly(multi_index)
+
+    try:
+        assert channels.patch_candidates(
+            connection, "checkDespawn", path_prefix=None, source="patched"
+        ) == []
+        assert channels.patch_candidates(
+            connection, "checkDespawn", path_prefix=None, source="patch"
+        )
+    finally:
+        connection.close()
+
+
+def test_search_source_filter_separates_patched_and_loader(
+    client: TestClient, multi_index: Path
+) -> None:
+    """`source` 过滤把两类来源分开：同一个 `tick` 查询按来源各回各的类。"""
+    def symbols(body: dict[str, Any]) -> list[str]:
+        return [
+            str(hit["symbol"])
+            for hit in search_multi(client, body)["hits"]
+            if hit.get("symbol")
+        ]
+
+    everything = symbols({"query": "tick", "detail": "locate", "limit": 20})
+    patched = symbols(
+        {"query": "tick", "detail": "locate", "limit": 20, "source": "patched"}
+    )
+    loader = symbols(
+        {"query": "tick", "detail": "locate", "limit": 20, "source": "loader"}
+    )
+
+    assert any(symbol.startswith("net.minecraft.world.Mob") for symbol in everything)
+    assert any(symbol.startswith("net.neoforged.EventBus") for symbol in everything)
+    assert all(
+        not symbol.startswith("net.neoforged.") for symbol in patched
+    ), "patched 过滤不该回加载器的类"
+    assert all(
+        not symbol.startswith("net.minecraft.") for symbol in loader
+    ), "loader 过滤不该回 MC 的类"
+
+
+def test_search_hits_patch_hunk_with_chinese_summary(
+    client: TestClient, settings: Settings, multi_index: Path
+) -> None:
+    """中文提问命中补丁 hunk：`why` 含 `patch`，`type=patch`，带 `target` 与 hunk 正文。"""
+    summarize.write_summaries(
+        multi_index,
+        [
+            summarize.SummaryRow(
+                class_id=None,
+                fqn=PATCH_PATH,
+                text_zh=(
+                    "职责：改掉 Mob 的刷怪与掉落钩子\n"
+                    "机制：在 tick 里插入自定义 AI，受区块加载状态约束\n"
+                    "关键成员：Mob, checkDespawn"
+                ),
+                content_hash="h",
+                source="patch",
+            )
+        ],
+    )
+    summarize.refresh_patch_fts(multi_index)
+
+    response = search_multi(client, {"query": "刷怪 掉落 钩子", "detail": "snippet"})
+    patches = [hit for hit in response["hits"] if hit["type"] == "patch"]
+
+    assert patches, response
+    hit = patches[0]
+    assert "patch" in hit["why"]
+    assert hit["path"] == PATCH_PATH
+    assert hit["target"] == PATCH_TARGET
+    assert hit["lines"] == [10, 15]
+    assert hit["snippet"] is not None and "checkDespawn" in hit["snippet"]
+
+
+def test_patch_hit_without_summaries_still_matches_identifiers(
+    client: TestClient, multi_index: Path
+) -> None:
+    """没跑过摘要时补丁通道仍能被标识符命中（`patches_fts` 先只有 diff 正文）。"""
+    response = search_multi(client, {"query": "checkDespawn", "detail": "locate"})
+
+    assert any(hit["type"] == "patch" and "patch" in hit["why"] for hit in response["hits"])

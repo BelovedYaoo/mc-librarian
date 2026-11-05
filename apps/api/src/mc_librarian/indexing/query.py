@@ -51,6 +51,9 @@ _SYMBOL_SELECTS: Final[dict[str, str]] = {
 
 _ALL_TABLES: Final[tuple[str, ...]] = ("class", "method", "field")
 
+# 三类符号各自 SQL 里 `source` 列所在的别名（issue #24 规格 §5）。
+_SOURCE_ALIAS: Final[dict[str, str]] = {"class": "c", "method": "m", "field": "fd"}
+
 
 @dataclass(frozen=True)
 class SymbolHit:
@@ -152,17 +155,23 @@ def find_symbols(
     kind: str,
     limit: int = SYMBOL_LIMIT,
     path_prefix: str | None = None,
+    source: str | None = None,
 ) -> list[SymbolHit]:
     """按「fqn → simple → 后缀 → 编辑距离」四级依次尝试，先命中先返回，不跨级别混合。
 
     `fuzzy=false` 只做前两级；`fuzzy=true` 才启用后缀与编辑距离降级。
     `path_prefix` 在候选阶段下推到 SQL（issue #6 规格 §7）：先按前缀过滤再取 `limit`，
     避免「融合后过滤」把 top-k 打散。
+    `source`（issue #24 规格 §5）过滤 `patched`/`loader`；老索引没有 `source` 列时视为「无命中」，
+    而不是报 SQL 错。
     """
+    if source is not None and not has_column(connection, "classes", "source"):
+        return []
+
     tables = (kind,) if kind in _SYMBOL_SELECTS else _ALL_TABLES
 
     for level in (_level_fqn, _level_simple):
-        hits = level(connection, tables, name, limit, path_prefix)
+        hits = level(connection, tables, name, limit, path_prefix, source)
 
         if hits:
             return hits
@@ -171,12 +180,20 @@ def find_symbols(
         return []
 
     for level in (_level_suffix, _level_fuzzy):
-        hits = level(connection, tables, name, limit, path_prefix)
+        hits = level(connection, tables, name, limit, path_prefix, source)
 
         if hits:
             return hits
 
     return []
+
+
+def _source_condition(table: str, source: str | None) -> tuple[str, list[object]]:
+    """`source` 过滤的 SQL 片段；不传时为空（行为不变）。"""
+    if not source:
+        return "", []
+
+    return f" AND {_SOURCE_ALIAS[table]}.source = ?", [source]
 
 
 def _path_condition(alias: str, prefix: str | None) -> tuple[str, list[object]]:
@@ -213,15 +230,18 @@ def _run(
     build: Predicate,
     limit: int,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[SymbolHit]:
     hits: list[SymbolHit] = []
     path_where, path_params = _path_condition("f", path_prefix)
 
     for table in tables:
         where, params = build(table)
+        source_where, source_params = _source_condition(table, source)
         rows = connection.execute(
-            f"{_SYMBOL_SELECTS[table]} WHERE {where}{path_where} ORDER BY fqn LIMIT ?",
-            [*params, *path_params, limit],
+            f"{_SYMBOL_SELECTS[table]} WHERE {where}{source_where}{path_where}"
+            " ORDER BY fqn LIMIT ?",
+            [*params, *source_params, *path_params, limit],
         ).fetchall()
         hits.extend(_row_to_hit(row) for row in rows)
 
@@ -236,9 +256,15 @@ def _level_fqn(
     name: str,
     limit: int,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[SymbolHit]:
     return _run(
-        connection, tables, lambda table: (f"{_fqn_expr(table)} = ?", [name]), limit, path_prefix
+        connection,
+        tables,
+        lambda table: (f"{_fqn_expr(table)} = ?", [name]),
+        limit,
+        path_prefix,
+        source,
     )
 
 
@@ -248,6 +274,7 @@ def _level_simple(
     name: str,
     limit: int,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[SymbolHit]:
     return _run(
         connection,
@@ -255,6 +282,7 @@ def _level_simple(
         lambda table: (f"{_simple_expr(table)} = ?", [name]),
         limit,
         path_prefix,
+        source,
     )
 
 
@@ -264,6 +292,7 @@ def _level_suffix(
     name: str,
     limit: int,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[SymbolHit]:
     # 以 `.` 为边界的后缀匹配：`substr` 比较避免 `LIKE` 的 `%`/`_` 转义问题。
     return _run(
@@ -272,6 +301,7 @@ def _level_suffix(
         lambda table: (f"substr({_fqn_expr(table)}, -(length(?) + 1)) = '.' || ?", [name, name]),
         limit,
         path_prefix,
+        source,
     )
 
 
@@ -281,15 +311,17 @@ def _level_fuzzy(
     name: str,
     limit: int,
     path_prefix: str | None,
+    source: str | None = None,
 ) -> list[SymbolHit]:
     hits: list[SymbolHit] = []
     path_where, path_params = _path_condition("f", path_prefix)
 
     for table in tables:
+        source_where, source_params = _source_condition(table, source)
         rows = connection.execute(
             f"{_SYMBOL_SELECTS[table]} WHERE length({_simple_expr(table)}) BETWEEN ? AND ?"
-            f"{path_where}",
-            [len(name) - FUZZY_DISTANCE, len(name) + FUZZY_DISTANCE, *path_params],
+            f"{source_where}{path_where}",
+            [len(name) - FUZZY_DISTANCE, len(name) + FUZZY_DISTANCE, *source_params, *path_params],
         ).fetchall()
 
         for row in rows:
@@ -394,11 +426,16 @@ def find_references(
     *,
     limit: int,
     path_prefix: str | None = None,
+    source: str | None = None,
 ) -> list[ReferenceHit]:
     """反查引用。`symbol` 是方法/字段名，或 `Class#member`（按引用方所在类的简单名过滤）。
 
-    `path_prefix` 在候选阶段下推到 SQL（issue #6 规格 §7）。
+    `path_prefix` 在候选阶段下推到 SQL（issue #6 规格 §7）。`source`（issue #24 规格 §5）
+    过滤 `refs.source`；老索引没有该列时视为「无命中」。
     """
+    if source is not None and not has_column(connection, "refs", "source"):
+        return []
+
     class_simple: str | None = None
     target = symbol
 
@@ -413,6 +450,10 @@ def find_references(
         " WHERE r.target_name = ?"
     )
     params: list[object] = [target]
+
+    if source is not None:
+        sql += " AND r.source = ?"
+        params.append(source)
 
     if class_simple:
         sql += " AND c.simple = ?"
@@ -499,6 +540,29 @@ def has_table(connection: sqlite3.Connection, name: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    """表里是否存在某列（issue #24 的 `source` 列在老索引里不存在）。
+
+    `PRAGMA table_info` 的第 2 列是列名；连接可能没开 `row_factory = Row`，按下标取。
+    """
+    return any(
+        str(row[1]) == column for row in connection.execute(f"PRAGMA table_info({table})")
+    )
+
+
+def file_source(connection: sqlite3.Connection, path: str) -> str | None:
+    """某文件属于哪个来源（`patched`/`loader`）；文件不在索引里或老索引无该列时返回 `None`。
+
+    literal 通道据此把「文件 + 行号」映射回来源，供 `source` 过滤使用（issue #24 规格 §5）。
+    """
+    if not has_column(connection, "files", "source"):
+        return None
+
+    row = connection.execute("SELECT source FROM files WHERE path = ?", (path,)).fetchone()
+
+    return None if row is None else str(row[0])
 
 
 def count_symbol_names(connection: sqlite3.Connection, names: list[str]) -> dict[str, int]:

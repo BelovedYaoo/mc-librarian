@@ -36,12 +36,13 @@ const KIND_OPTIONS: { value: SymbolKind; label: string }[] = [
   { value: 'field', label: '字段' },
 ];
 
-/** `why` 的通道标签与配色（规格 §4 的固定顺序）。 */
+/** `why` 的通道标签与配色（规格 §4 的固定顺序；`patch` 由 issue #24 追加）。 */
 const CHANNEL_LABELS: Record<HitChannel, string> = {
   summary: '摘要',
   symbol: '符号',
   literal: '字面量',
   reference: '引用',
+  patch: '补丁',
 };
 
 const CHANNEL_COLORS: Record<HitChannel, 'success' | 'primary' | 'warning' | 'secondary'> = {
@@ -49,6 +50,7 @@ const CHANNEL_COLORS: Record<HitChannel, 'success' | 'primary' | 'warning' | 'se
   symbol: 'primary',
   literal: 'warning',
   reference: 'secondary',
+  patch: 'warning',
 };
 
 function errorText(cause: unknown): string {
@@ -300,7 +302,11 @@ export function BrowseView() {
             </Typography>
 
             {(results.suggestions?.length ?? 0) > 0 && (
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 2, flexWrap: 'wrap' }}>
+              <Stack
+                direction="row"
+                spacing={1}
+                sx={{ alignItems: 'center', mb: 2, flexWrap: 'wrap' }}
+              >
                 <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                   建议
                 </Typography>
