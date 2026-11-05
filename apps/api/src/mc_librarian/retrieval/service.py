@@ -164,6 +164,15 @@ def read_source(settings: Settings, version: str, path: str) -> str | None:
     return candidate.read_text(encoding="utf-8", errors="replace")
 
 
+def source_tree_present(settings: Settings, version: str) -> bool:
+    """该版本有没有源码树。
+
+    调用方据此区分两种 404：「整棵源码树没上传」与「树在、但这个文件不在索引/磁盘上」。
+    两者的排查动作完全不同（补传源码 vs 换路径），不能共用一句话。
+    """
+    return source_root(settings.data_dir, version).is_dir()
+
+
 def slice_lines(
     lines: list[str], path: str, version: str, start: int, end: int, max_tokens: int
 ) -> FileSlice:

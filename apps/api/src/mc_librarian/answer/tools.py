@@ -441,5 +441,14 @@ def _bounded_int(args: dict[str, Any], key: str, default: int, low: int, high: i
 
 
 def _hit_citation(hit: Hit) -> Citation:
-    """`Hit` → `Citation`（`search` 命中的定位信息）。"""
+    """`Hit` → `Citation`（`search` 命中的定位信息）。
+
+    补丁命中（`hit.target` 非空）要**指向被改的源文件**，不是补丁文件：`hit.lines` 是目标
+    `.java` 里的新行号（issue #24 规格 §5 重建过 `@@ -a,b +_,c @@` 的新行号），拿它去读
+    `xxx.java.patch` 既不存在那一行、`.patch` 本身也不在源码树里。`symbol` 保留补丁路径，
+    界面上一眼能看出「这条是补丁带来的」。
+    """
+    if hit.target:
+        return Citation(path=hit.target, lines=hit.lines, symbol=hit.symbol)
+
     return Citation(path=hit.path, lines=hit.lines, symbol=hit.symbol)

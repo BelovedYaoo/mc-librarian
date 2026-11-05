@@ -450,7 +450,7 @@ class AskSettingsUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_steps: int | None = Field(default=None, ge=1, le=12)
+    max_steps: int | None = Field(default=None, ge=1, le=200)
     max_answer_tokens: int | None = Field(default=None, ge=500, le=32000)
     max_context_tokens: int | None = Field(default=None, ge=1000)
     timeout_s: int | None = Field(default=None, ge=1, le=3600)

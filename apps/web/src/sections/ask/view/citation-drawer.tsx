@@ -22,9 +22,9 @@ import { highlightLines, languageForPath, themeForMode } from './shiki-highlight
 
 /** 代码行的固定高度：虚拟化按它算窗口与滚动定位，必须与 `lineHeight` 一致。 */
 const LINE_HEIGHT = 20;
-/** 可视区上下各多渲染的行数，滚动时留出缓冲，避免白屏闪烁。 */
-const OVERSCAN = 200;
-/** 高亮前的防抖窗口：连续滚动时不为每一帧都跑一次 tokenizer。 */
+/** 换行符。`split('\n')` 里的转义在两处（源码、脚本）都容易出错，抽成常量更直白。 */
+const NEWLINE = '\n';
+/** 高亮前的防抖窗口：打开抽屉时内容会分几次到达（先取引用区间、再取整文件），合并成一次。 */
 const HIGHLIGHT_DEBOUNCE_MS = 80;
 
 /**
@@ -231,53 +231,21 @@ function FileViewer({
   focusLine: number;
   wrap: boolean;
 }) {
-  const lines = useMemo(() => (slice.content === '' ? [] : slice.content.split('\n')), [slice]);
+  // 按换行切行；`split` 的入参是单字符换行符。
+  const lines = useMemo(() => slice.content.split(NEWLINE), [slice]);
   const startLine = slice.start;
 
   const { palette } = useTheme();
-  // 引用区间底色按模式取：浅色亮黄、暗色低饱和暗黄（见 `HIGHLIGHT_DARK`）。
+  // 引用区间底色按模式取：浅色亮黄、暗色低饱和暗绿（见 `HIGHLIGHT_DARK`）。
   const highlightBg = palette.mode === 'dark' ? HIGHLIGHT_DARK : palette.warning.light;
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const frame = useRef<number | null>(null);
-  const [view, setView] = useState({ top: 0, height: 0 });
 
-  const total = lines.length;
-
-  const measure = () => {
-    const element = scrollRef.current;
-
-    if (element === null) return;
-
-    setView((current) =>
-      current.top === element.scrollTop && current.height === element.clientHeight
-        ? current
-        : { top: element.scrollTop, height: element.clientHeight }
-    );
-  };
-
-  const handleScroll = () => {
-    if (frame.current !== null) return;
-
-    frame.current = requestAnimationFrame(() => {
-      frame.current = null;
-      measure();
-    });
-  };
-
-  useEffect(() => {
-    const element = scrollRef.current;
-
-    if (element === null) return undefined;
-
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-
-    return () => {
-      observer.disconnect();
-
-      if (frame.current !== null) cancelAnimationFrame(frame.current);
-    };
-  }, []);
+  // 整文件只高亮一次；key 是文件内容，滚动不改变它（见 `useHighlightedLines`）。
+  const highlighted = useHighlightedLines(
+    slice.content,
+    languageForPath(slice.path),
+    themeForMode(palette.mode)
+  );
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -285,30 +253,18 @@ function FileViewer({
     if (element === null) return;
 
     // 打开时滚到第一处高亮：留 35% 视口高度在上方，做到「居中偏上」。
-    const offset = (focusLine - startLine) * LINE_HEIGHT - element.clientHeight * 0.35;
-    element.scrollTop = Math.max(0, offset);
-    measure();
-  }, [focusLine, startLine, lines]);
+    // 用行元素的 `offsetTop` 而不是「行号 × 固定行高」——开了自动换行时一行可能占多行高，
+    // 拿固定行高算会滚偏。
+    const row = element.querySelector<HTMLElement>(`[data-line="${focusLine}"]`);
 
-  const firstVisible = Math.max(0, Math.floor(view.top / LINE_HEIGHT) - OVERSCAN);
-  const from = Math.min(firstVisible, Math.max(0, total - 1));
-  const to = Math.max(
-    Math.min(total, Math.ceil((view.top + view.height) / LINE_HEIGHT) + OVERSCAN),
-    Math.min(total, from + 1)
-  );
+    if (row === null) return;
 
-  // 只把**可视窗口**那段交给 Shiki：整文件 `codeToHtml` 会在每次滚动时全量重排。
-  const code = lines.slice(from, to).join('\n');
-  const highlighted = useHighlightedLines(
-    code,
-    languageForPath(slice.path),
-    themeForMode(palette.mode)
-  );
+    element.scrollTop = Math.max(0, row.offsetTop - element.clientHeight * 0.35);
+  }, [focusLine, startLine, slice.content]);
 
   return (
     <Box
       ref={scrollRef}
-      onScroll={handleScroll}
       sx={{
         flex: '1 1 auto',
         minHeight: 0,
@@ -318,17 +274,21 @@ function FileViewer({
         fontSize: 13,
       }}
     >
-      <Box sx={{ height: from * LINE_HEIGHT }} />
-
-      {lines.slice(from, to).map((line, index) => {
-        const lineNo = startLine + from + index;
+      {lines.map((line, index) => {
+        const lineNo = startLine + index;
         const marked = lineNo >= highlight[0] && lineNo <= highlight[1];
 
         return (
           <Box
             key={lineNo}
+            data-line={lineNo}
             sx={{
               display: 'flex',
+              // 交给浏览器跳过屏幕外的行：换行时行高不定，JS 算不了，交给 `content-visibility`
+              // 最稳（它同时省掉屏幕外的布局与绘制）。`contain-intrinsic-size` 给出占位高度，
+              // 没有它滚动条长度会在渲染过程中反复跳动。
+              contentVisibility: 'auto',
+              containIntrinsicSize: `auto ${LINE_HEIGHT}px`,
               lineHeight: `${LINE_HEIGHT}px`,
               bgcolor: marked ? highlightBg : 'transparent',
             }}
@@ -356,8 +316,7 @@ function FileViewer({
               component="span"
               sx={{
                 flex: '1 1 auto',
-                // 默认自动换行：抽屉很高，横向滚动条会落在最底部、实际够不到（实测截断在右缘）。
-                // 关掉换行时用 pre + 父级 overflow-x 兜底，保持列对齐。
+                // 换行开关：关掉时用 pre 保持列对齐，横向滚动由容器兜住。
                 whiteSpace: wrap ? 'pre-wrap' : 'pre',
                 overflowWrap: wrap ? 'anywhere' : 'normal',
                 pr: 1,
@@ -368,22 +327,11 @@ function FileViewer({
           </Box>
         );
       })}
-
-      <Box sx={{ height: Math.max(0, (total - to) * LINE_HEIGHT) }} />
     </Box>
   );
 }
 
-// ----------------------------------------------------------------------
 
-/**
- * 可视窗口的异步高亮。
- *
- * 返回的 token 只在 `code` 与当前窗口一致时才有效，否则回退纯文本（首帧）——窗口一变就
- * 立即失效，避免把上一段的着色套到新的一段上。防抖 `HIGHLIGHT_DEBOUNCE_MS` 保证连续滚动
- * 不会为每一帧都跑一次 tokenizer。着色只改前景色、不改字符与字重，因此换行与行高都不变，
- * 高亮落地时不会跳位。
- */
 function useHighlightedLines(
   code: string,
   lang: HighlightLanguage | 'text',

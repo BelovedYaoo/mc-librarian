@@ -322,7 +322,12 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
             return _error(str(error))
 
         if text is None:
-            return _error(f"文件不存在或不在源码根内：{path}")
+            if not service.source_tree_present(effective(), version):
+                return _error(
+                    f"版本 {version} 的源码树没有上传（只有索引）。用 search / symbol 代替。"
+                )
+
+            return _error(f"源码树里没有这个文件：{path}")
 
         lines = text.splitlines()
         result = service.slice_lines(

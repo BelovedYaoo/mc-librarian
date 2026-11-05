@@ -26,6 +26,7 @@ from mc_librarian.retrieval import (
     read_source,
     reference_list,
     slice_lines,
+    source_tree_present,
     symbol_matches,
 )
 from mc_librarian.retrieval import (
@@ -211,11 +212,15 @@ def read_file(
     text = read_source(settings, version, path)
 
     if text is None:
-        raise ProblemException(
-            404,
-            NOT_FOUND_TITLE,
-            f"该版本的源码树缺失（期望路径 {source_root(settings.data_dir, version)}）",
-        )
+        if not source_tree_present(settings, version):
+            raise ProblemException(
+                404,
+                NOT_FOUND_TITLE,
+                f"该版本的源码树没有上传（期望路径 {source_root(settings.data_dir, version)}）",
+            )
+
+        # 树在、文件不在：路径写错，或这个文件只进了索引（例如 `.patch` 不在源码树里）。
+        raise ProblemException(404, NOT_FOUND_TITLE, f"源码树里没有这个文件：{path}")
 
     lines = split_lines(text)
     total_lines = len(lines)

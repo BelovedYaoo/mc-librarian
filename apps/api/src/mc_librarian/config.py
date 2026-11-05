@@ -155,7 +155,9 @@ class Settings(BaseSettings):
     # 单次问答的总超时（秒）：超时走降级，不冒泡成 500。
     ask_timeout_s: int = Field(default=120, ge=1, le=3600)
     # `AskRequest.max_steps` / `max_answer_tokens` 省略时的服务端默认值（契约 `settings.ask.*`）。
-    ask_max_steps: int = Field(default=6, ge=1, le=12)
+    # 上限放到 200：`max_steps` 数的是**模型轮次**，一轮里可能有多个并发工具调用，
+    # 复杂问题（跨类调用链、补丁对照）需要几十轮才收敛。
+    ask_max_steps: int = Field(default=6, ge=1, le=200)
     ask_max_answer_tokens: int = Field(default=8000, ge=500, le=32000)
     # 工具结果累积的上下文预算（token）：超出时从最旧的工具结果开始丢弃（规格 §3）。
     ask_max_context_tokens: int = Field(default=60000, ge=1000)

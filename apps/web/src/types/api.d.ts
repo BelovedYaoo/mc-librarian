@@ -844,7 +844,13 @@ export interface components {
              *     不是本人会话一律 404。
              */
             conversation_id?: string;
-            /** @description 省略时用服务端设置 `settings.ask.max_steps`（默认 6） */
+            /**
+             * @description 省略时用服务端设置 `settings.ask.max_steps`（默认 6）。
+             *
+             *     这是**模型轮次**上限，不是工具调用次数：一轮里可以并发多个工具调用，所以实际
+             *     调用次数通常大于该值（实测一次 12 轮收尾是 23 次调用）。
+             *     与 `settings.ask.timeout_s` 一起生效，先到者结束本次问答。
+             */
             max_steps?: number | null;
             /** @description 省略时用服务端设置 `settings.ask.max_answer_tokens`（默认 8000） */
             max_answer_tokens?: number | null;
@@ -1100,7 +1106,8 @@ export interface components {
         };
         AskSettings: {
             /**
-             * @description `AskRequest.max_steps` 省略时的服务端默认值
+             * @description `AskRequest.max_steps` 省略时的服务端默认值。这是**模型轮次**上限（一轮可并发多个
+             *     工具调用），不是工具调用次数。
              * @default 6
              */
             max_steps: number;

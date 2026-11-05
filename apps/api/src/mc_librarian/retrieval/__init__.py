@@ -12,6 +12,7 @@ from mc_librarian.retrieval.service import (
     reference_list,
     search,
     slice_lines,
+    source_tree_present,
     symbol_matches,
 )
 
@@ -22,5 +23,6 @@ __all__ = [
     "reference_list",
     "search",
     "slice_lines",
+    "source_tree_present",
     "symbol_matches",
 ]
