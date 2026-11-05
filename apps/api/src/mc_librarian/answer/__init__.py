@@ -7,7 +7,12 @@ SSE 编码；循环本身在 `agent.AskRun`，工具在 `tools.ToolBox`（复用
 from __future__ import annotations
 
 from mc_librarian.answer.agent import AskRun
-from mc_librarian.answer.client import ChatError, OpenAiCompatChatClient, post_chat_completion
+from mc_librarian.answer.client import (
+    ChatError,
+    OpenAiCompatChatClient,
+    post_chat_completion,
+    stream_chat_completion,
+)
 from mc_librarian.answer.limiter import AskLimiter
 from mc_librarian.answer.tools import ToolBox
 
@@ -18,4 +23,5 @@ __all__ = [
     "OpenAiCompatChatClient",
     "ToolBox",
     "post_chat_completion",
+    "stream_chat_completion",
 ]

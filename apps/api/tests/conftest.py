@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_librarian.answer import client as answer_client
+from mc_librarian.answer.client import ChatChunk, TokenUsage, ToolCall
 from mc_librarian.auth import passwords
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.db import CONTROL_DB_NAME, utc_now
@@ -98,10 +99,13 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> FakeLlm:
 class FakeChat:
     """假 LLM（问答用）：脚本化 chat completion 响应，不联网。
 
-    与 `FakeLlm` 同一做法：只替换最外层的 `post_chat_completion`，客户端解析、工具循环、
-    上下文预算与收尾都走真实代码路径。`script` 是待返回的 message 队列（按顺序弹出）；
-    用完后：给了工具就回 `always_tools`（默认空 → 直接给答案），强制收尾（不给工具）那一次
-    回 `default_answer`。`fail_with` 让下一次调用抛异常（验证降级）。
+    与 `FakeLlm` 同一做法：只替换最外层的 `post_chat_completion` / `stream_chat_completion`，
+    客户端解析、工具循环、上下文预算与收尾都走真实代码路径。`script` 是待返回的 message 队列
+    （按顺序弹出）；用完后：给了工具就回 `always_tools`（默认空 → 直接给答案），强制收尾
+    （不给工具）那一次回 `default_answer`。`fail_with` 让下一次调用抛异常（验证降级）。
+
+    问答走流式，所以默认的假实现是 `stream`：文本按 `chunk_size` 切片逐块 yield，末块带
+    tool_calls 与 usage（模拟 `stream_options.include_usage` 的网关）。
     """
 
     def __init__(self) -> None:
@@ -113,11 +117,11 @@ class FakeChat:
         # 第几次调用开始失败（1-based）：验证「已经召回一部分后才失败」的降级路径。
         self.fail_from = 1
         self.usage: dict[str, int] = {"prompt_tokens": 11, "completion_tokens": 7}
+        # 流式每块的文本片长度（字符）：小一点才能验证「多个 delta 按顺序产出」。
+        self.chunk_size = 4
 
-    def post(
-        self, url: str, payload: dict[str, object], api_key: str, timeout: float
-    ) -> dict[str, Any]:
-        del url, api_key, timeout
+    def _reply(self, payload: dict[str, object]) -> dict[str, Any]:
+        """按脚本给出这一次的 message + usage（`post` 与 `stream` 共用）。"""
         self.calls.append(payload)
 
         if self.fail_with is not None and len(self.calls) >= self.fail_from:
@@ -132,12 +136,52 @@ class FakeChat:
 
         return {"choices": [{"message": message}], "usage": dict(self.usage)}
 
+    def post(
+        self, url: str, payload: dict[str, object], api_key: str, timeout: float
+    ) -> dict[str, Any]:
+        del url, api_key, timeout
+
+        return self._reply(payload)
+
+    def stream(
+        self, url: str, payload: dict[str, object], api_key: str, timeout: float
+    ) -> Iterator[ChatChunk]:
+        """流式版的假响应：文本切块 → tool_calls → usage。"""
+        del url, api_key, timeout
+        reply = self._reply(payload)
+        message = reply["choices"][0]["message"]
+        content = message.get("content") or ""
+
+        for start in range(0, len(str(content)), self.chunk_size):
+            yield ChatChunk(content=str(content)[start : start + self.chunk_size])
+
+        yield ChatChunk(
+            tool_calls=_fake_tool_calls(message.get("tool_calls") or []),
+            usage=TokenUsage(**reply["usage"]),
+        )
+
+
+def _fake_tool_calls(raw_calls: list[dict[str, Any]]) -> tuple[ToolCall, ...]:
+    """把脚本里的 tool_calls（OpenAI 形状）转成 `ToolCall`。"""
+    return tuple(
+        ToolCall(
+            id=str(raw.get("id") or f"call_{index}"),
+            name=str(raw["function"]["name"]),
+            arguments=str(raw["function"].get("arguments") or "{}"),
+        )
+        for index, raw in enumerate(raw_calls)
+    )
+
 
 @pytest.fixture(autouse=True)
 def fake_chat(monkeypatch: pytest.MonkeyPatch) -> FakeChat:
-    """全局替换问答的 LLM 发送函数：`/v1/ask` 的测试不联网。"""
+    """全局替换问答的 LLM 发送函数：`/v1/ask` 的测试不联网。
+
+    问答走流式（`stream_chat_completion`）；非流式入口一并换掉，供直接调用它的用例使用。
+    """
     fake = FakeChat()
     monkeypatch.setattr(answer_client, "post_chat_completion", fake.post)
+    monkeypatch.setattr(answer_client, "stream_chat_completion", fake.stream)
 
     return fake
 

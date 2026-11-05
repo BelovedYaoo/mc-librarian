@@ -18,9 +18,15 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any, Final
+from typing import Any, Final, cast
 
-from mc_librarian.answer.client import ChatClient, ChatCompletion, ChatError
+from mc_librarian.answer.client import (
+    ChatChunk,
+    ChatClient,
+    ChatCompletion,
+    ChatError,
+    TokenUsage,
+)
 from mc_librarian.answer.tools import SEARCH_TOOL, TOOL_SCHEMAS, ToolBox, ToolOutcome
 from mc_librarian.indexing.text import count_tokens
 from mc_librarian.schemas import AskReason, AskStep, Citation, Usage
@@ -56,6 +62,9 @@ MIN_RESULT_TOKENS: Final = 200
 # 下一次工具调用（一次 `read` 就是几千 token）立刻又超，于是出现「压缩 → 调一两次 →
 # 又压缩」的抖动。留 30% 余量能把压缩间隔拉开到十几次调用一次。
 COMPACT_TARGET_RATIO: Final = 0.7
+
+# 流式桥的结束哨兵：独立对象而不是 `None`，避免与块本身混淆。
+_STREAM_DONE: Final = object()
 
 
 class AskRun:
@@ -97,6 +106,16 @@ class AskRun:
         # 是否已经走到统一收尾（`_finish`）。客户端中途断开时生成器停在 `yield`，此标志为 False，
         # 收尾就只还槽位、不写半截答案。
         self.finished = False
+        # 最近一次 `_call` 的结果（`_call` 写入，调用点读）。
+        self._completion = ChatCompletion(
+            content="", tool_calls=(), usage=TokenUsage(prompt_tokens=0, completion_tokens=0)
+        )
+        # `self.answer` 里已经作为 `delta` 发出去的长度。
+        #
+        # 用长度而不是布尔标志：正文是**边流边发**的，但工具轮也可能先吐几句话（「让我查一下」），
+        # 那几句已经显示给用户了。只记「发过没发过」会让 `_finish` 要么丢掉已经显示的前缀、
+        # 要么把整段再发一遍。按长度记，`_finish` 只补发剩下的部分，界面与落库内容始终一致。
+        self._streamed_chars = 0
 
     @property
     def latency_ms(self) -> int:
@@ -126,15 +145,19 @@ class AskRun:
                 return
 
             try:
-                completion = await self._call(messages, TOOL_SCHEMAS)
+                async for event in self._call(messages, TOOL_SCHEMAS):
+                    yield event
             except (ChatError, TimeoutError, OSError) as error:
                 async for event in self._degrade(f"模型调用失败：{error}"):
                     yield event
 
                 return
 
+            completion = self._completion
+
             if not completion.tool_calls:
-                self.answer = completion.content.strip()
+                # 正文已在 `_call` 里边收边累积进 `self.answer` 并作为 `delta` 流出，
+                # 这里**不能**再赋值：覆盖会丢掉前面已经显示给用户的部分。
                 async for event in self._finish("stop"):
                     yield event
 
@@ -191,10 +214,22 @@ class AskRun:
 
             return
 
+        prefix = f"{MAX_STEPS_NOTICE}。\n"
+        notice_sent = False
+
         try:
-            completion = await self._call(
+            async for event in self._call(
                 [*messages, {"role": "user", "content": FORCE_ANSWER_PROMPT}], []
-            )
+            ):
+                if not notice_sent and event["type"] == "delta":
+                    # 步数上限说明是答案的一部分，必须在正文之前发出去；但模型可能一个字都不给
+                    # （那会走降级），所以等第一段正文到了再发。它同样要累积并记账——
+                    # 否则界面有这句、落库的答案没有。
+                    notice_sent = True
+                    self.answer += prefix
+                    self._streamed_chars += len(prefix)
+                    yield {"type": "delta", "text": prefix}
+                yield event
         except (ChatError, TimeoutError, OSError) as error:
             async for event in self._degrade(f"模型调用失败：{error}"):
                 yield event
@@ -202,7 +237,7 @@ class AskRun:
             return
 
         # 强制收尾这一次就算模型还想调工具也不执行：拿它的文本作答。
-        body = completion.content.strip()
+        body = self._completion.content.strip()
 
         if not body:
             # 模型仍然没给文本（例如推理预算全花在思考上）：退化成「只给位置」，不要交一片空白。
@@ -210,7 +245,7 @@ class AskRun:
                 yield event
 
             return
-        self.answer = f"{MAX_STEPS_NOTICE}。\n{body}".strip()
+        # 正文与 prefix 都已在流出时累积进 `self.answer`，这里不再赋值。
         async for event in self._finish("max_steps"):
             yield event
 
@@ -235,7 +270,9 @@ class AskRun:
             }
             self._collect(outcome.citations)
 
-        self.answer = DEGRADED_NOTICE
+        # 追加而不是覆盖：模型可能已经流出一部分正文给用户看到了，覆盖会让界面与落库内容不一致。
+        # 用 `+` 拼接而不是 f-string 带 `\n`：多行 f-string 里写换行最容易出错。
+        self.answer = self.answer + "\n\n" + DEGRADED_NOTICE if self.answer else DEGRADED_NOTICE
         async for event in self._finish("degraded"):
             yield event
 
@@ -244,8 +281,14 @@ class AskRun:
         self.finished = True
         self.reason = reason
 
-        for chunk in _delta_chunks(self.answer):
+        # 模型正文已经边收边作为 `delta` 发过了；这里只补发**还没发出去的尾巴**
+        # （降级提示，或流式中途失败后缺的那一段）。
+        remainder = self.answer[self._streamed_chars :]
+
+        for chunk in _delta_chunks(remainder):
             yield {"type": "delta", "text": chunk}
+
+        self._streamed_chars = len(self.answer)
 
         for citation in self.citations:
             yield {
@@ -270,20 +313,77 @@ class AskRun:
 
     async def _call(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
-    ) -> ChatCompletion:
-        """调一次模型（阻塞调用丢进线程），并累计用量。"""
-        remaining = max(self.deadline - time.monotonic(), 1.0)
-        completion = await asyncio.to_thread(
-            self.client.complete,
-            messages=_payload_messages(messages),
-            tools=tools,
-            max_tokens=self.max_answer_tokens,
-            timeout=min(self.llm_timeout_s, remaining),
-        )
-        self.prompt_tokens += completion.usage.prompt_tokens
-        self.completion_tokens += completion.usage.completion_tokens
+    ) -> AsyncIterator[dict[str, Any]]:
+        """调一次模型：文本增量边收边 yield `delta`，结束后结果放进 `self._completion`。
 
-        return completion
+        与非流式路径同一套错误语义（网络 / 非 2xx / 响应结构不符都抛 `ChatError`）。工具调用的
+        分片由客户端在流结束时组装（`self._completion.tool_calls`）。
+        """
+        remaining = max(self.deadline - time.monotonic(), 1.0)
+        content_parts: list[str] = []
+        final = ChatChunk()
+
+        async for chunk in self._stream_chunks(
+            _payload_messages(messages), tools, min(self.llm_timeout_s, remaining)
+        ):
+            if chunk.content:
+                content_parts.append(chunk.content)
+                self.answer += chunk.content
+                self._streamed_chars += len(chunk.content)
+                yield {"type": "delta", "text": chunk.content}
+
+            if chunk.tool_calls or chunk.usage is not None:
+                final = chunk
+
+        self._completion = ChatCompletion(
+            content="".join(content_parts),
+            tool_calls=final.tool_calls,
+            usage=final.usage or TokenUsage(prompt_tokens=0, completion_tokens=0),
+        )
+        self.prompt_tokens += self._completion.usage.prompt_tokens
+        self.completion_tokens += self._completion.usage.completion_tokens
+
+    async def _stream_chunks(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], timeout: float
+    ) -> AsyncIterator[ChatChunk]:
+        """把同步的流式生成器桥到事件循环：工作线程逐块读，主协程逐块 yield。
+
+        底层 `urlopen` 是阻塞的，直接在事件循环里迭代会把整个进程卡住（其它请求与工具调用都
+        停住），所以丢进工作线程，用 `asyncio.Queue` 把块送回主协程。
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[object] = asyncio.Queue()
+
+        def pump() -> None:
+            try:
+                for chunk in self.client.stream(
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=self.max_answer_tokens,
+                    timeout=timeout,
+                ):
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            except BaseException as error:  # 原样带回主协程重抛
+                loop.call_soon_threadsafe(queue.put_nowait, error)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, _STREAM_DONE)
+
+        task = asyncio.create_task(asyncio.to_thread(pump))
+
+        try:
+            while True:
+                item = await queue.get()
+
+                if item is _STREAM_DONE:
+                    break
+
+                if isinstance(item, BaseException):
+                    raise item
+
+                yield cast("ChatChunk", item)
+        finally:
+            # 正常结束时线程已经跑完（`_STREAM_DONE` 是它最后推的）；异常 / 取消时不让等待拖住收尾。
+            task.cancel()
 
     def _expired(self) -> bool:
         return time.monotonic() > self.deadline

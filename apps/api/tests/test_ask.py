@@ -156,6 +156,19 @@ def test_ask_streams_step_delta_citation_done(
     assert done["usage"]["completion_tokens"] == 7 * 2
 
 
+def test_ask_emits_multiple_delta_events_in_order(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """一轮回答拆成多个 `delta` 逐块到达（不是最后一次性给整段），顺序与内容都正确。"""
+    fake_chat.script = [final_answer("Mob 定义了刷怪实体的基类。")]
+
+    events = parse_sse(ask(user_client).text)
+    deltas = [event["text"] for event in events if event["type"] == "delta"]
+
+    assert len(deltas) >= 3, "流式回答应当产出多个 delta 事件"
+    assert "".join(deltas) == "Mob 定义了刷怪实体的基类。"
+
+
 def test_ask_reports_tool_failure_to_the_model(
     user_client: TestClient, indexed: Path, fake_chat: FakeChat
 ) -> None:
@@ -283,7 +296,9 @@ def test_ask_degrades_when_the_model_times_out(
     def explode(*args: Any, **kwargs: Any) -> Any:
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(answer_client, "post_chat_completion", explode)
+    # 问答走流式，底层发送函数是 `stream_chat_completion`（`fake_chat` 已把它换成假实现，
+    # 这里再换成直接抛超时的版本）。
+    monkeypatch.setattr(answer_client, "stream_chat_completion", explode)
 
     response = ask(user_client)
 
@@ -668,3 +683,30 @@ def test_fit_budget_leaves_headroom_below_the_cap() -> None:
     # 丢掉的是最旧的那些，最新的那一轮必须还在（模型要继续用它作答）。
     assert "search#0" in dropped
     assert "search#5" not in dropped
+
+
+def test_streamed_deltas_match_persisted_answer(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """界面所见 == 落库内容：把所有 `delta` 拼起来，必须等于历史里的助手消息。
+
+    流式最容易出的两类偏差都在这里会被抓住：
+    1. 正文边流边发、`_finish` 又整段补发一遍（重复）；
+    2. 工具轮里模型先说了几句（「让我查一下」），那几句已经显示给用户，但 `answer` 只保留
+       最后一轮的内容（丢失）。
+    """
+    fake_chat.script = [
+        tool_call("search", query="Mob", detail="locate"),
+        final_answer("刷怪上限按 MobCategory 的每区块上限算。"),
+    ]
+
+    events = parse_sse(ask(user_client).text)
+    streamed = "".join(event["text"] for event in events if event["type"] == "delta")
+    done = next(event for event in events if event["type"] == "done")
+
+    assert streamed.strip() == "刷怪上限按 MobCategory 的每区块上限算。"
+
+    detail = user_client.get(f"/v1/conversations/{done['conversation_id']}").json()
+    assistant = next(m for m in detail["messages"] if m["role"] == "assistant")
+
+    assert assistant["content"] == streamed
