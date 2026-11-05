@@ -319,9 +319,14 @@ def _content_text(request: SearchRequest, hit: FusedHit, snippet: str | None) ->
         f"{request.version}:{candidate.path}",
         f"{candidate.start_line}-{candidate.end_line}",
         candidate.symbol or "",
-        candidate.target or "",
-        *hit.channels,
     ]
+
+    # 只在真有 `target`（patch 命中）时追加：否则会多出一个分隔空格，把老索引的 token 记账
+    # 悄悄 +1（回归对照实测）。
+    if candidate.target:
+        parts.append(candidate.target)
+
+    parts.extend(hit.channels)
 
     if request.detail == "snippet":
         parts.append(candidate.summary or "")
