@@ -13,6 +13,7 @@ import Drawer from '@mui/material/Drawer';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 
 import { useConversations, useVersions } from 'src/hooks';
@@ -533,47 +534,55 @@ export function AskView() {
               </Alert>
             )}
 
-            <Stack spacing={1.5}>
-              <TextField
-                select
-                size="small"
-                label="版本"
-                value={version}
-                onChange={(event) => setVersion(event.target.value)}
-                sx={{ width: 160 }}
-                disabled={versions.length === 0}
-                helperText="只在选中的版本上检索"
-              >
-                {versions.map((item) => (
-                  <MenuItem key={item.version} value={item.version}>
-                    {item.version}
-                  </MenuItem>
-                ))}
-              </TextField>
-
-              <Stack direction="row" spacing={2} sx={{ alignItems: 'flex-end' }}>
+            {/* 版本选择器与输入框同一行：它原来是「标签 + 下拉 + 一行 helperText」，
+                白占两行高度。现在收成一个紧凑下拉，「只在选中的版本上检索」挪进 Tooltip。 */}
+            <Stack
+              direction="row"
+              spacing={1.5}
+              sx={{
+                alignItems: 'flex-end',
+                flexWrap: { xs: 'wrap', sm: 'nowrap' },
+              }}
+            >
+              <Tooltip title="只在选中的版本上检索">
                 <TextField
-                  label="问题"
-                  value={question}
-                  onChange={(event) => setQuestion(event.target.value)}
-                  placeholder="刷怪上限在哪定义？"
-                  multiline
-                  minRows={1}
-                  maxRows={8}
-                  fullWidth
-                  inputRef={questionInputRef}
-                  slotProps={{ htmlInput: { onKeyDown: handleQuestionKeyDown } }}
-                />
-
-                <Button
-                  type="submit"
-                  variant="contained"
-                  disabled={busy || version === '' || question.trim() === ''}
-                  sx={{ flexShrink: 0 }}
+                  select
+                  size="small"
+                  label="版本"
+                  value={version}
+                  onChange={(event) => setVersion(event.target.value)}
+                  disabled={versions.length === 0}
+                  sx={{ width: { xs: '100%', sm: 210 }, flexShrink: 0 }}
                 >
-                  {busy ? '回答中…' : '提问'}
-                </Button>
-              </Stack>
+                  {versions.map((item) => (
+                    <MenuItem key={item.version} value={item.version}>
+                      {item.version}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              </Tooltip>
+
+              <TextField
+                label="问题"
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+                placeholder="刷怪上限在哪定义？"
+                multiline
+                minRows={1}
+                maxRows={8}
+                inputRef={questionInputRef}
+                slotProps={{ htmlInput: { onKeyDown: handleQuestionKeyDown } }}
+                sx={{ flex: '1 1 240px', minWidth: 0 }}
+              />
+
+              <Button
+                type="submit"
+                variant="contained"
+                disabled={busy || version === '' || question.trim() === ''}
+                sx={{ flexShrink: 0 }}
+              >
+                {busy ? '回答中…' : '提问'}
+              </Button>
             </Stack>
           </Box>
         </Box>

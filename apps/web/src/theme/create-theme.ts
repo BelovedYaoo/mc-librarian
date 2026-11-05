@@ -197,6 +197,35 @@ const darkPalette: PaletteOptions = {
 const baseOptions: ThemeOptions = {
   shape: { borderRadius: 8 },
   components: {
+    // 滚动条：系统默认的滚动条在暗色下是一条亮白的宽条，和深底格格不入（截图里最扎眼的
+    // 就是它）。统一定成细滚动条，颜色随模式走；`border` + `backgroundClip: content-box`
+    // 让滑块比轨道窄一圈，视觉上是「内嵌」而不是「贴着边缘」。
+    //
+    // 同时写 `scrollbarWidth`/`scrollbarColor`（Firefox）与 `::-webkit-scrollbar`（Chrome /
+    // Edge / Safari）：目前只有这两套，没有第三套标准。
+    MuiCssBaseline: {
+      styleOverrides: (theme) => {
+        const dark = theme.palette.mode === 'dark';
+        // 暗底用白色低透明度、亮底用 grey[500]，各自在对面底色上都够看得清。
+        const thumb = dark ? 'rgba(255, 255, 255, 0.18)' : `rgba(${grey500}, 0.32)`;
+        const thumbHover = dark ? 'rgba(255, 255, 255, 0.3)' : `rgba(${grey500}, 0.5)`;
+
+        return {
+          '*': { scrollbarWidth: 'thin', scrollbarColor: `${thumb} transparent` },
+          '*::-webkit-scrollbar': { width: 10, height: 10 },
+          '*::-webkit-scrollbar-track': { backgroundColor: 'transparent' },
+          '*::-webkit-scrollbar-thumb': {
+            backgroundColor: thumb,
+            borderRadius: 8,
+            // 透明边框 + content-box 裁切：滑块实际 6px，两侧各留 2px 空隙。
+            border: '2px solid transparent',
+            backgroundClip: 'content-box',
+          },
+          '*::-webkit-scrollbar-thumb:hover': { backgroundColor: thumbHover },
+          '*::-webkit-scrollbar-corner': { backgroundColor: 'transparent' },
+        };
+      },
+    },
     // 卡片：细边框 + 极淡阴影。边框用 `divider`（grey[500] 20%），阴影用 Minimal 的卡片
     // token（按模式取色），圆角按 Minimal 的 `Number(shape.borderRadius) * 2`（8 → 16px）。
     MuiCard: {
