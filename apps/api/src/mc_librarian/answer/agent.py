@@ -7,8 +7,13 @@
 - 达到 `max_steps` → 不再给工具、要求基于已有信息作答，`reason=max_steps`；
 - 模型超时 / 不可用 / 返回非法响应 → 用已召回的检索结果降级，`reason=degraded`（HTTP 仍 200）。
 
+同一轮模型响应里的多个工具调用**并发**执行（工具全是只读检索，无共享写状态；共用的只读索引
+连接因此关掉了语句缓存，见 `indexing.query.open_readonly`），事件仍按请求顺序成对发出：先为整批
+发「开始」的 `step`，整批跑完再按原顺序发「完成」的 `step`。
+
 上下文预算（`max_context_tokens`）超出时从最旧的工具结果开始丢弃（保留系统提示与用户问题），
-并在轨迹里记一条 `step` 事件说明丢了哪些。
+并在轨迹里记一条 `step` 事件说明丢了哪些。预算是**每批工具调用之后**检查一次，不是每次调用
+之后：否则同一轮里会连续产出多条「压缩上下文」，界面上表现为「调两次 → 压缩 → 调两次 → 压缩」。
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Final, cast
 
 from mc_librarian.answer.client import (
@@ -26,6 +32,7 @@ from mc_librarian.answer.client import (
     ChatCompletion,
     ChatError,
     TokenUsage,
+    ToolCall,
 )
 from mc_librarian.answer.tools import SEARCH_TOOL, TOOL_SCHEMAS, ToolBox, ToolOutcome
 from mc_librarian.indexing.text import count_tokens
@@ -165,44 +172,59 @@ class AskRun:
 
             messages.append(_assistant_message(completion))
 
-            for call in completion.tool_calls:
-                args, problem = _parse_args(call.arguments)
-                yield {"type": "step", "tool": call.name, "args": args}
-                self.steps.append(AskStep(tool=call.name, args=args))
+            # 编号与参数解析都在并发**之前**定好：并发期间 `len(self.steps)` 不再按调用顺序增长，
+            # 事后算会串号，压缩时的「丢弃标签」就指错对象。
+            plan = _plan_tool_calls(completion.tool_calls, len(self.steps))
 
-                if problem is None:
-                    outcome = await asyncio.to_thread(self.toolbox.execute, call.name, args)
-                else:
-                    outcome = ToolOutcome(ok=False, text=problem)
+            # 先把整批的「开始」发出去（前端据此立刻显示在跑哪几次调用），再并发跑工具。
+            for item in plan:
+                yield {"type": "step", "tool": item.name, "args": item.args}
+                self.steps.append(AskStep(tool=item.name, args=item.args))
 
+            outcomes = await self._execute_batch(plan)
+
+            # 结果按**请求顺序**消费，不按完成先后：按完成先后发出去，前端列表会跳。
+            for item, outcome in zip(plan, outcomes, strict=True):
                 yield {
                     "type": "step",
-                    "tool": call.name,
+                    "tool": item.name,
                     "ok": outcome.ok,
                     "hits": outcome.hits,
                 }
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": call.id,
+                        "tool_call_id": item.id,
                         "content": outcome.text,
                         "_tool": True,
-                        "_label": f"{call.name}#{len(self.steps)}",
+                        "_label": item.label,
                     }
                 )
                 self._collect(outcome.citations)
 
-                dropped = self._fit_budget(messages)
+            # 整批之后再检查一次预算：同一轮里压多次会让界面反复出现「压缩上下文」。
+            dropped = self._fit_budget(messages)
 
-                if dropped:
-                    yield {
-                        "type": "step",
-                        "tool": CONTEXT_BUDGET_TOOL,
-                        "args": {"dropped": dropped},
-                    }
+            if dropped:
+                yield {
+                    "type": "step",
+                    "tool": CONTEXT_BUDGET_TOOL,
+                    "args": {"dropped": dropped},
+                }
 
         async for event in self._forced_finish(messages):
             yield event
+
+    async def _execute_batch(self, plan: list[_PlannedCall]) -> list[ToolOutcome]:
+        """并发执行整批工具调用，返回与 `plan` 同序的结果（`gather` 保证按入参顺序）。"""
+        return list(await asyncio.gather(*(self._execute_one(item) for item in plan)))
+
+    async def _execute_one(self, item: _PlannedCall) -> ToolOutcome:
+        """执行一条；参数不是合法 JSON 的那条不跑工具，直接用失败说明占位。"""
+        if item.problem is not None:
+            return ToolOutcome(ok=False, text=item.problem)
+
+        return await asyncio.to_thread(self.toolbox.execute, item.name, item.args)
 
     async def _forced_finish(
         self, messages: list[dict[str, Any]]
@@ -455,6 +477,37 @@ def _payload_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {key: value for key, value in item.items() if not key.startswith("_")}
         for item in messages
     ]
+
+
+@dataclass(frozen=True)
+class _PlannedCall:
+    """一批里的一个工具调用：参数已解析、`_label` 已编号，等着并发执行。"""
+
+    id: str
+    name: str
+    args: dict[str, Any]
+    problem: str | None
+    label: str
+
+
+def _plan_tool_calls(calls: tuple[ToolCall, ...], taken_steps: int) -> list[_PlannedCall]:
+    """把一轮的 `tool_calls` 摊平成执行计划；`taken_steps` 是这一批之前已有的步数。"""
+    plan: list[_PlannedCall] = []
+
+    for position, call in enumerate(calls):
+        args, problem = _parse_args(call.arguments)
+        plan.append(
+            _PlannedCall(
+                id=call.id,
+                name=call.name,
+                args=args,
+                problem=problem,
+                # 与串行时代一致：`call.name#<这一批里的第几个>`，序号跨批累加。
+                label=f"{call.name}#{taken_steps + position + 1}",
+            )
+        )
+
+    return plan
 
 
 def _assistant_message(completion: ChatCompletion) -> dict[str, Any]:

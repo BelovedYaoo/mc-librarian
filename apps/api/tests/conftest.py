@@ -8,7 +8,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -101,7 +101,8 @@ class FakeChat:
 
     与 `FakeLlm` 同一做法：只替换最外层的 `post_chat_completion` / `stream_chat_completion`，
     客户端解析、工具循环、上下文预算与收尾都走真实代码路径。`script` 是待返回的 message 队列
-    （按顺序弹出）；用完后：给了工具就回 `always_tools`（默认空 → 直接给答案），强制收尾
+    （按顺序弹出，一条可以带多个 `tool_calls`——模拟一轮里并发调好几个工具，用 `tool_calls(...)`
+    构造）；用完后：给了工具就回 `always_tools`（默认空 → 直接给答案），强制收尾
     （不给工具）那一次回 `default_answer`。`fail_with` 让下一次调用抛异常（验证降级）。
 
     问答走流式，所以默认的假实现是 `stream`：文本按 `chunk_size` 切片逐块 yield，末块带
@@ -186,22 +187,41 @@ def fake_chat(monkeypatch: pytest.MonkeyPatch) -> FakeChat:
     return fake
 
 
-def tool_call(name: str, **arguments: Any) -> dict[str, Any]:
-    """构造一条「模型要求调用工具」的 assistant message。"""
+def tool_call(tool: str, **arguments: Any) -> dict[str, Any]:
+    """构造一条「模型要求调用工具」的 assistant message。
+
+    位置参数叫 `tool` 而不是 `name`：`symbol` 工具自己有个 `name` 参数（`tool_call("symbol",
+    name="Mob")`），叫 `name` 会撞。
+    """
     return {
         "role": "assistant",
         "content": None,
         "tool_calls": [
             {
-                "id": f"call-{name}",
+                "id": f"call-{tool}",
                 "type": "function",
                 "function": {
-                    "name": name,
+                    "name": tool,
                     "arguments": json.dumps(arguments, ensure_ascii=False),
                 },
             }
         ],
     }
+
+
+def tool_calls(*messages: dict[str, Any]) -> dict[str, Any]:
+    """把多条 `tool_call(...)` 合成**一条** assistant message：一轮里模型要好几样东西。
+
+    `tool_call` 的 id 只带工具名，两个同名调用会撞；这里按位置重编号（`call-<name>-<n>`），
+    工具结果的 `tool_call_id` 才能对得上各自的请求。
+    """
+    merged = [
+        {**call, "id": f"{call['id']}-{position}"}
+        for position, message in enumerate(messages)
+        for call in cast("list[dict[str, Any]]", message["tool_calls"])
+    ]
+
+    return {"role": "assistant", "content": None, "tool_calls": merged}
 
 
 def final_answer(text: str) -> dict[str, Any]:

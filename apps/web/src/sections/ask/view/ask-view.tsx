@@ -140,10 +140,14 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
         return { ...turn, steps: [...turn.steps, { tool: event.tool, args: event.args }] };
       }
 
-      // 返回后的事件不带 args：补在最后一步还没收尾的同名工具上。
+      // 返回后的事件不带 args：补在**最早**一步还没收尾的同名工具上。
+      //
+      // 一轮里的多个调用是并发跑的，服务端先为整批发「开始」再按请求顺序发「完成」——
+      // 所以同一批里可能挂着多个同名工具（比如两个 `search`），「完成」必须按先来先配对；
+      // 取最后一步会把 A 的结果挂到 B 上。
       const steps = [...turn.steps];
 
-      for (let index = steps.length - 1; index >= 0; index -= 1) {
+      for (let index = 0; index < steps.length; index += 1) {
         if (steps[index].ok === undefined && steps[index].tool === event.tool) {
           steps[index] = { ...steps[index], ok: event.ok, hits: event.hits };
           break;

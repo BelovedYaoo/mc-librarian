@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -19,11 +20,11 @@ from urllib.error import URLError
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FakeChat, final_answer, session_cookie, tool_call
+from conftest import FakeChat, final_answer, session_cookie, tool_call, tool_calls
 from mc_librarian import alerts
 from mc_librarian.answer import client as answer_client
 from mc_librarian.answer.client import ChatError, post_chat_completion
-from mc_librarian.answer.tools import ToolBox
+from mc_librarian.answer.tools import ToolBox, ToolOutcome
 from mc_librarian.api.v1 import answer as answer_api
 from mc_librarian.config import SESSION_COOKIE_NAME, Settings
 from mc_librarian.indexing.build import build_index, place_source_tree
@@ -209,6 +210,83 @@ def test_ask_streams_an_error_event_when_the_loop_breaks(
 
 
 # ----------------------------------------------------------------------
+# 同一轮的多个工具调用（并发执行，结果按请求顺序）
+# ----------------------------------------------------------------------
+
+
+def test_ask_runs_every_tool_call_of_one_turn(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """一轮里模型要两个工具：两个都执行，两条结果都进下一轮的 messages。"""
+    fake_chat.script = [
+        tool_calls(
+            tool_call("search", query="Mob", detail="locate"),
+            tool_call("symbol", name="Mob"),
+        ),
+        final_answer("Mob 是刷怪实体的基类。"),
+    ]
+
+    events = parse_sse(ask(user_client).text)
+    steps = [event for event in events if event["type"] == "step"]
+
+    # 整批的「开始」先全部发出（各带 args），跑完再按同一顺序发「完成」（各带 ok/hits）。
+    assert steps[:2] == [
+        {"type": "step", "tool": "search", "args": {"query": "Mob", "detail": "locate"}},
+        {"type": "step", "tool": "symbol", "args": {"name": "Mob"}},
+    ]
+    assert [event["tool"] for event in steps[2:]] == ["search", "symbol"]
+    assert all(event["ok"] is True and event["hits"] >= 1 for event in steps[2:])
+
+    # 下一轮请求里两条工具结果都在，且与各自的调用对得上（`tool_call_id` 不错位）。
+    tool_messages = [
+        message for message in fake_chat.calls[1]["messages"] if message["role"] == "tool"
+    ]
+    assert [message["tool_call_id"] for message in tool_messages] == [
+        "call-search-0",
+        "call-symbol-1",
+    ]
+    assert "命中" in tool_messages[0]["content"]
+    assert "Mob" in tool_messages[1]["content"]
+
+
+def test_ask_reports_batch_results_in_request_order(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """先发起的调用慢、后发起的快：「完成」事件仍按请求顺序发（按完成先后发前端列表会跳）。"""
+    fake_chat.script = [
+        tool_calls(
+            tool_call("search", query="Mob", detail="locate"),
+            tool_call("symbol", name="ZzzNoSuchSymbol"),
+        ),
+        final_answer("好。"),
+    ]
+
+    real_execute = ToolBox.execute
+
+    def slow_first(self: ToolBox, name: str, args: dict[str, Any]) -> Any:
+        if name == "search":
+            time.sleep(0.05)  # 让同一批里的第二个调用先跑完
+
+        return real_execute(self, name, args)
+
+    monkeypatch.setattr(ToolBox, "execute", slow_first)
+
+    events = parse_sse(ask(user_client).text)
+    steps = [event for event in events if event["type"] == "step"]
+
+    assert [event["tool"] for event in steps[:2]] == ["search", "symbol"]
+    # search 命中、symbol 为 0：按完成先后发的话这里会反过来。
+    assert steps[2]["hits"] >= 1
+    assert steps[3]["hits"] == 0
+
+    tool_messages = [
+        message for message in fake_chat.calls[1]["messages"] if message["role"] == "tool"
+    ]
+    assert "命中" in tool_messages[0]["content"]
+    assert "没有找到这个符号" in tool_messages[1]["content"]
+
+
+# ----------------------------------------------------------------------
 # max_steps（规格 §2）
 # ----------------------------------------------------------------------
 
@@ -375,6 +453,46 @@ def test_ask_drops_oldest_tool_results_over_context_budget(
     last_messages = fake_chat.calls[-1]["messages"]
     tool_texts = [message["content"] for message in last_messages if message["role"] == "tool"]
     assert len(tool_texts) == 1
+
+
+def test_ask_compacts_context_once_per_tool_batch(
+    user_client: TestClient,
+    indexed: Path,
+    fake_chat: FakeChat,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一轮的多个工具结果都追加完才检查一次预算：整批只压一次。
+
+    每个工具结果固定 301 token（`"word " * 300`），预算 1500（目标水位 1050）。前 3 轮各一次
+    调用（903 token）正好不超；第 4 轮一次要两个结果（总量 1505）。串行实现会在第一个结果后
+    压一次、第二个结果后又压一次（界面上是「调两次 → 压缩 → 调两次 → 压缩」），整批只压一次
+    时这两条会在**同一条**事件里一起丢。
+    """
+    settings.ask_max_context_tokens = 1500
+    fake_chat.script = [
+        tool_call("search", query="first", detail="locate"),
+        tool_call("search", query="second", detail="locate"),
+        tool_call("search", query="third", detail="locate"),
+        tool_calls(
+            tool_call("search", query="fourth", detail="locate"),
+            tool_call("search", query="fifth", detail="locate"),
+        ),
+        final_answer("好。"),
+    ]
+
+    def fixed_size(self: ToolBox, name: str, args: dict[str, Any]) -> ToolOutcome:
+        del self, name, args
+
+        return ToolOutcome(ok=True, text="word " * 300, hits=1)
+
+    monkeypatch.setattr(ToolBox, "execute", fixed_size)
+
+    events = parse_sse(ask(user_client).text)
+    budgets = [event for event in events if event.get("tool") == "context_budget"]
+
+    # 标签按批前分配：第 4 轮的两条是 search#4 / search#5，被丢的只能是最旧的两条。
+    assert [event["args"]["dropped"] for event in budgets] == [["search#1", "search#2"]]
 
 
 # ----------------------------------------------------------------------

@@ -86,8 +86,9 @@ query 与入库时一样先过 jieba 分词，否则两字词（「刷怪」）�
 
 ```
 event: step      {"tool":"search","args":{"query":"刷怪上限","detail":"locate"}}
-event: step      {"tool":"search","ok":true,"hits":3}
 event: step      {"tool":"read","args":{"path":"...","start":120,"end":260}}
+event: step      {"tool":"search","ok":true,"hits":3}
+event: step      {"tool":"read","ok":true,"hits":140}
 event: delta     {"text":"1.18 之后…"}
 event: citation  {"path":"net/minecraft/world/entity/MobCategory.java","lines":[12,88],"symbol":"..."}
 event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"latency_ms":9300},"reason":"stop"}
@@ -97,6 +98,9 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"latenc
   工具实现复用同一个检索服务层（`mc_librarian.retrieval`），不另写一套。`version` 由请求给出，模型改不了。
 - `step` 让前端能把「正在检索什么」画出来，也让调用方知道答案的依据路径；同一个事件类型出现两次
   （调用前带 `args`，返回后带 `ok`/`hits`）。
+- **一轮可以要多个工具**（模型一次返回多个 `tool_calls`）：这些调用并发执行，事件仍是 **先按请求顺序
+  把整批的「开始」发完，再按同一顺序发「完成」**（不按完成先后，否则前端列表会跳）；同一批只检查
+  一次上下文预算，所以一轮最多一条 `context_budget`。
 - `citation` 与 `delta` 分离，前端可以把引用做成可点击的代码定位。
 - `reason` 三种取值：`stop`（模型不再调工具）、`max_steps`（达到检索步数上限后强制收尾）、
   `degraded`（模型超时/不可用/返回非法响应）。

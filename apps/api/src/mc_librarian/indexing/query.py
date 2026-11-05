@@ -21,6 +21,10 @@ SYMBOL_LIMIT: Final = 50
 # 模糊匹配的编辑距离上限（规格 §6）。
 FUZZY_DISTANCE: Final = 2
 
+# `sqlite3.connect(cached_statements=...)` 的默认值（CPython 为 128）：单线程使用的连接保留它省
+# 预处理开销；跨线程共享的连接传 0（原因见 `open_readonly`）。
+STATEMENT_CACHE_SIZE: Final = 128
+
 SymbolTable = str
 Predicate = Callable[[str], "tuple[str, list[object]]"]
 
@@ -130,12 +134,24 @@ class FileRecord:
 def open_readonly(path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """只读打开索引库（规格 §9）。
 
-    `check_same_thread=False` 给 `/v1/ask`：它的工具调用跑在 `asyncio.to_thread` 的工作线程里，
-    而连接是在事件循环线程上建的（同一请求内串行使用，不跨请求共享）。同步端点每次都在
-    同一个线程池线程里建/用/关连接，用默认的 `True` 就够。
+    `check_same_thread=False` 给 `/v1/ask` / `eval` / `MCP`：它们把工具调用丢进
+    `asyncio.to_thread` / 线程池，同一个连接会被多个工作线程**同时**使用（一圈里多个工具调用
+    是并发的）。这种用法下语句缓存必须关掉：SQLite 本身是 serialized 模式
+    （`sqlite3.threadsafety == 3`，语句级调用有互斥），但 CPython 的 per-connection statement
+    cache 在 `check_same_thread=False` 下是无锁共享的——两个线程会从缓存里拿到/重置彼此的
+    预处理语句。实测（只读连接、4 线程 2000 次并发 `search`/`symbol`）：开着缓存会出
+    `bad parameter or other API misuse`，还会让一行结果被另一线程顶掉（`IndexError`，**静默
+    错数据**）；关掉后同条件 0 次。代价是同一连接上不再复用预处理语句，问答这种几十次查询
+    的量级可忽略。
+
+    同步端点每次都在同一个线程池线程里建/用/关连接，用默认的 `True`（保留缓存）就够。
     """
     connection = sqlite3.connect(
-        f"file:{path}?mode=ro", uri=True, check_same_thread=check_same_thread
+        f"file:{path}?mode=ro",
+        uri=True,
+        check_same_thread=check_same_thread,
+        # 共享给工作线程时不能用语句缓存（见上面的说明）；不共享时保留缓存省开销。
+        cached_statements=STATEMENT_CACHE_SIZE if check_same_thread else 0,
     )
     connection.row_factory = sqlite3.Row
 
