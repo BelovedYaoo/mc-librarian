@@ -45,7 +45,32 @@ async def get_db(
 
 
 def client_ip(request: Request) -> str | None:
-    """会话表里记的客户端地址（本地开发时可能为 None）。"""
+    """客户端地址（会话与审计里记的那个）。
+
+    请求要穿过边缘 nginx 和 Caddy 两层代理，`request.client.host` 拿到的是**代理容器的内网
+    地址**——实测审计页里每条都是 `172.20.0.3`（web 容器），对排查完全没用。
+
+    所以优先读转发头，顺序是：
+
+    1. `X-Real-IP`：边缘 nginx 用 `$remote_addr` 设的原始地址，最可信；
+    2. `X-Forwarded-For` 的**第一段**：最靠近客户端的那个，后面是各层代理追加的；
+    3. 都没有才退回 `request.client.host`（本地直连，`bun run dev` 走的就是这条）。
+
+    只在这台机器上被受控代理调用，所以不做来源校验——代理链是本项目的部署形态，不是外部输入。
+    """
+    real_ip = request.headers.get("x-real-ip")
+
+    if real_ip:
+        return real_ip.strip()
+
+    forwarded = request.headers.get("x-forwarded-for")
+
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+
+        if first:
+            return first
+
     return request.client.host if request.client else None
 
 
