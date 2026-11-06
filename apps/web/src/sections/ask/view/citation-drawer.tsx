@@ -157,7 +157,13 @@ export function CitationDrawer({
               spacing={1}
               sx={{ mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}
             >
-              {citation.symbol && <Chip size="small" variant="outlined" label={citation.symbol} />}
+              {citation.symbol && (
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  label={shortenSymbol(citation.symbol, citation.path)}
+                />
+              )}
 
               <Typography variant="body2" sx={{ color: 'text.secondary' }}>
                 第 {citation.lines.join('-')} 行
@@ -269,7 +275,9 @@ function FileViewer({
         flex: '1 1 auto',
         minHeight: 0,
         overflow: 'auto',
-        bgcolor: 'action.hover',
+        // 深色下用 `background.default`（比纸面更暗）才是「凹陷」；`action.hover` 是叠加变亮，
+        // 会把代码区推得比抽屉本身还白，正是「太灰白」的来源。
+        bgcolor: (theme) => (theme.palette.mode === 'dark' ? 'background.default' : 'action.hover'),
         fontFamily: 'monospace',
         fontSize: 13,
       }}
@@ -329,6 +337,24 @@ function FileViewer({
       })}
     </Box>
   );
+}
+
+/**
+ * 把 symbol 里与文件路径重复的部分去掉。
+ *
+ * `net.minecraft.world.level.LocalMobCapCalculator.MobCounts` 在
+ * `net/minecraft/world/level/LocalMobCapCalculator.java` 这个文件里——上半段是同一条信息，
+ * 标题行已经写了路径，chip 里再画一遍只是噪声。只保留相对文件的那一截（`MobCounts`）。
+ */
+function shortenSymbol(symbol: string, path: string): string {
+  const [owner, method] = symbol.split('#');
+  const ownerPath = owner.replace(/\./g, '/');
+  const filePath = path.replace(/\.java$/, '');
+  const short = ownerPath.startsWith(`${filePath}/`)
+    ? ownerPath.slice(filePath.length + 1).replace(/\//g, '.')
+    : owner;
+
+  return method === undefined ? short : `${short}#${method}`;
 }
 
 function useHighlightedLines(
