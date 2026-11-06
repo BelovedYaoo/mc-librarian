@@ -5,27 +5,30 @@ import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
 import Divider from '@mui/material/Divider';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
 
 import type { CreatedUser, PatchUserRequest, User } from 'src/lib/api-client';
 
 import { useAuth } from 'src/auth';
-import { createUser, listUsers, patchUser } from 'src/lib/api-client';
+import { createUser, deleteUser, listUsers, patchUser } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
 
 type Role = User['role'];
 
 type UsersState =
-  | { status: 'loading' }
-  | { status: 'ready'; users: User[] }
-  | { status: 'error'; message: string };
+  { status: 'loading' } | { status: 'ready'; users: User[] } | { status: 'error'; message: string };
 
 function messageOf(caught: unknown): string {
   return caught instanceof Error ? caught.message : String(caught);
@@ -92,6 +95,26 @@ export function UsersView() {
       setActionError(messageOf(caught));
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const [pendingDelete, setPendingDelete] = useState<User | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (pendingDelete === null) return;
+
+    setDeleting(true);
+    setActionError(null);
+
+    try {
+      await deleteUser(pendingDelete.id);
+      setPendingDelete(null);
+      await load();
+    } catch (caught) {
+      setActionError(messageOf(caught));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -239,11 +262,43 @@ export function UsersView() {
                 user={item}
                 isCurrent={item.id === currentUser?.id}
                 busy={busyId === item.id}
+                // 最后一个启用中的管理员既不能停用也不能降级，前端先说清楚，
+                // 别让开关弹回来还只在页面顶部挂一行错误。
+                isLastAdmin={
+                  item.role === 'admin' &&
+                  item.enabled &&
+                  state.users.filter((u) => u.role === 'admin' && u.enabled).length <= 1
+                }
                 onPatch={(body) => void handlePatch(item, body)}
+                onDelete={() => setPendingDelete(item)}
               />
             ))}
         </CardContent>
       </Card>
+
+      {/* 删除是破坏性动作：二次确认，并把「会一起删掉什么」写清楚。 */}
+      <Dialog open={pendingDelete !== null} onClose={() => setPendingDelete(null)}>
+        <DialogTitle>删除用户 {pendingDelete?.username}？</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            该用户的会话、访问令牌、问答历史会一并删除；审计日志与用量记录保留（引用置为空）。
+            此操作不可撤销。
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPendingDelete(null)} disabled={deleting}>
+            取消
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => void handleDelete()}
+            disabled={deleting}
+          >
+            {deleting ? '删除中…' : '删除'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }
@@ -254,10 +309,13 @@ type UserRowProps = {
   user: User;
   isCurrent: boolean;
   busy: boolean;
+  /** 系统里唯一一个启用中的管理员：停用与降级都会被后端 409 拒绝。 */
+  isLastAdmin: boolean;
   onPatch: (body: PatchUserRequest) => void;
+  onDelete: () => void;
 };
 
-function UserRow({ user, isCurrent, busy, onPatch }: UserRowProps) {
+function UserRow({ user, isCurrent, busy, isLastAdmin, onPatch, onDelete }: UserRowProps) {
   return (
     <Stack
       direction={{ xs: 'column', sm: 'row' }}
@@ -288,7 +346,7 @@ function UserRow({ user, isCurrent, busy, onPatch }: UserRowProps) {
         size="small"
         label="角色"
         value={user.role}
-        disabled={busy}
+        disabled={busy || (isLastAdmin && user.role === 'admin')}
         onChange={(event) => onPatch({ role: event.target.value as Role })}
         sx={{ minWidth: 130 }}
       >
@@ -300,13 +358,27 @@ function UserRow({ user, isCurrent, busy, onPatch }: UserRowProps) {
         <Switch
           size="small"
           checked={user.enabled}
-          disabled={busy}
+          disabled={busy || (isLastAdmin && user.enabled)}
           onChange={(event) => onPatch({ enabled: event.target.checked })}
         />
         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
           {user.enabled ? '启用' : '禁用'}
         </Typography>
       </Stack>
+
+      <Tooltip title={isLastAdmin ? '系统里最后一个启用中的管理员，不能删除' : ''}>
+        <span>
+          <Button
+            size="small"
+            color="error"
+            disabled={busy || isLastAdmin}
+            onClick={onDelete}
+            sx={{ flexShrink: 0 }}
+          >
+            删除
+          </Button>
+        </span>
+      </Tooltip>
     </Stack>
   );
 }

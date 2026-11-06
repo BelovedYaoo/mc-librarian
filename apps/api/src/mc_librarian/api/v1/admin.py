@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 
 from mc_librarian import audit
 from mc_librarian.auth import invites, sessions, users
@@ -172,6 +172,59 @@ def patch_user(
             )
 
     return user
+
+
+@router.delete(
+    "/admin/users/{userId}",
+    status_code=204,
+    summary="删除用户",
+    description=(
+        "硬删一个用户：会话、PAT、邀请随人删除，问答历史一并删除；"
+        "审计日志、任务、用量里的引用置 NULL 保留。"
+        "不能删自己，也不能删最后一个启用的管理员。"
+    ),
+    operation_id="deleteUser",
+    responses={
+        204: {"description": "已删除"},
+        401: problem_response("未认证"),
+        403: problem_response("需要管理员权限"),
+        404: problem_response("用户不存在"),
+        409: problem_response("违反最后管理员保护，或试图删除自己"),
+    },
+)
+def delete_user(userId: str, request: Request, admin: CurrentAdmin, conn: DbConn) -> Response:
+    with transaction(conn):
+        row = users.find_by_id(conn, userId)
+
+        if row is None:
+            raise ProblemException(404, USER_NOT_FOUND_TITLE, USER_NOT_FOUND_DETAIL)
+
+        if userId == admin.id:
+            # 删自己会立刻把自己的会话带走、并可能让系统没有管理员；不允许，改用别的管理员操作。
+            raise ProblemException(409, "冲突", "不能删除自己，请让另一个管理员操作")
+
+        # 最后一个启用的 admin 不能删（与「不能停用/降级」同一条保护）。
+        is_last_admin = (
+            row["role"] == "admin"
+            and bool(row["enabled"])
+            and users.count_enabled_admins(conn) <= 1
+        )
+
+        if is_last_admin:
+            raise ProblemException(409, LAST_ADMIN_TITLE, LAST_ADMIN_DETAIL)
+
+        username = str(row["username"])
+        users.delete(conn, userId)
+        audit.record(
+            conn,
+            actor_id=admin.id,
+            action=audit.ACTION_USER_DELETED,
+            target=username,
+            detail={"role": str(row["role"])},
+            ip=client_ip(request),
+        )
+
+    return Response(status_code=204)
 
 
 @router.get(

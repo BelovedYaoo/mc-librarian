@@ -17,6 +17,7 @@ from mc_librarian.schemas import AuditEntry
 ACTION_USER_CREATED: Final = "user.created"
 ACTION_USER_ROLE_CHANGED: Final = "user.role_changed"
 ACTION_USER_DISABLED: Final = "user.disabled"
+ACTION_USER_DELETED: Final = "user.deleted"
 ACTION_USER_ENABLED: Final = "user.enabled"
 ACTION_INVITE_CREATED: Final = "invite.created"
 ACTION_INVITE_ACCEPTED: Final = "invite.accepted"

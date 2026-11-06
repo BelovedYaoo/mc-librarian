@@ -153,3 +153,30 @@ def _require(conn: sqlite3.Connection, user_id: str) -> User:
     assert row is not None, "更新过的用户必须存在"
 
     return row_to_user(row)
+
+
+def delete(conn: sqlite3.Connection, user_id: str) -> None:
+    """硬删一个用户，同时把「引用他的人」改成 NULL，保住审计与统计。
+
+    为什么不是软删：管理员要的是「这个人从列表里消失」，软删得让每个查询都记得过滤，
+    很容易漏。但直接 `DELETE` 会撞外键——`audit.actor_id`、`jobs.created_by`、
+    `usage.user_id`、`settings.updated_by` 都没有级联（这些是历史记录，不该跟着人消失）。
+
+    所以：先把自己产出的「个人数据」清掉（会话、PAT、邀请由 `ON DELETE CASCADE` 带走；
+    会话历史 `conversations` 显式删，那是用户自己的问答记录），再把外部引用置 NULL，
+    最后删行。`audit.target` 存的是用户名快照，所以审计日志仍然可读。
+    """
+    # 会话历史：用户自己的问答记录，随人一起删（外键没有级联）。
+    conn.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
+
+    # 历史记录里的引用改成 NULL：保留「发生过什么」，不保留「是谁」。
+    conn.execute("UPDATE audit SET actor_id = NULL WHERE actor_id = ?", (user_id,))
+    conn.execute("UPDATE jobs SET created_by = NULL WHERE created_by = ?", (user_id,))
+    conn.execute("UPDATE usage SET user_id = NULL WHERE user_id = ?", (user_id,))
+    conn.execute("UPDATE settings SET updated_by = NULL WHERE updated_by = ?", (user_id,))
+
+    # 自己引用的上级（created_by）也只能置空，否则删不掉这个人的下家记录。
+    conn.execute("UPDATE users SET created_by = NULL WHERE created_by = ?", (user_id,))
+
+    # sessions / pats / invites 是 ON DELETE CASCADE，跟着这一行自动走。
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))

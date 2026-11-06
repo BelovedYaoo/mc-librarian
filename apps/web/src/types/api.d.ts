@@ -473,7 +473,13 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * 删除用户
+         * @description 硬删一个用户：会话、访问令牌、邀请随人删除；问答历史（`conversations`）一并删除。
+         *     审计日志、索引任务、用量记录保留，其中的用户引用置为空——历史仍然可读，只是不再关联到人。
+         *     不能删除自己，也不能删除最后一个启用中的管理员（两者都返回 409）。
+         */
+        delete: operations["deleteUser"];
         options?: never;
         head?: never;
         /**
@@ -2018,6 +2024,36 @@ export interface operations {
                 };
             };
             /** @description 用户名已存在 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    deleteUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已删除 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description 违反最后管理员保护，或试图删除自己 */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -330,6 +330,11 @@ export function patchUser(userId: string, body: PatchUserRequest): Promise<User>
   return patchJson<User>(`/v1/admin/users/${encodeURIComponent(userId)}`, body);
 }
 
+/** 删除用户：会话/问答历史随人删，审计与用量保留（引用置空）。 */
+export function deleteUser(userId: string): Promise<void> {
+  return request<void>(`/v1/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+}
+
 /** 校验邀请链接是否仍可用（公开）。 */
 export function getInvite(token: string, signal?: AbortSignal): Promise<InviteStatus> {
   return request<InviteStatus>(`/v1/invites/${encodeURIComponent(token)}`, { signal });

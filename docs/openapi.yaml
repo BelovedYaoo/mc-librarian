@@ -644,6 +644,26 @@ paths:
               schema: { $ref: "#/components/schemas/User" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: 违反最后管理员保护 }
+    delete:
+      tags: [admin]
+      summary: 删除用户
+      description: |
+        硬删一个用户：会话、访问令牌、邀请随人删除；问答历史（`conversations`）一并删除。
+        审计日志、索引任务、用量记录保留，其中的用户引用置为空——历史仍然可读，只是不再关联到人。
+        不能删除自己，也不能删除最后一个启用中的管理员（两者都返回 409）。
+      operationId: deleteUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: 已删除
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: 违反最后管理员保护，或试图删除自己 }
 
   /v1/admin/jobs:
     get:

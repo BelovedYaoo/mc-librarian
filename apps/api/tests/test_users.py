@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -314,3 +315,58 @@ def test_audit_respects_limit(admin_client: TestClient) -> None:
     entries = admin_client.get("/v1/admin/audit", params={"limit": 1}).json()["entries"]
 
     assert len(entries) == 1
+
+
+def test_delete_user_removes_personal_data_but_keeps_audit(
+    admin_client: TestClient, conn: Any
+) -> None:
+    """删除用户：会话/PAT/邀请随人删，审计保留但引用置空。"""
+    import uuid
+
+    from mc_librarian.auth import passwords, users
+    from mc_librarian.db import utc_now
+
+    user_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, role, enabled, created_at)"
+        " VALUES (?, ?, ?, 'user', 1, ?)",
+        (user_id, "to-delete", passwords.hash_password("password-1234"), utc_now()),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), user_id, "hash-x", utc_now(), utc_now()),
+    )
+    conn.commit()
+
+    response = admin_client.delete(f"/v1/admin/users/{user_id}")
+
+    assert response.status_code == 204, response.text
+    assert users.find_by_id(conn, user_id) is None
+    # 会话（ON DELETE CASCADE）跟着走
+    sessions_left = conn.execute(
+        "SELECT count(*) FROM sessions WHERE user_id = ?", (user_id,)
+    ).fetchone()[0]
+
+    assert sessions_left == 0
+    # 审计保留：`user.deleted` 记录在案，target 是用户名快照
+    row = conn.execute(
+        "SELECT action, target FROM audit WHERE action = 'user.deleted'"
+        " ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None and row["target"] == "to-delete"
+
+
+def test_delete_user_rejects_self(admin_client: TestClient, conn: Any) -> None:
+    me = conn.execute("SELECT id FROM users WHERE role = 'admin'").fetchone()["id"]
+
+    response = admin_client.delete(f"/v1/admin/users/{me}")
+
+    assert response.status_code == 409
+    assert "自己" in response.json()["detail"]
+
+
+def test_delete_user_rejects_missing_user(admin_client: TestClient) -> None:
+    response = admin_client.delete("/v1/admin/users/does-not-exist")
+
+    assert response.status_code == 404
