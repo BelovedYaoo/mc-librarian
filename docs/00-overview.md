@@ -212,7 +212,7 @@ base 会让索引翻倍且与 patched 高度重叠。
 | D17 | 权限实现 | 自写 `RequireAuth` / `RequireAdmin`（`apps/web/src/routes/components/auth-guard.tsx`）；删除 react-core/authorization 与私有依赖 |
 | D18 | 前端交付 | web 镜像内嵌 `dist`，只提供静态文件与 `/api/*` 反代入口；TLS/证书在边缘节点 `gateway-nginx` |
 | D19 | 契约同步 | `openapi-typescript` 生成 `apps/web/src/types/api.d.ts`；无 CI，由 `scripts/check.mjs` 漂移守卫 + `tests/test_contract.py` 校验一致性 |
-| D20 | 摘要粒度 | 类级 3 行，按 package 分批（30–50 个类/次） |
+| D20 | 摘要粒度 | 类级 3 行，按 package 分批（30–50 个类/次）；失败按性质处理：整批 JSON 坏掉时二分重试失败项，空响应同轮重试 2 次，缺条目留给下一轮（见 `summarize._run_batches`） |
 | D21 | 符号表 | 扩展字段（父类/接口/注解/参数名）+ 引用表 |
 | D22 | 评测 | 人工 30 题为主，LLM 扩到 100 题做回归 |
 | D23 | 用量 | 只记录不限额；Webhook 阈值告警 + 手动熔断 |
