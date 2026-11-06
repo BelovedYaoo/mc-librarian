@@ -654,6 +654,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/conversations/{conversationId}/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 接着看：订阅该会话正在生成的回答
+         * @description 与 `/v1/ask` 相同的 SSE 事件序列（`step` → `delta`* → `citation`* → `done`），
+         *     先回放已经发生的事件，再实时跟随。
+         *
+         *     回答的生成**不依赖这条连接**：断开只是停止观看，后台跑完照样落库。
+         *     会话没有正在生成的回答时 404——那时应该读 `/v1/conversations/{conversationId}` 的历史消息。
+         */
+        get: operations["streamConversation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/audit": {
         parameters: {
             query?: never;
@@ -991,6 +1015,11 @@ export interface components {
             id: string;
             title: string;
             messages: components["schemas"]["ConversationMessage"][];
+            /**
+             * @description 这轮回答是否**仍在后端生成**。生成属于后台任务，客户端断开不会中断它；
+             *     前端据此接到 `/v1/conversations/{conversationId}/stream` 继续看。
+             */
+            running: boolean;
         };
         Usage: {
             prompt_tokens?: number;
@@ -2386,6 +2415,30 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             422: components["responses"]["BadRequest"];
+        };
+    };
+    streamConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["AskEvent"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     listAudit: {

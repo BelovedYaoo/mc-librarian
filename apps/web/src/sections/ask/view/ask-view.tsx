@@ -23,7 +23,13 @@ import Typography from '@mui/material/Typography';
 
 import { useConversations, useVersions } from 'src/hooks';
 
-import { ApiError, deleteConversation, getConversation, streamAsk } from 'src/lib/api-client';
+import {
+  ApiError,
+  deleteConversation,
+  getConversation,
+  streamAsk,
+  streamConversation,
+} from 'src/lib/api-client';
 
 import { AnswerMarkdown } from './answer-markdown';
 import { CitationDrawer } from './citation-drawer';
@@ -337,6 +343,41 @@ export function AskView() {
     setLoadingConversation(true);
     setLoadError(null);
 
+    const attached = new AbortController();
+
+    /** 只改「最后一轮」：接流时那一轮就是正在生成的这轮，不用记下标。 */
+    const updateLastTurn = (update: (turn: Turn) => Turn) => {
+      setTurns((current) =>
+        current.map((turn, position) => (position === current.length - 1 ? update(turn) : turn))
+      );
+    };
+
+    /** 接上仍在后端生成的那一轮（生成不依赖客户端连接，断开只是停止观看）。 */
+    const follow = async (id: string) => {
+      updateLastTurn((turn) => ({
+        ...turn,
+        status: 'streaming',
+        startedAt: turn.startedAt ?? Date.now(),
+      }));
+
+      try {
+        await streamConversation(
+          id,
+          (incoming) => updateLastTurn((turn) => applyEvent(turn, incoming)),
+          attached.signal
+        );
+
+        updateLastTurn((turn) =>
+          turn.status === 'streaming' ? { ...turn, status: 'done' } : turn
+        );
+      } catch (cause) {
+        if (attached.signal.aborted) return; // 换会话 / 离开页面：不是错误
+        updateLastTurn((turn) => ({ ...turn, status: 'error', error: errorText(cause) }));
+      } finally {
+        refresh();
+      }
+    };
+
     getConversation(conversationId)
       .then((detail) => {
         if (cancelled) return;
@@ -344,6 +385,10 @@ export function AskView() {
         // 换会话时从头看：重新贴底，别沿用上一个会话里「用户翻到中间」的状态。
         stickToBottom.current = true;
         setTurns(turnsFromDetail(detail));
+
+        // 回答可能仍在后端生成（生成不依赖客户端连接）：接上去继续看，
+        // 而不是显示成「问了一句、没有回答」。`attached` 在换会话/卸载时中断这条订阅。
+        if (detail.running) void follow(conversationId);
       })
       .catch((cause: unknown) => {
         if (!cancelled) setLoadError(errorText(cause));
@@ -354,10 +399,15 @@ export function AskView() {
 
     return () => {
       cancelled = true;
+      attached.abort();
       // StrictMode 会「挂载 → 卸载 → 再挂载」把 effect 跑两遍：第一遍被取消时要把标记退回去，
       // 否则第二遍会以为「主区已经是这个会话」而跳过载入，主区永远空着（只有转圈）。
       if (displayed.current === conversationId) displayed.current = null;
     };
+    // `refresh` 只用来刷左栏列表，身份稳定（hook 内部 useCallback）；不放进依赖会让
+    // exhaustive-deps 报警，但放进去又会因为它是每次渲染新函数而反复重载会话。
+    // 这里显式声明依赖意图。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
   const openConversation = (id: string) => {

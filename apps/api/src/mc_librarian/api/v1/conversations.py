@@ -10,15 +10,23 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Final
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from mc_librarian import conversations
+from mc_librarian.answer import AskRuns
 from mc_librarian.auth.deps import CurrentUser, DbConn
 from mc_librarian.db import transaction
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import ConversationDetail, ConversationList
 
 router = APIRouter()
+
+
+def _runs(request: Request) -> AskRuns:
+    """本实例的「进行中问答」表（`lifespan` 里创建）。"""
+    runs: AskRuns = request.app.state.ask_runs
+
+    return runs
 
 NOT_FOUND_TITLE: Final = "资源不存在"
 
@@ -57,11 +65,16 @@ def list_conversations(
     "/conversations/{conversationId}",
     tags=["answer"],
     summary="历史会话详情",
-    description="会话标题与全部消息（含引用与用量）。别人的会话一律 404。",
+    description=(
+        "会话标题与全部消息（含引用与用量）。别人的会话一律 404。"
+        "`running` 为真表示这轮回答**仍在后端生成**（客户端断开会话不会中断它），"
+        "前端可据此接到 `/v1/conversations/{conversationId}/stream` 继续看。"
+    ),
     operation_id="getConversation",
     responses=_responses(401, 404),
 )
 def get_conversation(
+    request: Request,
     conn: DbConn,
     user: CurrentUser,
     conversationId: str,
@@ -75,6 +88,7 @@ def get_conversation(
         id=str(row["id"]),
         title=str(row["title"]),
         messages=conversations.messages(conn, conversation_id=conversationId),
+        running=_runs(request).active(conversationId) is not None,
     )
 
 

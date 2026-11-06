@@ -1006,7 +1006,7 @@ def test_conversation_schemas_match() -> None:
 
         detail = _response_schema(spec, "/v1/conversations/{conversationId}")
 
-        assert detail["required"] == ["id", "title", "messages"]
+        assert detail["required"] == ["id", "title", "messages", "running"]
 
         message = _deref(spec, detail["properties"]["messages"]["items"])
 

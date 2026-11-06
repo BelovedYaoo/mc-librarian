@@ -3,14 +3,15 @@
 契约见 `docs/openapi.yaml` 的 `/v1/ask`；规格见 issue #8 的规格补充 §1–§8。这一层只做四件事：
 
 1. 前置检查：全局开关 / 并发上限（429）、版本索引（404）、模型配置（503）；
-2. 把 `AskRun` 的事件流编码成 SSE（**手写 `StreamingResponse` + `text/event-stream`**，
-   不引入 `sse-starlette` 之类的新依赖）；`Accept: application/json` 时退化成一次性 `AskResponse`；
-3. 每次请求写**一行** `usage`（含降级的情况），写完在后台检查一次当日告警阈值（`#12`，
-   不阻断响应）；
-4. 历史会话（问答页左栏）：首次提问自动建会话、把用户问题落库，收尾时把助手最终答案（含引用
-   与 usage）写一条消息；`conversation_id` 随 `done` 事件回传（见 `conversations` 模块）；
-5. 并发槽位在任何退出路径上都归还（含客户端中途断开）——收尾绑在 ASGI 响应的 `__call__` 上，
-   不依赖 async generator 被正确关闭（见 `_AskStreamResponse`）。
+2. **生成属于后端任务**：`AskRuns` 起一个后台协程跑完整个循环，SSE 只是它的一个订阅视图
+   （`answer.runs`）。客户端断开只退订，不影响生成与落库——之前生成由 HTTP 响应驱动，
+   用户切到别的页面就把这次问答掐死了，那是架构错误；
+3. 事件流编码成 SSE（**手写 `StreamingResponse` + `text/event-stream`**，不引入
+   `sse-starlette`）；`Accept: application/json` 时等运行结束，退化成一次性 `AskResponse`；
+4. 每次请求写**一行** `usage`（含降级），写完在后台检查一次当日告警阈值（`#12`，不阻断）；
+5. 历史会话（问答页左栏）：首次提问自动建会话、把用户问题落库，运行结束时把助手答案（含引用
+   与 usage）写一条消息；`conversation_id` 随 `done` 事件回传；
+6. 并发槽位由**运行本身**持有，跑到结束才归还（含断开、服务停止的取消路径）。
 
 模型超时 / 不可用 / 返回非法响应都在 `AskRun` 里翻成降级，**HTTP 仍是 200**——不冒泡成 500。
 """
@@ -20,17 +21,16 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator
 from functools import partial
 from typing import Any, Final
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from starlette.types import Receive, Scope, Send
 
 from mc_librarian import alerts, conversations
 from mc_librarian import usage as usage_store
-from mc_librarian.answer import AskLimiter, AskRun, OpenAiCompatChatClient
+from mc_librarian.answer import AskLimiter, AskRun, AskRuns, OpenAiCompatChatClient, RunningAsk
 from mc_librarian.answer.agent import TEXT_SEPARATOR
 from mc_librarian.answer.tools import ToolBox
 from mc_librarian.api.v1.retrieval import require_index
@@ -42,7 +42,7 @@ from mc_librarian.config import (
 )
 from mc_librarian.db import Database, transaction
 from mc_librarian.indexing import query
-from mc_librarian.problems import Problem, ProblemException, problem_response
+from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import AskRequest, AskResponse, User
 
 logger = logging.getLogger("mc_librarian.api.answer")
@@ -51,6 +51,7 @@ router = APIRouter()
 
 ASK_DISABLED_TITLE: Final = "问答已暂停"
 TOO_MANY_TITLE: Final = "请求过于频繁"
+NOT_FOUND_TITLE: Final = "资源不存在"
 JSON_ACCEPT: Final = "application/json"
 # 浏览器与反代对 SSE 的常规要求：不缓存、不缓冲（nginx 默认会缓冲 `text/event-stream`）。
 SSE_HEADERS: Final = {
@@ -58,33 +59,6 @@ SSE_HEADERS: Final = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
-
-
-class _AskStreamResponse(StreamingResponse):
-    """`/v1/ask` 的 SSE 响应：把收尾挂在 ASGI 响应的 `__call__` 上，而不是生成器的 `finally` 上。
-
-    Starlette 在客户端中途断开时会**取消流任务**（`spec_version < 2.4` 走取消作用域），此时生成器
-    停在 `yield`，它自己的 `finally` 要等 async generator 被 GC / `aclose` 才执行——不是显式保证。
-    槽位一旦漏掉就再也回不来（服务最终对所有新问答回 429），所以收尾必须绑在一个一定会执行的
-    位置：`__call__` 的 `finally`，正常结束、异常、任务被取消三条路径都会走到。
-    """
-
-    def __init__(
-        self,
-        content: AsyncIterator[bytes],
-        *,
-        on_close: Callable[[], None],
-        media_type: str,
-        headers: Mapping[str, str],
-    ) -> None:
-        super().__init__(content, media_type=media_type, headers=headers)
-        self._on_close = on_close
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            self._on_close()
 
 
 def ask_responses() -> dict[int | str, dict[str, Any]]:
@@ -173,72 +147,51 @@ async def ask(
         _abandon(index, limiter)
         raise
 
+    runs: AskRuns = request.app.state.ask_runs
+    running = runs.start(
+        run=run,
+        conversation_id=conversation_id,
+        on_finish=partial(
+            _finalize_ask,
+            database=database,
+            user=user,
+            model=config.model,
+            version=body.version,
+            index=index,
+            limiter=limiter,
+            settings=settings,
+        ),
+    )
+
     if _wants_json(request):
-        return await _json_answer(
-            run, database, user, config.model, body.version, index, limiter, settings
+        # 一次性响应也走同一个后台任务：连接断了照样跑完、落库，只是没人读返回值。
+        await running.wait()
+
+        return JSONResponse(
+            content=AskResponse(
+                answer=run.answer,
+                citations=run.citations,
+                steps=run.steps,
+                usage=run.usage,
+                reason=run.reason,
+            ).model_dump(exclude_none=True)
         )
 
-    return _AskStreamResponse(
-        _sse_stream(run),
-        on_close=partial(
-            _close_ask,
-            run,
-            database,
-            user,
-            config.model,
-            body.version,
-            index,
-            limiter,
-            settings,
-        ),
+    return StreamingResponse(
+        _sse_stream(running),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
 
 
-async def _json_answer(
-    run: AskRun,
-    database: Database,
-    user: User,
-    model: str,
-    version: str,
-    index: sqlite3.Connection,
-    limiter: AskLimiter,
-    settings: Settings,
-) -> JSONResponse:
-    """`Accept: application/json`：把事件流跑完，一次性返回 `AskResponse`。"""
-    try:
-        async for _event in run.stream():
-            pass
-    finally:
-        _close_ask(run, database, user, model, version, index, limiter, settings)
+async def _sse_stream(running: RunningAsk) -> AsyncIterator[bytes]:
+    """把一个进行中的问答编码成 SSE。
 
-    payload = AskResponse(
-        answer=run.answer,
-        citations=run.citations,
-        steps=run.steps,
-        usage=run.usage,
-        reason=run.reason,
-    )
-
-    return JSONResponse(content=payload.model_dump(exclude_none=True))
-
-
-async def _sse_stream(run: AskRun) -> AsyncIterator[bytes]:
-    """事件流 → SSE。收尾（关索引 / 还槽位 / 记用量）不在这里，见 `_AskStreamResponse`。"""
-    try:
-        async for event in run.stream():
-            yield _encode(event)
-    except Exception as error:  # 流已经开始，改不了状态码，只能发一个 error 事件收尾
-        logger.exception("问答流中断（%s）", run.version)
-        yield _encode(
-            {
-                "type": "error",
-                "problem": Problem(status=500, title="问答失败", detail=str(error)).model_dump(
-                    exclude_none=True
-                ),
-            }
-        )
+    这里**不驱动生成**：事件由后台任务产出，本生成器只是订阅者。客户端断开时 Starlette 取消
+    这个生成器，`iter_events` 的 `finally` 退订，生成继续跑到结束并落库。
+    """
+    async for event in running.iter_events():
+        yield _encode(event)
 
 
 def _abandon(index: sqlite3.Connection | None, limiter: AskLimiter) -> None:
@@ -341,8 +294,49 @@ def _record_answer(database: Database, run: AskRun) -> None:
         logger.exception("写入问答历史失败（%s）", run.conversation_id)
 
 
-def _close_ask(
+@router.get(
+    "/conversations/{conversationId}/stream",
+    tags=["answer"],
+    summary="接着看：订阅该会话正在生成的回答",
+    description=(
+        "这个会话若仍有回答在后端生成，返回与 `/v1/ask` 相同的 SSE 事件流"
+        "（先回放已经发生的，再实时跟随）；没有在跑的运行则 404。\n\n"
+        "回答的生成不依赖这条连接：断开只是停止观看，后台跑完照样落库。"
+    ),
+    operation_id="streamConversation",
+    responses={
+        401: problem_response("未认证"),
+        404: problem_response("会话不存在，或该会话没有正在生成的回答"),
+    },
+)
+async def stream_conversation(
+    request: Request,
+    conn: DbConn,
+    user: CurrentUser,
+    conversationId: str,
+) -> Response:
+    # 归属先校验：别人的会话一律 404（不泄露是否存在），与详情端点同一口径。
+    row = conversations.find_owned(conn, conversation_id=conversationId, user_id=user.id)
+
+    if row is None:
+        raise ProblemException(404, NOT_FOUND_TITLE, "会话不存在")
+
+    runs: AskRuns = request.app.state.ask_runs
+    running = runs.active(conversationId)
+
+    if running is None:
+        raise ProblemException(404, NOT_FOUND_TITLE, "该会话没有正在生成的回答")
+
+    return StreamingResponse(
+        _sse_stream(running),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
+
+def _finalize_ask(
     run: AskRun,
+    *,
     database: Database,
     user: User,
     model: str,
@@ -351,7 +345,11 @@ def _close_ask(
     limiter: AskLimiter,
     settings: Settings,
 ) -> None:
-    """一次问答的收尾：还槽位、关索引、写一条助手消息、记一行用量。任何退出路径都必须走到这里一次。"""
+    """一次问答的收尾：还槽位、关索引、写一条助手消息、记一行用量。
+
+    由**运行本身**在结束时调用（正常结束、生成异常、服务停止时被取消三条路径），
+    不再挂在 HTTP 响应的关闭上：客户端断开不影响生成，自然也不该由它触发收尾。
+    """
     # 槽位先还：后面几步即使失败，槽位也不会漏（漏了就没有任何补救路径）。
     limiter.release()
     index.close()

@@ -553,6 +553,44 @@ export async function streamAsk(
     throw error;
   }
 
+  await readSse(response, onEvent);
+}
+
+/**
+ * 接着看：订阅某个会话正在生成的回答（服务端先回放已发生的事件，再实时跟随）。
+ *
+ * 回答的生成**不在这条连接上**：断开只是停止观看，后台会跑完并落库。会话没有正在生成的
+ * 回答时服务端回 404，这里静默返回（调用方读历史消息即可）。
+ */
+export async function streamConversation(
+  conversationId: string,
+  onEvent: (event: AskEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetch(
+    `${CONFIG.serverUrl}/v1/conversations/${encodeURIComponent(conversationId)}/stream`,
+    {
+      credentials: 'include',
+      headers: { Accept: 'text/event-stream' },
+      signal,
+    }
+  );
+
+  if (response.status === 404) return;
+
+  if (!response.ok) {
+    const error = await toApiError(response);
+
+    if (response.status === 401) notifyUnauthorized();
+
+    throw error;
+  }
+
+  await readSse(response, onEvent);
+}
+
+/** 逐块读 SSE 响应体，把每个 `data:` 事件交给 `onEvent`。 */
+async function readSse(response: Response, onEvent: (event: AskEvent) => void): Promise<void> {
   if (!response.body) {
     throw new ApiError(response.status, '当前浏览器不支持流式读取响应体');
   }

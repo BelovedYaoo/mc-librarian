@@ -846,11 +846,17 @@ class ConversationMessage(BaseModel):
 
 
 class ConversationDetail(BaseModel):
-    """`GET /v1/conversations/{id}` 的 200：会话标题 + 全部消息。"""
+    """`GET /v1/conversations/{id}` 的 200：会话标题 + 全部消息。
+
+    `running` 为真表示这轮回答**仍在后端生成**（客户端断开会话不会中断它）：前端据此接到
+    `/v1/conversations/{id}/stream` 继续看，而不是显示成「问了一句没有回答」。
+    """
 
     id: str
     title: str
     messages: list[ConversationMessage]
+    # 必填：端点总会给出（是否仍在生成），不给默认值免得调用方以为「不传就是没在跑」。
+    running: bool
 
 
 class AskStepEvent(BaseModel):

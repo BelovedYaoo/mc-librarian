@@ -882,6 +882,31 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/BadRequest" }
 
+  /v1/conversations/{conversationId}/stream:
+    get:
+      tags: [answer]
+      summary: 接着看：订阅该会话正在生成的回答
+      description: |
+        与 `/v1/ask` 相同的 SSE 事件序列（`step` → `delta`* → `citation`* → `done`），
+        先回放已经发生的事件，再实时跟随。
+
+        回答的生成**不依赖这条连接**：断开只是停止观看，后台跑完照样落库。
+        会话没有正在生成的回答时 404——那时应该读 `/v1/conversations/{conversationId}` 的历史消息。
+      operationId: streamConversation
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/AskEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/admin/audit:
     get:
       tags: [admin]
@@ -1388,13 +1413,18 @@ components:
 
     ConversationDetail:
       type: object
-      required: [id, title, messages]
+      required: [id, title, messages, running]
       properties:
         id: { type: string }
         title: { type: string }
         messages:
           type: array
           items: { $ref: "#/components/schemas/ConversationMessage" }
+        running:
+          type: boolean
+          description: |
+            这轮回答是否**仍在后端生成**。生成属于后台任务，客户端断开不会中断它；
+            前端据此接到 `/v1/conversations/{conversationId}/stream` 继续看。
 
     Usage:
       type: object

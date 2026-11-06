@@ -614,19 +614,23 @@ def test_ask_requires_login(client: TestClient) -> None:
     assert response.status_code == 401
 
 
-def test_ask_releases_the_slot_when_the_client_disconnects(
-    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+def test_ask_keeps_generating_after_the_client_disconnects(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat, control_db: Path
 ) -> None:
-    """客户端中途断开：Starlette 取消流任务，槽位必须已经归还，后续请求照常拿到槽位。
+    """客户端中途断开：生成继续跑完、答案照样落库，槽位在**生成结束**时才归还。
 
-    httpx 的 ASGI transport 不会在流中途发 `http.disconnect`，所以这里直接驱动 ASGI 应用：
-    收到 2 个 SSE 事件后从 `receive` 回 `http.disconnect`。此时生成器停在 `yield`，它自己的
-    `finally` 还没跑（也不保证会跑），槽位归还只能来自响应的 `__call__`。
+    这是这次架构改动的核心不变量。之前生成由 HTTP 响应驱动，客户端一断 Starlette 就取消流
+    任务，循环停在 `yield`——用户切到别的页面等于把这次问答掐死。现在生成是后台任务，
+    连接只是订阅视图。
+
+    httpx 的 ASGI transport 不会在流中途发 `http.disconnect`，所以直接驱动 ASGI 应用：
+    收到 2 个 SSE 事件后从 `receive` 回 `http.disconnect`。
     """
     fake_chat.always_tools = tools_of(tool_call("search", query="Mob", detail="locate"))
 
     app = cast("Any", user_client.app)
     limiter = app.state.ask_limiter
+    runs = app.state.ask_runs
     cookie = session_cookie(user_client)
     payload = json.dumps({"question": QUESTION, "version": VERSION}).encode()
     scope: dict[str, Any] = {
@@ -649,7 +653,7 @@ def test_ask_releases_the_slot_when_the_client_disconnects(
         "server": ("testserver", 80),
     }
 
-    async def drive() -> tuple[int, int]:
+    async def drive() -> dict[str, Any]:
         sent = 0
         pending = payload
 
@@ -672,22 +676,55 @@ def test_ask_releases_the_slot_when_the_client_disconnects(
             if message["type"] == "http.response.body" and message.get("more_body"):
                 sent += 1
 
-            # 真实服务器的 `send` 会挂起（写 socket / 流控），断开时任务正是停在这里——
-            # 也就是停在生成器外面，此时生成器的 `finally` 还没跑。
             await asyncio.sleep(0)
 
         await app(scope, receive, send)
 
-        # 断开后立刻读槽位：生成器还挂在 `yield` 上（它的 `finally` 要等 async generator 被关闭
-        # 才跑，这里不给它这个机会），所以 `active` 只能是响应的 `__call__` 还的。
-        return sent, limiter.active
+        # 响应结束（客户端已断开）：生成必须还在跑，槽位必须还占着——活儿没干完。
+        in_flight = runs.in_flight()
+        snapshot = {
+            "sent": sent,
+            "in_flight": len(in_flight),
+            "active_after_disconnect": limiter.active,
+        }
 
-    sent, active = asyncio.run(drive())
-    assert sent >= 2, "断开前至少要有两个事件发出去"
-    assert active == 0, "客户端断开时槽位必须已经归还（不能等生成器被 GC 关闭）"
+        # 等后台任务自然跑完（不再有观看者）。
+        if in_flight:
+            await asyncio.wait_for(in_flight[0].task, timeout=30)
 
-    # 槽位真的能再次被拿到（不只是计数为 0）。
-    assert ask(user_client).status_code == 200
+        snapshot["active_after_finish"] = limiter.active
+        snapshot["in_flight_after_finish"] = len(runs.in_flight())
+
+        return snapshot
+
+    snapshot = asyncio.run(drive())
+
+    assert snapshot["sent"] >= 2, "断开前至少要有两个事件发出去"
+    assert snapshot["in_flight"] == 1, "断开后生成必须继续（不能被连接取消）"
+    assert snapshot["active_after_disconnect"] == 1, "生成没结束，槽位不该归还"
+    assert snapshot["active_after_finish"] == 0, "生成结束后槽位必须归还"
+    assert snapshot["in_flight_after_finish"] == 0
+
+    # 没人观看也照样落库，而且不是「半截 + 中断标注」。
+    with sqlite3.connect(control_db) as conn:
+        rows = conn.execute(
+            "SELECT content FROM messages WHERE role = 'assistant' ORDER BY created_at DESC LIMIT 1"
+        ).fetchall()
+
+    assert rows, "断开后跑完的答案必须落库"
+    assert "连接中断" not in rows[0][0]
+
+
+def test_stream_conversation_returns_404_when_nothing_is_running(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """没有在跑的运行：`/stream` 回 404，前端据此改读历史消息。"""
+    events = parse_sse(ask(user_client, max_steps=1).text)
+    conversation_id = next(event for event in events if event["type"] == "done")["conversation_id"]
+
+    response = user_client.get(f"/v1/conversations/{conversation_id}/stream")
+
+    assert response.status_code == 404, response.text
 
 
 def test_ask_releases_the_slot_when_the_run_cannot_be_built(

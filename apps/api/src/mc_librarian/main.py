@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
 from mc_librarian import __version__
-from mc_librarian.answer import AskLimiter
+from mc_librarian.answer import AskLimiter, AskRuns
 from mc_librarian.api.v1 import api_router
 from mc_librarian.api.v1.admin_versions import read_index_stats
 from mc_librarian.config import Settings, get_settings, legacy_env_warnings
@@ -99,6 +99,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 问答并发闸门随应用创建：槽位数不在这里定，`/v1/ask` 每次拿当前有效上限（设置页可改）。
     app.state.ask_limiter = AskLimiter()
+    # 进行中的问答（生成与观看解耦）：SSE 只是订阅视图，连接断开不影响生成与落库。
+    app.state.ask_runs = AskRuns()
 
     version = database.initialize()
 
@@ -142,6 +144,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with app.state.mcp_server.session_manager.run():
             yield
     finally:
+        # 先停问答：取消在跑的生成（取消会走收尾，已产出的部分照样落库），再停任务队列。
+        await app.state.ask_runs.shutdown()
         await runner.stop()
 
 

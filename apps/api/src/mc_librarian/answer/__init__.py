@@ -14,13 +14,16 @@ from mc_librarian.answer.client import (
     stream_chat_completion,
 )
 from mc_librarian.answer.limiter import AskLimiter
+from mc_librarian.answer.runs import AskRuns, RunningAsk
 from mc_librarian.answer.tools import ToolBox
 
 __all__ = [
     "AskLimiter",
     "AskRun",
+    "AskRuns",
     "ChatError",
     "OpenAiCompatChatClient",
+    "RunningAsk",
     "ToolBox",
     "post_chat_completion",
     "stream_chat_completion",
