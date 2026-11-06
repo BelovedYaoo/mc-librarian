@@ -770,6 +770,8 @@ function TurnBlock({
           border: '1px solid',
           borderColor: 'divider',
           bgcolor: 'background.paper',
+          // 引用行里的长路径已经做了单行省略；这里再兜一层，任何子内容都不该把气泡撑宽。
+          overflow: 'hidden',
         }}
       >
         <Stack spacing={1.5}>
@@ -866,31 +868,87 @@ function VersionBadge({ version, current }: { version: string; current: string }
 }
 
 /** 一条引用：点击后打开右侧抽屉，展示整个文件并高亮这几行（不跳走，不丢上下文）。 */
+/** 文件基名（去掉目录与后缀）：`a/b/C.java` → `C`，`a/b/D.java.patch` → `D`。 */
+function fileStem(path: string): string {
+  const base = path.slice(path.lastIndexOf('/') + 1);
+
+  return base.replace(/\.java\.patch$/, '').replace(/\.java$/, '');
+}
+
+/**
+ * 一行引用：chip 是「这是什么」（类/方法/补丁），后面跟位置与行号，点击打开右侧抽屉。
+ *
+ * 两处刻意不显示完整信息，否则长路径会把行撑宽、并弹出横向滚动条：
+ *
+ * 1. **类级引用只留行号**。类的 `symbol` 是全限定名（`net.minecraft.world.item…EnchantmentsByCostWithDifficulty`），
+ *    它和后面的 `net/minecraft/world/item/…/EnchantmentsByCostWithDifficulty.java` 是同一件事的两种写法，
+ *    两份都画出来既是重复、也必然溢出。chip 改成短名，正文只留 `:19-44`。
+ * 2. **路径省略中间段**，只留文件名与行号（完整路径在 hover 提示里），并强制单行省略，
+ *    保证任何长度的路径都不会撑破布局。
+ */
 function CitationRow({ citation, onOpen }: { citation: Citation; onOpen: () => void }) {
   const lines = citation.lines;
+  const isPatch = citation.path.endsWith('.patch');
+  const stem = fileStem(citation.path);
+  const symbol = citation.symbol ?? '';
+
+  // 类的 `symbol` 就是全限定名：基名相同 → 与文件名重复，正文不必再写一遍。
+  const redundant = symbol !== '' && (symbol.split('.').pop() === stem || isPatch);
+
+  const chipLabel = isPatch ? '补丁' : symbol !== '' ? shortSymbol(symbol) : '代码位置';
 
   return (
-    <Stack
-      direction="row"
-      spacing={1}
-      sx={{
-        alignItems: 'center',
-        cursor: 'pointer',
-        borderRadius: 1,
-        px: 1,
-        '&:hover': { backgroundColor: 'action.hover' },
-      }}
-      onClick={onOpen}
-    >
-      <Chip size="small" variant="outlined" label={citation.symbol ?? '代码位置'} />
+    <Tooltip title={`${citation.path}${symbol === '' ? '' : ` · ${symbol}`}`} placement="top-start">
+      <Stack
+        direction="row"
+        spacing={1}
+        sx={{
+          alignItems: 'center',
+          cursor: 'pointer',
+          borderRadius: 1,
+          px: 1,
+          py: 0.25,
+          minWidth: 0,
+          '&:hover': { backgroundColor: 'action.hover' },
+        }}
+        onClick={onOpen}
+      >
+        <Chip
+          size="small"
+          variant="outlined"
+          label={chipLabel}
+          sx={{ flexShrink: 0, maxWidth: 320, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+        />
 
-      <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: '1 1 auto' }}>
-        {citation.path}:{lines.join('-')}
-      </Typography>
+        {/* `minWidth: 0` 是单行省略的前提：flex 子项默认不会收缩到内容宽度以下。 */}
+        <Box
+          component="span"
+          sx={{
+            fontFamily: 'monospace',
+            fontSize: 13,
+            flex: '1 1 auto',
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            color: 'text.secondary',
+          }}
+        >
+          {redundant ? `:${lines.join('-')}` : `${citation.path}:${lines.join('-')}`}
+        </Box>
 
-      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-        查看
-      </Typography>
-    </Stack>
+        <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
+          查看
+        </Typography>
+      </Stack>
+    </Tooltip>
   );
+}
+
+/** `net.minecraft.world.entity.MobCategory` → `MobCategory`；`A.B#run` → `B#run`。 */
+function shortSymbol(symbol: string): string {
+  const [owner, method] = symbol.split('#');
+  const short = owner.slice(owner.lastIndexOf('.') + 1);
+
+  return method === undefined ? short : `${short}#${method}`;
 }
