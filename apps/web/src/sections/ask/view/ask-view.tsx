@@ -106,11 +106,27 @@ function segmentsFromHistory(assistant: ConversationDetail['messages'][number] |
   const stored = assistant.segments;
 
   if (stored && stored.length > 0) {
-    return stored.map((segment) =>
-      segment.kind === 'steps'
-        ? { kind: 'steps', steps: segment.steps.map((step) => ({ ...step })) }
-        : { kind: 'text', text: segment.text }
-    );
+    const merged: Segment[] = [];
+
+    for (const segment of stored) {
+      const last = merged[merged.length - 1];
+
+      // 相邻的工具批次并成一块：服务端现在存前就合并，但 v13 期间存下的历史里
+      // 是「一批一段」，不合并会显示成一叠「已调用 2 次工具」的卡片。
+      if (segment.kind === 'steps') {
+        if (last?.kind === 'steps') {
+          last.steps.push(...segment.steps.map((step) => ({ ...step })));
+        } else {
+          merged.push({ kind: 'steps', steps: segment.steps.map((step) => ({ ...step })) });
+        }
+
+        continue;
+      }
+
+      merged.push({ kind: 'text', text: segment.text });
+    }
+
+    return merged;
   }
 
   return assistant.content === '' ? [] : [{ kind: 'text', text: assistant.content }];

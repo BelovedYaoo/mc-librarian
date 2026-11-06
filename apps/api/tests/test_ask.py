@@ -930,3 +930,34 @@ def test_history_keeps_ordered_segments_and_separates_rounds(
 
     # 完整正文仍要能独立使用（检索、导出都读它），且两段之间有分隔。
     assert "我先看一下刷怪相关的类。\n\n## 结论" in assistant["content"]
+
+
+def test_adjacent_tool_batches_merge_into_one_segment(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """连续几轮工具调用（中间不说话）要合并成一个片段。
+
+    一个批次一个片段时，历史恢复会显示成一叠「已调用 2 次工具」的卡片——实测一次问答 8 张，
+    而且每张都不到 5 行，所以「最多显示 5 行 + 滚动」的上限根本用不上，看着像没生效。
+    """
+    fake_chat.script = [
+        tool_calls(
+            tool_call("search", query="Mob", detail="locate"),
+            tool_call("symbol", name="Mob"),
+        ),
+        tool_call("search", query="Mob", detail="locate"),
+        final_answer("## 结论\n\n刷怪上限在 NaturalSpawner。"),
+    ]
+
+    events = parse_sse(ask(user_client).text)
+    done = next(event for event in events if event["type"] == "done")
+    detail = user_client.get(f"/v1/conversations/{done['conversation_id']}").json()
+    assistant = next(item for item in detail["messages"] if item["role"] == "assistant")
+
+    segments = assistant["segments"]
+
+    assert [segment["kind"] for segment in segments] == ["steps", "text"], segments
+    steps = segments[0]["steps"]
+    # 两批共 3 次调用，全在同一条片段里，且每条都配上了结果。
+    assert [step["tool"] for step in steps] == ["search", "symbol", "search"]
+    assert all(step["ok"] is True for step in steps), steps

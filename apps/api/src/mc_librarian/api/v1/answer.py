@@ -31,6 +31,7 @@ from starlette.types import Receive, Scope, Send
 from mc_librarian import alerts, conversations
 from mc_librarian import usage as usage_store
 from mc_librarian.answer import AskLimiter, AskRun, OpenAiCompatChatClient
+from mc_librarian.answer.agent import TEXT_SEPARATOR
 from mc_librarian.answer.tools import ToolBox
 from mc_librarian.api.v1.retrieval import require_index
 from mc_librarian.auth.deps import CurrentUser, DatabaseDep, DbConn, EffectiveSettingsDep
@@ -292,14 +293,34 @@ def _open_conversation(conn: sqlite3.Connection, user: User, body: AskRequest) -
     return body.conversation_id
 
 
-def _record_answer(database: Database, run: AskRun) -> None:
-    """收尾时把助手最终答案（含引用与 usage）落库；流式过程中的增量不落库。
+# 客户端中途断开时追加在答案末尾的说明。它不是模型输出，但必须写进历史：
+# 用户下一刻回到这个会话，看到的是一段**自然结束**的答案会以为是模型答完了。
+INTERRUPTED_NOTICE: Final = "（连接中断，本次回答未完成）"
 
-    只在真正走到统一收尾（`run.finished`）时写：客户端中途断开时生成器停在 `yield`，
-    此时没有完整答案，不写半截内容。写失败只记日志，不影响已经发出去的响应。
+
+def _record_answer(database: Database, run: AskRun) -> None:
+    """收尾时把助手答案（含引用与 usage）落库；流式过程中的增量不落库。
+
+    **中途断开也写**：客户端切到别的页面时生成器停在 `yield`，`run.finished` 为假，答案只有
+    半截。以前整条不写，用户回来只看到一个孤零零的问题，看起来像「刚才的问答没发生过」。
+    现在把已经发出去的那部分存下来，并在末尾标注未完成——残留比空白可解释，也不丢已花的 token。
+
+    一个字的正文都没有（第一步就失败）时不写，避免留下一条空消息。
+    写失败只记日志，不影响已经发出去的响应。
     """
-    if run.conversation_id is None or not run.finished:
+    if run.conversation_id is None:
         return
+
+    content = run.answer
+    segments = list(run.segments)
+
+    if not run.finished:
+        if not content.strip():
+            return
+
+        notice = f"{TEXT_SEPARATOR}{INTERRUPTED_NOTICE}"
+        content = f"{content}{notice}"
+        segments = [*segments, {"kind": "text", "text": notice}]
 
     try:
         with database.connect() as connection, transaction(connection):
@@ -307,13 +328,13 @@ def _record_answer(database: Database, run: AskRun) -> None:
                 connection,
                 conversation_id=run.conversation_id,
                 role="assistant",
-                content=run.answer,
+                content=content,
                 citations=run.citations,
                 usage=run.usage,
                 version=run.version,
                 # 有序片段（正文 / 工具批次交替）：历史恢复时按它还原轨迹，
                 # 否则一次深度检索的历史只剩一大段正文，中间调过什么全看不见。
-                segments=run.segments,
+                segments=segments,
             )
             conversations.touch(connection, conversation_id=run.conversation_id)
     except Exception:  # 写历史失败不该把一次成功的问答变成 500

@@ -60,7 +60,9 @@ STEP_ERROR_CHARS: Final = 300
 # 它以为两个 assistant 回合是分开的，直接拼接会得到「…源码。## 一、整体链路」，标题都被吃掉。
 TEXT_SEPARATOR: Final = chr(10) + chr(10)
 
-MAX_STEPS_NOTICE: Final = "已达检索步数上限，以下基于已获取的信息"
+# 达到轮次上限时的说明。**必须带上实际数字**：只说「已达上限」时，界面上一叠「已调用 2 次工具」
+# 的卡片会让人以为只调了两三次就被截断（上限数的是模型轮次，一轮里可以并发多个工具）。
+MAX_STEPS_NOTICE_PREFIX: Final = "已达检索步数上限"
 # 收尾时追加给模型的指令：光撤掉工具不够——模型会继续「想调工具」而给出空文本，
 # 必须明确要求它现在就答（实测 deepseek 这类推理模型在无工具时会返回空 content）。
 FORCE_ANSWER_PROMPT: Final = (
@@ -190,6 +192,9 @@ class AskRun:
 
             # 先在片段里开一批工具段，再发事件：顺序与前端看到的完全一致。
             batch = self._open_steps()
+            # 本批条目在段里的起点：段可能复用了上一批（见 `_open_steps`），
+            # 配对「完成」时必须只在本批范围内找，否则会去补上一批已经收尾的行。
+            offset = len(batch["steps"])
 
             # 整批的「开始」先发出去（前端据此立刻显示在跑哪几次调用），再并发跑工具。
             for item in plan:
@@ -216,7 +221,7 @@ class AskRun:
                 yield step_event
                 # 同一批里按「请求顺序」配对：并发下完成先后不固定，前端也是 FIFO。
                 entry = next(
-                    (item for item in batch["steps"] if item.get("ok") is None), None
+                    (item for item in batch["steps"][offset:] if item.get("ok") is None), None
                 )
 
                 if entry is not None:
@@ -263,8 +268,16 @@ class AskRun:
 
         收口是必须的：模型可能说完一句话就去调工具，那句话属于**这一批之前**，
         不在这里断开就会和后面的正文连成一段（历史恢复时尤其明显）。
+
+        **相邻的批次合并进同一个段**：模型连着调好几轮工具、中间不说话是常态，一个批次
+        一个段会让历史里出现一叠「已调用 2 次工具」的卡片（实测一次问答 8 张），
+        而真正有信息的是「这一轮一共调了什么」。
         """
         self._open_text = None
+
+        if self.segments and self.segments[-1].get("kind") == "steps":
+            return self.segments[-1]
+
         segment: dict[str, Any] = {"kind": "steps", "steps": []}
         self.segments.append(segment)
 
@@ -293,7 +306,10 @@ class AskRun:
 
         # 说明文字是答案的一部分：跟着第一段正文一起流出、一起进片段。模型一个字都不给时会
         # 走降级，那时这句话不该出现，所以交给 `_call` 在收到第一个增量时再拼。
-        prefix = f"{MAX_STEPS_NOTICE}。{TEXT_SEPARATOR}"
+        prefix = (
+            f"{MAX_STEPS_NOTICE_PREFIX}（{self.max_steps} 轮，共调用 {len(self.steps)} 次工具），"
+            f"以下基于已获取的信息。{TEXT_SEPARATOR}"
+        )
 
         try:
             async for event in self._call(

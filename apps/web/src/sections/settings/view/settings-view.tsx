@@ -112,7 +112,9 @@ const FIELDS: FieldSpec[] = [
     field: 'max_steps',
     kind: 'int',
     label: '最大检索步数',
-    helper: '问答请求省略 max_steps 时用它（1–12）',
+    helper:
+      '上限数的是「模型轮次」，一轮里可以并发多个工具调用（实测 8 轮 = 16 次调用）。'
+        + '取值 1–200；问答请求省略 max_steps 时用它',
   },
   {
     name: 'askMaxAnswerTokens',
@@ -191,6 +193,7 @@ const FIELDS: FieldSpec[] = [
     field: 'summary_concurrency',
     kind: 'int',
     label: '摘要并发批次',
+    helper: '同时跑几批（1–128）；网关能撑多大就填多大，填大了会撞上游限流',
   },
   {
     name: 'sessionTtlHours',
