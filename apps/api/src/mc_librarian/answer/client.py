@@ -68,6 +68,10 @@ class ChatChunk:
     """
 
     content: str = ""
+    # 推理型模型把**正文**写进 `reasoning_content`（`content` 为空、`finish_reason=stop`）。
+    # 单独收着而不是直接当正文：真两段都吐的模型（先思考再作答）会把推导过程泄漏进答案，
+    # 只有在整段 `content` 都为空时才拿它兜底。
+    reasoning: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
     usage: TokenUsage | None = None
 
@@ -273,6 +277,11 @@ def _iter_stream_chunks(response: Any) -> Iterator[ChatChunk]:
         if content:
             yield ChatChunk(content=content)
 
+        reasoning = _delta_reasoning(chunk)
+
+        if reasoning:
+            yield ChatChunk(reasoning=reasoning)
+
         _accumulate_tool_calls(fragments, chunk)
 
     yield ChatChunk(tool_calls=_assemble_tool_calls(fragments), usage=usage)
@@ -288,6 +297,27 @@ def _usage_of(chunk: dict[str, Any]) -> TokenUsage | None:
         prompt_tokens=_as_int(raw.get("prompt_tokens")),
         completion_tokens=_as_int(raw.get("completion_tokens")),
     )
+
+
+def _delta_reasoning(chunk: dict[str, Any]) -> str:
+    """取推理字段增量：`reasoning_content`（deepseek）或 `reasoning`（其它网关）。"""
+    choices = chunk.get("choices")
+
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+
+    delta = choices[0].get("delta")
+
+    if not isinstance(delta, dict):
+        return ""
+
+    for key in ("reasoning_content", "reasoning"):
+        value = delta.get(key)
+
+        if isinstance(value, str) and value:
+            return value
+
+    return ""
 
 
 def _delta_content(chunk: dict[str, Any]) -> str:
@@ -453,6 +483,7 @@ class OpenAiCompatChatClient:
         payload["stream_options"] = {"include_usage": True}
 
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         final = ChatChunk()
 
         for chunk in stream_chat_completion(
@@ -463,7 +494,21 @@ class OpenAiCompatChatClient:
                 yield chunk
                 continue
 
+            if chunk.reasoning:
+                reasoning_parts.append(chunk.reasoning)
+                continue
+
             final = chunk
+
+        # 整段 `content` 都为空、只有推理字段：答案被写进了 `reasoning_content`，兜底用它，
+        # 否则前端会看到一条空答案（再被当成降级）。
+        # **有工具调用时不兜底**：那一轮的推理就是「我接下来要查什么」，把它当正文会把
+        # 模型的思考过程泄漏进答案。
+        if not content_parts and reasoning_parts and not final.tool_calls:
+            fallback = "".join(reasoning_parts)
+            logger.info("问答正文为空，改用 reasoning_content 兜底（%d 字符）", len(fallback))
+            yield ChatChunk(content=fallback)
+            content_parts.append(fallback)
 
         if final.usage is None:
             usage = TokenUsage(

@@ -851,8 +851,23 @@ def parse_patch_response(
     return summaries, failures
 
 
+# 「整批 JSON 结构坏掉」的失败原因前缀（`_load_response_object`）。拆批规则靠它区分
+# 「一个坏苹果毒了整批」与「上游漏写了某些条目」——只有前者值得二分重试。
+INVALID_JSON_PREFIX: Final = "响应不是合法 JSON"
+# 空响应单独一种原因：它是上游/网关的瞬态问题，**不是**「一个坏苹果毒了整批」，
+# 拆批只会成倍放大请求数（整站故障时每批都会拆到单类）。
+EMPTY_RESPONSE_REASON: Final = "响应为空（上游未返回内容）"
+
+# 空响应的**同轮**重试次数与间隔。实测同一批三次里两次空、一次正常（网关 200 + 空体，
+# 不是我们解析错），不重试就只能靠人再跑一轮，表现为「每次索引都剩几个百分点没摘要」。
+EMPTY_RETRY_ATTEMPTS: Final = 2
+EMPTY_RETRY_DELAY_S: Final = 1.5
+
 def _load_response_object(raw: str) -> tuple[dict[str, object] | None, str | None]:
     """把响应解析成 JSON 对象；失败时返回 `(None, 失败原因)`。"""
+    if not raw.strip():
+        return None, EMPTY_RESPONSE_REASON
+
     try:
         loaded = json.loads(extract_json_object(raw))
     except json.JSONDecodeError as error:
@@ -973,12 +988,25 @@ def _post_chat_completion_once(
 
     try:
         loaded = json.loads(raw)
-        content = loaded["choices"][0]["message"]["content"]
+        message = loaded["choices"][0]["message"]
+        content = message["content"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as error:
         raise SummaryError(f"LLM 响应结构不符：{raw[:500]}") from error
 
     if not isinstance(content, str):
         raise SummaryError("LLM 响应的 message.content 不是字符串")
+
+    if content.strip():
+        return content
+
+    # 推理型模型会把**正文**写进 `reasoning_content`，`content` 留空且 `finish_reason=stop`
+    # （实测 deepseek-v4.1-flash：同一 prompt 约一半请求这样）。只读 `content` 会得到「空响应」，
+    # 看起来像网关故障，实际答案就在隔壁字段里。
+    for key in ("reasoning_content", "reasoning"):
+        fallback = message.get(key)
+
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback
 
     return content
 
@@ -1071,6 +1099,7 @@ async def _summarize_classes(
         send=client.summarize_batch,
         parse=parse_batch_response,
         key=lambda digest: digest.fqn,
+        log=log,
     )
     summaries: dict[str, str] = {}
     failures: dict[str, str] = {}
@@ -1130,6 +1159,7 @@ async def _summarize_patches(
             send=client.summarize_patches,
             parse=parse_patch_response,
             key=lambda digest: digest.path,
+            log=log,
         )
 
         for summaries_part, failures_part in results:
@@ -1168,23 +1198,105 @@ async def _run_batches(
     send: Callable[[Sequence[Any]], Awaitable[str]],
     parse: Callable[[str, Sequence[Any]], tuple[dict[str, str], dict[str, str]]],
     key: Callable[[Any], str],
+    log: Callable[[LogLevel, str], None] | None = None,
 ) -> list[tuple[dict[str, str], dict[str, str]]]:
     """并发跑各批（信号量限制并发数），返回每批的 (摘要, 失败)。
 
     `send`/`parse`/`key` 把「类摘要」与「补丁摘要」两条流程的差异挡在外面，批调度、单批失败
     隔离与并发控制共用同一份（单批失败不能拖垮其余批次，规格 §5）。
+
+    **部分失败会二分重试**：一批里只要有一个类让模型吐出非法 JSON，整批都会解析失败，而批次
+    是按 package 确定性分组的——不拆批重试就会永远卡在同一批上（实测 Forge 索引卡在 6 个类，
+    换成单类一次就过）。**全部失败不拆**：那不是「个别坏苹果」，而是网关挂了 / 空响应 /
+    鉴权失效这类整批性问题，拆批只会把请求数放大一个数量级。
     """
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def run_one(batch: Sequence[object]) -> tuple[dict[str, str], dict[str, str]]:
+    async def call_batch(
+        batch: Sequence[Any],
+    ) -> tuple[dict[str, str], dict[str, str], bool]:
+        """返回 (摘要, 失败, 是否值得拆批)。
+
+        「值得拆批」只在**响应结构坏掉**时为真：那种情况通常是一个类把整批 JSON 毒了，
+        二分能把代价限制在它身上。空响应、调用异常、仅仅缺条目都不拆——前两者是上游/网关
+        的问题（拆了只会把请求数放大一个数量级），后者是漏写，下一轮重试更省。
+        """
+        # 信号量只罩住这次 HTTP 调用：递归拆批时不能再持锁，否则并发数 1 就会自锁。
         async with semaphore:
             try:
                 raw = await send(batch)
             except Exception as error:  # 单批失败不能拖垮其余批次（规格 §5）
                 reason = f"LLM 调用失败：{error}"
-                return {}, {key(item): reason for item in batch}
+                return {}, {key(item): reason for item in batch}, False
 
-            return parse(raw, batch)
+        summaries, failures = parse(raw, batch)
+
+        # 空响应是瞬态的：同轮重试几次，比让人再跑一轮索引便宜得多。
+        attempt = 0
+
+        while (
+            attempt < EMPTY_RETRY_ATTEMPTS
+            and failures
+            and all(reason == EMPTY_RESPONSE_REASON for reason in failures.values())
+        ):
+            attempt += 1
+            await asyncio.sleep(EMPTY_RETRY_DELAY_S)
+
+            async with semaphore:
+                try:
+                    raw = await send(batch)
+                except Exception as error:
+                    failures = {key(item): f"LLM 调用失败：{error}" for item in batch}
+                    break
+
+            summaries, failures = parse(raw, batch)
+
+        structural = bool(failures) and all(
+            reason.startswith(INVALID_JSON_PREFIX) for reason in failures.values()
+        )
+
+        return summaries, failures, structural
+
+    async def run_one(batch: Sequence[Any]) -> tuple[dict[str, str], dict[str, str]]:
+        summaries, failures, structural = await call_batch(batch)
+
+        if not failures or len(batch) == 1:
+            return summaries, failures
+
+        if not structural:
+            # 缺条目 / 空响应 / 调用异常：不是「坏苹果」，重试留给下一轮。
+            return summaries, failures
+
+        if log is not None:
+            log("warn", f"摘要：一批 {len(batch)} 个只失败 {len(failures)} 个，二分重试这些")
+
+        # 只重试失败的那些：成功的已经拿到，没必要再花一次模型调用。
+        retry = [item for item in batch if key(item) in failures]
+        middle = len(retry) // 2
+
+        halves: list[tuple[dict[str, str], dict[str, str]]]
+
+        if middle == 0:
+            # 只有一项失败：整批失败的那一个很可能就是「坏苹果」，单独再试一次。
+            retried, retried_failures, _ = await call_batch(retry)
+            halves = [(retried, retried_failures)]
+        else:
+            halves = list(
+                await asyncio.gather(run_one(retry[:middle]), run_one(retry[middle:]))
+            )
+
+        for part_summaries, part_failures in halves:
+            summaries.update(part_summaries)
+            failures.update(part_failures)
+
+        # 已成功的从失败表里摘掉（重试成功后原来那条失败不该留在报告里）。
+        for item in retry:
+            k = key(item)
+
+            if k in summaries:
+                failures.pop(k, None)
+
+        return summaries, failures
 
     return list(await asyncio.gather(*(run_one(batch) for batch in batches)))
 

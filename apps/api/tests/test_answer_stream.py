@@ -23,6 +23,7 @@ from mc_librarian.answer.client import (
     ChatError,
     OpenAiCompatChatClient,
     TokenUsage,
+    ToolCall,
     stream_chat_completion,
 )
 from mc_librarian.config import LlmConfig
@@ -257,3 +258,74 @@ def test_openai_client_counts_tokens_when_upstream_omits_usage(
     assert usage.prompt_tokens == count_tokens("问题")
     assert usage.completion_tokens == count_tokens("你好，世界")
     assert "cl100k" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# 推理型模型：正文落在 reasoning_content
+# ----------------------------------------------------------------------
+
+
+def test_stream_parses_reasoning_deltas_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`delta.reasoning_content` 收进 `ChatChunk.reasoning`，不混进 `content`。"""
+    lines = sse_lines(
+        {"choices": [{"delta": {"reasoning_content": "先想想"}}]},
+        {"choices": [{"delta": {"content": "答案"}}]},
+        None,
+    )
+    monkeypatch.setattr(answer_client, "urlopen", respond_with(lines))
+
+    chunks = list(stream_chat_completion(ENDPOINT, {}, "k", 10.0))
+
+    assert [chunk.reasoning for chunk in chunks if chunk.reasoning] == ["先想想"]
+    assert [chunk.content for chunk in chunks if chunk.content] == ["答案"]
+
+
+def test_stream_falls_back_to_reasoning_when_content_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """整段 `content` 为空、只有推理字段时，用推理内容兜底，否则用户看到的是一条空答案。"""
+
+    def fake_stream(*_args: Any, **_kwargs: Any) -> Any:
+        # 同步生成器：`client.stream` 用 `for` 迭代它（不是 `async for`）。
+        yield ChatChunk(reasoning="职责：甲")
+        yield ChatChunk(reasoning="\n机制：乙")
+        yield ChatChunk(tool_calls=(), usage=None)
+
+    monkeypatch.setattr(answer_client, "stream_chat_completion", fake_stream)
+    client = OpenAiCompatChatClient(
+        LlmConfig(base_url="http://fake-llm.invalid/v1", model="m", api_key="k", temperature=0.0)
+    )
+
+    got = list(
+        client.stream(
+            messages=[{"role": "user", "content": "问题"}], tools=[], max_tokens=10, timeout=1.0
+        )
+    )
+
+    assert "".join(chunk.content for chunk in got) == "职责：甲\n机制：乙"
+
+
+def test_stream_does_not_leak_reasoning_on_tool_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """有工具调用时不兜底：那一轮的推理是「我接下来要查什么」，当正文就是泄漏思考过程。"""
+
+    def fake_stream(*_args: Any, **_kwargs: Any) -> Any:
+        yield ChatChunk(reasoning="我应该先查 NaturalSpawner")
+        yield ChatChunk(tool_calls=(ToolCall(id="c1", name="search", arguments="{}"),), usage=None)
+
+    monkeypatch.setattr(answer_client, "stream_chat_completion", fake_stream)
+    client = OpenAiCompatChatClient(
+        LlmConfig(base_url="http://fake-llm.invalid/v1", model="m", api_key="k", temperature=0.0)
+    )
+
+    got = list(
+        client.stream(
+            messages=[{"role": "user", "content": "问题"}], tools=[], max_tokens=10, timeout=1.0
+        )
+    )
+
+    assert "".join(chunk.content for chunk in got) == ""
+    assert got[-1].tool_calls[0].name == "search"

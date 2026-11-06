@@ -10,6 +10,7 @@ LLM 调用由 conftest 的 `fake_llm` fixture 换掉（不联网）；索引与�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import sqlite3
@@ -1061,3 +1062,287 @@ def test_patch_summary_is_idempotent(
     assert second.patches_generated == 0
     assert second.patches_reused == 1
     assert len(fake_llm.calls) == calls_after_first, "复用命中时不应再调 LLM"
+
+
+# ----------------------------------------------------------------------
+# 批级失败：部分失败要二分重试，全部失败不拆
+# ----------------------------------------------------------------------
+
+
+def _split_probe(bad: set[str], *, fail_all: bool = False) -> Any:
+    """造一个假 `_run_batches` 环境：`bad` 里的 key 每次都解析失败，并记录每次请求的批大小。"""
+    calls: list[list[str]] = []
+
+    async def send(batch: Any) -> str:
+        calls.append([item for item in batch])
+        return "raw"
+
+    def parse(_raw: str, batch: Any) -> tuple[dict[str, str], dict[str, str]]:
+        if fail_all:
+            return {}, {item: "LLM 调用失败：timed out" for item in batch}
+
+        ok = {item: f"摘要-{item}" for item in batch if item not in bad}
+        # 用真实原因前缀：拆批规则只对「整批 JSON 坏掉」生效。
+        reason = f"{summarize.INVALID_JSON_PREFIX}：Expecting ',' delimiter"
+        failed = {item: reason for item in batch if item in bad}
+
+        return ok, failed
+
+    return send, parse, calls
+
+
+def test_run_batches_bisects_partial_failures() -> None:
+    """一批里只有一个类让模型吐坏 JSON 时，只重试那些失败项，其余结果保留。
+
+    批次是按 package 确定性分组的，不拆批就会永远卡在同一批（实测 Forge 卡在 6 个类）。
+    """
+    send, parse, calls = _split_probe({"bad"})
+
+    summaries, failures = asyncio.run(
+        summarize._run_batches(
+            [["a", "b", "bad"]],
+            4,
+            send=send,
+            parse=parse,
+            key=lambda item: item,
+        )
+    )[0]
+
+    assert summaries == {"a": "摘要-a", "b": "摘要-b"}
+    # 重试过 `bad`（两次单类尝试里至少一次），但没有把 a/b 再送一遍。
+    assert all("a" not in batch and "b" not in batch for batch in calls[1:])
+    assert any(batch == ["bad"] for batch in calls)
+    # 单类仍然坏：如实记为失败，不静默丢掉。
+    assert list(failures) == ["bad"]
+
+
+def test_run_batches_does_not_split_when_whole_batch_fails() -> None:
+    """整批失败不拆批：那是网关/鉴权/空响应，拆批只会把请求数放大一个数量级。"""
+    send, parse, calls = _split_probe(set(), fail_all=True)
+
+    results = asyncio.run(
+        summarize._run_batches(
+            [["a", "b", "c"]],
+            4,
+            send=send,
+            parse=parse,
+            key=lambda item: item,
+        )
+    )
+
+    assert len(calls) == 1, f"整批失败时不该重试，实际发了 {len(calls)} 次"
+    assert results[0][0] == {}
+    assert set(results[0][1]) == {"a", "b", "c"}
+
+
+def test_run_batches_drops_resolved_failures_from_the_report() -> None:
+    """拆批后重试成功的那条要从事失败表里移除，否则任务仍被判失败、白跑一轮。"""
+
+    async def send(_batch: Any) -> str:
+        return "raw"
+
+    def parse(_raw: str, batch: Any) -> tuple[dict[str, str], dict[str, str]]:
+        # 两条一起送时第二条拖坏 JSON（第一条仍拿到）；单条送时都能成。
+        if len(batch) > 1:
+            return {batch[0]: f"摘要-{batch[0]}"}, {
+                batch[1]: f"{summarize.INVALID_JSON_PREFIX}：Expecting ',' delimiter"
+            }
+
+        return {batch[0]: f"摘要-{batch[0]}"}, {}
+
+    summaries, failures = asyncio.run(
+        summarize._run_batches(
+            [["a", "b"]],
+            4,
+            send=send,
+            parse=parse,
+            key=lambda item: item,
+        )
+    )[0]
+
+    assert summaries == {"a": "摘要-a", "b": "摘要-b"}
+    assert failures == {}
+
+
+def test_run_batches_does_not_split_when_entries_are_merely_missing() -> None:
+    """只是「上游漏写了几个」不拆批：拆批会把请求数放大一个数量级，下一轮重试更省。"""
+    calls: list[list[str]] = []
+
+    async def send(batch: Any) -> str:
+        calls.append(list(batch))
+        return "raw"
+
+    def parse(_raw: str, batch: Any) -> tuple[dict[str, str], dict[str, str]]:
+        return {}, {item: "响应缺少该类的摘要" for item in batch}
+
+    summarize_stats = asyncio.run(
+        summarize._run_batches(
+            [["a", "b", "c"]],
+            4,
+            send=send,
+            parse=parse,
+            key=lambda item: item,
+        )
+    )
+
+    assert len(calls) == 1
+    assert set(summarize_stats[0][1]) == {"a", "b", "c"}
+
+
+def test_empty_response_is_not_treated_as_a_bad_apple() -> None:
+    """空响应是上游瞬态，不该触发拆批：整站故障时每批都拆到单类会把请求数放大一个数量级。"""
+    calls: list[list[str]] = []
+
+    async def send(batch: Any) -> str:
+        calls.append(list(batch))
+        return ""  # 上游返回 200 + 空体
+
+    results = asyncio.run(
+        summarize._run_batches(
+            [["a", "b"]],
+            4,
+            send=send,
+            # 真实解析把空体翻成 `EMPTY_RESPONSE_REASON`（见 `_load_response_object`）。
+            parse=lambda _raw, batch: (
+                {},
+                {item: summarize.EMPTY_RESPONSE_REASON for item in batch},
+            ),
+            key=lambda item: item,
+        )
+    )
+
+    # 同轮重试是允许的（瞬态），但**不能拆批**：每次送的都是完整的那一批。
+    assert all(len(batch) == 2 for batch in calls), f"空响应不该拆批，实际批次：{calls}"
+    assert results[0][1]["a"] == summarize.EMPTY_RESPONSE_REASON
+
+
+def test_empty_body_gets_its_own_reason() -> None:
+    """空响应要有独立原因：它和「JSON 写坏了」在拆批决策上是两件事。"""
+    loaded, reason = summarize._load_response_object("   ")
+
+    assert loaded is None
+    assert reason == summarize.EMPTY_RESPONSE_REASON
+
+
+def test_empty_response_is_retried_within_the_same_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空响应是瞬态的（实测同一批三次里两次空、一次正常）：同轮重试，不留给下一轮。"""
+    monkeypatch.setattr(summarize, "EMPTY_RETRY_DELAY_S", 0.0)
+
+    sent = 0
+
+    async def send(_batch: Any) -> str:
+        nonlocal sent
+        sent += 1
+
+        # 前两次空体，第三次正常。
+        return "" if sent <= 2 else '{"a": "职责：甲\n机制：乙\n关键成员：丙"}'
+
+    parse_calls: list[str] = []
+
+    def parse(raw: str, batch: Any) -> tuple[dict[str, str], dict[str, str]]:
+        parse_calls.append(raw)
+
+        if not raw.strip():
+            return {}, {item: summarize.EMPTY_RESPONSE_REASON for item in batch}
+
+        return {batch[0]: "职责：甲\n机制：乙\n关键成员：丙"}, {}
+
+    summaries, failures = asyncio.run(
+        summarize._run_batches(
+            [["a"]],
+            2,
+            send=send,
+            parse=parse,
+            key=lambda item: item,
+        )
+    )[0]
+
+    assert sent == 3, f"空响应应同轮重试到成功，实际发了 {sent} 次"
+    assert summaries == {"a": "职责：甲\n机制：乙\n关键成员：丙"}
+    assert failures == {}
+    assert len(parse_calls) == 3
+
+
+def test_empty_response_gives_up_after_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """重试有上限：一直空就如实记为失败，不无限重试。"""
+    monkeypatch.setattr(summarize, "EMPTY_RETRY_DELAY_S", 0.0)
+
+    sent = 0
+
+    async def send(_batch: Any) -> str:
+        nonlocal sent
+        sent += 1
+
+        return ""
+
+    summaries, failures = asyncio.run(
+        summarize._run_batches(
+            [["a"]],
+            2,
+            send=send,
+            parse=lambda _raw, batch: (
+                {},
+                {item: summarize.EMPTY_RESPONSE_REASON for item in batch},
+            ),
+            key=lambda item: item,
+        )
+    )[0]
+
+    assert sent == summarize.EMPTY_RETRY_ATTEMPTS + 1
+    assert summaries == {}
+    assert list(failures) == ["a"]
+
+
+# ----------------------------------------------------------------------
+# 推理型模型：正文落在 reasoning_content
+# ----------------------------------------------------------------------
+
+
+class _JsonBody:
+    """假的 `urlopen` 返回值：只实现 `read()` 与上下文管理器。"""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._raw
+
+    def __enter__(self) -> _JsonBody:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def _completion(message: dict[str, Any]) -> dict[str, Any]:
+    return {"choices": [{"message": message, "finish_reason": "stop"}], "usage": {}}
+
+
+def test_reasoning_content_is_used_when_content_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """推理型模型把正文写进 `reasoning_content`（实测约一半请求）：不能当成空响应。
+
+    之前只读 `message.content`，于是这些类表现为「响应为空（上游未返回内容）」，
+    而答案其实就在隔壁字段里——重试、拆批都救不回来。
+    """
+    payload = _completion(
+        {"role": "assistant", "content": "", "reasoning_content": '{"a": "职责：甲"}'}
+    )
+    monkeypatch.setattr(summarize, "urlopen", lambda *_a, **_k: _JsonBody(payload))
+
+    text = summarize._post_chat_completion_once("http://fake.invalid", {}, "k", 10)
+
+    assert text == '{"a": "职责：甲"}'
+
+
+def test_content_wins_over_reasoning_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """两个字段都有内容时用 `content`：推理过程不该被当成答案。"""
+    payload = _completion(
+        {"role": "assistant", "content": '{"a": "正文"}', "reasoning_content": "先想想……"}
+    )
+    monkeypatch.setattr(summarize, "urlopen", lambda *_a, **_k: _JsonBody(payload))
+
+    text = summarize._post_chat_completion_once("http://fake.invalid", {}, "k", 10)
+
+    assert text == '{"a": "正文"}'
