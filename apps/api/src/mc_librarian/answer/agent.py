@@ -291,24 +291,14 @@ class AskRun:
 
             return
 
-        prefix = f"{MAX_STEPS_NOTICE}。\n"
-        notice_sent = False
+        # 说明文字是答案的一部分：跟着第一段正文一起流出、一起进片段。模型一个字都不给时会
+        # 走降级，那时这句话不该出现，所以交给 `_call` 在收到第一个增量时再拼。
+        prefix = f"{MAX_STEPS_NOTICE}。{TEXT_SEPARATOR}"
 
         try:
             async for event in self._call(
-                [*messages, {"role": "user", "content": FORCE_ANSWER_PROMPT}], []
+                [*messages, {"role": "user", "content": FORCE_ANSWER_PROMPT}], [], prefix=prefix
             ):
-                if not notice_sent and event["type"] == "delta":
-                    # 步数上限说明是答案的一部分，必须在正文之前发出去；但模型可能一个字都不给
-                    # （那会走降级），所以等第一段正文到了再发。它同样要累积并记账——
-                    # 否则界面有这句、落库的答案没有。
-                    notice_sent = True
-                    self.answer += prefix
-                    self._streamed_chars += len(prefix)
-                    # 上限说明属于正文，也要进片段：否则历史恢复时答案里没有这句话。
-                    self._open_text = None
-                    self._append_text(prefix)
-                    yield {"type": "delta", "text": prefix}
                 yield event
         except (ChatError, TimeoutError, OSError) as error:
             async for event in self._degrade(f"模型调用失败：{error}"):
@@ -392,7 +382,11 @@ class AskRun:
         yield done
 
     async def _call(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        prefix: str = "",
     ) -> AsyncIterator[dict[str, Any]]:
         """调一次模型：文本增量边收边 yield `delta`，结束后结果放进 `self._completion`。
 
@@ -402,20 +396,31 @@ class AskRun:
         remaining = max(self.deadline - time.monotonic(), 1.0)
         content_parts: list[str] = []
         final = ChatChunk()
+        # 第一段正文前要补的说明（步数上限提示）。在**这里**拼而不是让调用方先 yield：
+        # 先 yield 会把第一个增量单独切成一段，界面上出现一个只有 `##` 的空标题。
+        pending_prefix = prefix
 
         async for chunk in self._stream_chunks(
             _payload_messages(messages), tools, min(self.llm_timeout_s, remaining)
         ):
             if chunk.content:
                 content_parts.append(chunk.content)
+                head, pending_prefix = pending_prefix, ""
+
+                if head:
+                    # 说明文字自成一个领先段落（它自带分隔），不并进上一段。
+                    self._open_text = None
+
                 # 工具批次之后的正文是**新的一段**，与上一段之间必须有分隔：
                 # 模型自己不会写（它以为两个 assistant 回合是分开的），直接拼起来会变成
                 # 「…相关的源码。## 一、整体链路」，连 Markdown 标题都会被吃掉。
-                separator = TEXT_SEPARATOR if self._open_text is None and self.answer else ""
-                self.answer += separator + chunk.content
-                self._streamed_chars += len(separator) + len(chunk.content)
-                self._append_text(chunk.content)
-                yield {"type": "delta", "text": separator + chunk.content}
+                if not head and self._open_text is None and self.answer:
+                    head = TEXT_SEPARATOR
+
+                self.answer += head + chunk.content
+                self._streamed_chars += len(head) + len(chunk.content)
+                self._append_text(head + chunk.content)
+                yield {"type": "delta", "text": head + chunk.content}
 
             if chunk.tool_calls or chunk.usage is not None:
                 final = chunk
