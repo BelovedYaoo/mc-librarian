@@ -889,3 +889,44 @@ def test_read_tool_clamps_end_to_file_length(
     step = next(e for e in events if e.get("type") == "step" and e.get("ok") is not None)
 
     assert step["ok"] is True, step.get("error")
+
+
+def test_history_keeps_ordered_segments_and_separates_rounds(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """历史里要能还原「正文 → 工具批次 → 正文」的顺序，且两段正文之间不能粘在一起。
+
+    两个真实反馈都落在这一条上：
+
+    1. 离开问答页再回来，工具轨迹全没了，只剩一大段正文——因为只存了 `content`；
+    2. 模型在两次调工具之间说的那句话，和最终答案拼成了
+       `…相关的源码。## 一、整体链路`，连 Markdown 标题都被吃掉。
+
+    所以断言两件事：`segments` 的顺序是 text/steps/text，`content` 里两段之间有分隔。
+    """
+    first_round = tool_call("search", query="Mob", detail="locate")
+    first_round["content"] = "我先看一下刷怪相关的类。"
+
+    fake_chat.script = [first_round, final_answer("## 结论\n\n刷怪上限在 NaturalSpawner。")]
+
+    response = ask(user_client)
+    events = parse_sse(response.text)
+    done = next(event for event in events if event["type"] == "done")
+    conversation_id = done["conversation_id"]
+
+    detail = user_client.get(f"/v1/conversations/{conversation_id}")
+
+    assert detail.status_code == 200, detail.text
+
+    messages = detail.json()["messages"]
+    assistant = next(item for item in messages if item["role"] == "assistant")
+    segments = assistant["segments"]
+
+    assert [segment["kind"] for segment in segments] == ["text", "steps", "text"]
+    assert segments[0]["text"] == "我先看一下刷怪相关的类。"
+    assert segments[1]["steps"][0]["tool"] == "search"
+    assert segments[1]["steps"][0]["ok"] is True
+    assert "## 结论" in segments[2]["text"]
+
+    # 完整正文仍要能独立使用（检索、导出都读它），且两段之间有分隔。
+    assert "我先看一下刷怪相关的类。\n\n## 结论" in assistant["content"]

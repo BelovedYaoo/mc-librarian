@@ -38,6 +38,10 @@ ASK_MIN_ANSWER_TOKENS: Final = 500
 ASK_MAX_ANSWER_TOKENS: Final = 32_000
 ASK_MIN_CONTEXT_TOKENS: Final = 1_000
 
+# 摘要并发上限：`config.Settings` 与设置页写入共用（网关能开多大就受这里限制）。
+# 曾经是三处各写 64，调高时只改到一处就会「设置能存 72、启动却报 le=64」。
+SUMMARY_CONCURRENCY_MAX: Final = 128
+
 # 检索/阅读端点的枚举（契约 `SymbolKind` 与 `SymbolDetail`/`Outline` 的 `kind`）。
 SymbolKind = Literal["any", "class", "method", "field"]
 SymbolDetailKind = Literal["class", "method", "field"]
@@ -482,7 +486,7 @@ class IndexSettingsUpdate(BaseModel):
     vineflower_jar: str | None = Field(default=None, max_length=1000)
     specialsource_jar: str | None = Field(default=None, max_length=1000)
     summary_batch_size: int | None = Field(default=None, ge=1, le=500)
-    summary_concurrency: int | None = Field(default=None, ge=1, le=64)
+    summary_concurrency: int | None = Field(default=None, ge=1, le=SUMMARY_CONCURRENCY_MAX)
 
 
 class SecuritySettingsUpdate(BaseModel):
@@ -789,6 +793,40 @@ class ConversationList(BaseModel):
     conversations: list[ConversationSummary]
 
 
+class MessageStep(BaseModel):
+    """历史片段里的一次工具调用：比 `AskStep` 多出执行结果。
+
+    `ok` / `hits` / `error` 在事件里是「完成」那一刻才有的，历史要能还原成同样的样子，
+    所以这里不能直接复用只描述请求的 `AskStep`（那样 `ok` 会被 pydantic 丢掉）。
+    """
+
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    ok: bool | None = None
+    hits: int | None = None
+    error: str | None = None
+
+
+class MessageStepsSegment(BaseModel):
+    """一个工具批次段：同一轮里并发执行的那几次调用。"""
+
+    kind: Literal["steps"]
+    steps: list[MessageStep]
+
+
+class MessageTextSegment(BaseModel):
+    """一段正文（两次工具批次之间的模型输出，或最终答案）。"""
+
+    kind: Literal["text"]
+    text: str
+
+
+# 一条助手消息的有序片段：`steps` 与 `text` 交替，顺序即渲染顺序。
+MessageSegment = Annotated[
+    MessageStepsSegment | MessageTextSegment, Field(discriminator="kind")
+]
+
+
 class ConversationMessage(BaseModel):
     """`ConversationDetail.messages` 的一项。
 
@@ -802,6 +840,8 @@ class ConversationMessage(BaseModel):
     citations: list[Citation]
     usage: Usage | None = None
     version: str | None = None
+    # 有序片段（正文段与工具批次段交替）。`null` = v13 之前的历史，前端退化成「整段正文」。
+    segments: list[MessageSegment] | None = None
     created_at: datetime
 
 

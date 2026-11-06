@@ -1337,7 +1337,54 @@ components:
           description: |
             这一轮提问用的版本。引用的 `path` 是版本相关的，历史引用按它打开。
             迁移 v10 之前落库的历史行为 null，前端回退到当前选中的版本并提示。
+        segments:
+          type: [array, "null"]
+          description: |
+            有序片段（正文段与工具批次段交替），顺序即渲染顺序。
+
+            只存 `content` 的话，历史恢复时工具轨迹全丢，模型在两次调工具之间说的话还会和最终
+            答案粘成一段（`…源码。## 一、`）。`content` 仍是完整正文，`segments` 用于还原轨迹。
+            v13 之前落库的历史为 null，前端退化成「整段正文」。
+          items: { $ref: "#/components/schemas/MessageSegment" }
         created_at: { type: string, format: date-time }
+
+    MessageStep:
+      type: object
+      required: [tool]
+      properties:
+        tool: { type: string }
+        args: { type: object, additionalProperties: true }
+        ok: { type: boolean }
+        hits: { type: integer }
+        error:
+          type: string
+          description: "失败原因（`ok: false` 时才有，截断到 300 字符）"
+
+    MessageStepsSegment:
+      type: object
+      required: [kind, steps]
+      properties:
+        kind: { type: string, const: steps }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/MessageStep" }
+
+    MessageTextSegment:
+      type: object
+      required: [kind, text]
+      properties:
+        kind: { type: string, const: text }
+        text: { type: string }
+
+    MessageSegment:
+      oneOf:
+        - $ref: "#/components/schemas/MessageStepsSegment"
+        - $ref: "#/components/schemas/MessageTextSegment"
+      discriminator:
+        propertyName: kind
+        mapping:
+          steps: "#/components/schemas/MessageStepsSegment"
+          text: "#/components/schemas/MessageTextSegment"
 
     ConversationDetail:
       type: object

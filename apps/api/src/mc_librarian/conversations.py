@@ -17,18 +17,25 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from typing import Final
+from collections.abc import Sequence
+from typing import Any, Final
+
+from pydantic import TypeAdapter, ValidationError
 
 from mc_librarian.db import utc_now
 from mc_librarian.schemas import (
     Citation,
     ConversationMessage,
     ConversationSummary,
+    MessageSegment,
     Usage,
 )
 
 # 每用户最多保留的会话数：新建时超出就删最旧的（级联删消息）。
 MAX_PER_USER: Final = 200
+
+# 片段是联合类型（`kind` 判别），校验要一个 TypeAdapter（每次构造都新建会慢）。
+_SEGMENT_ADAPTER = TypeAdapter(MessageSegment)
 # 标题长度上限：取首条问题，超出截断并加省略号。
 TITLE_LIMIT: Final = 30
 ELLIPSIS: Final = "…"
@@ -76,6 +83,7 @@ def append_message(
     citations: tuple[Citation, ...] | list[Citation] = (),
     usage: Usage | None = None,
     version: str | None = None,
+    segments: Sequence[dict[str, Any]] | None = None,
 ) -> None:
     """追加一条消息（用户问题或助手答案）。流式增量不落库，助手消息只在收尾时写一次。
 
@@ -83,8 +91,9 @@ def append_message(
     """
     conn.execute(
         "INSERT INTO messages"
-        " (id, conversation_id, role, content, citations_json, usage_json, version, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        " (id, conversation_id, role, content, citations_json, usage_json, version,"
+        " segments_json, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             uuid.uuid4().hex,
             conversation_id,
@@ -93,6 +102,9 @@ def append_message(
             json.dumps([item.model_dump() for item in citations], ensure_ascii=False),
             None if usage is None else json.dumps(usage.model_dump(), ensure_ascii=False),
             version,
+            None
+            if segments is None
+            else json.dumps(list(segments), ensure_ascii=False),
             utc_now(),
         ),
     )
@@ -144,7 +156,8 @@ def list_summaries(
 def messages(conn: sqlite3.Connection, *, conversation_id: str) -> list[ConversationMessage]:
     """一个会话的全部消息，按写入顺序（`created_at` 再按 `rowid`）。"""
     rows = conn.execute(
-        "SELECT role, content, citations_json, usage_json, version, created_at FROM messages"
+        "SELECT role, content, citations_json, usage_json, version, segments_json, created_at"
+        " FROM messages"
         " WHERE conversation_id = ? ORDER BY created_at, rowid",
         (conversation_id,),
     ).fetchall()
@@ -164,8 +177,30 @@ def _row_to_message(row: sqlite3.Row) -> ConversationMessage:
         citations=_load_citations(row["citations_json"]),
         usage=_load_usage(row["usage_json"]),
         version=row["version"],
+        segments=_load_segments(row["segments_json"]),
         created_at=row["created_at"],
     )
+
+
+def _load_segments(raw: object) -> list[MessageSegment] | None:
+    """`segments_json` → 片段列表；`null` / 全部无效时退回 `None`（前端按「整段正文」渲染）。
+
+    逐段校验、**丢弃坏段**而不是整条失败：片段只用于渲染，一个读不懂的段不该让整条会话报错。
+    """
+    loaded = _loads(raw)
+
+    if not isinstance(loaded, list):
+        return None
+
+    segments: list[MessageSegment] = []
+
+    for item in loaded:
+        try:
+            segments.append(_SEGMENT_ADAPTER.validate_python(item))
+        except ValidationError:
+            continue
+
+    return segments or None
 
 
 def _load_citations(raw: object) -> list[Citation]:

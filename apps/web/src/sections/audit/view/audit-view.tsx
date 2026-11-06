@@ -74,9 +74,15 @@ export function AuditView() {
 
       {/* 审计是长列表：卡片给一个随视口收缩的高度上限，滚动条留在表格里，
           而不是把整页撑长（整页滚动时表头和筛选条会跟着滚走）。 */}
-      <Card sx={{ height: 'calc(100dvh - 260px)', minHeight: 360, display: 'flex' }}>
+      <Card sx={{ height: 'calc(100dvh - 292px)', minHeight: 360, display: 'flex' }}>
         <CardContent
-          sx={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, width: '100%' }}
+          sx={{
+            display: 'flex',
+            flexDirection: 'column',
+            flex: '1 1 auto',
+            minHeight: 0,
+            width: '100%',
+          }}
         >
           <Stack
             component="form"

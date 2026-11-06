@@ -23,6 +23,8 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
 
+import { McpGuide } from './mcp-guide';
+
 import { createToken, listTokens, revokeToken } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
@@ -112,102 +114,107 @@ export function TokensView() {
   };
 
   return (
-    <Card>
-      <CardContent>
-        <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
-          <Typography variant="h6">访问令牌</Typography>
-          <Box sx={{ flex: '1 1 auto' }} />
-          <Button size="small" variant="contained" onClick={openCreate}>
-            新建令牌
-          </Button>
-        </Stack>
+    <Stack spacing={3}>
+      <McpGuide />
 
-        <Divider sx={{ mb: 2 }} />
+      <Card>
+        <CardContent>
+          <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
+            <Typography variant="h6">访问令牌</Typography>
+            <Box sx={{ flex: '1 1 auto' }} />
+            <Button size="small" variant="contained" onClick={openCreate}>
+              新建令牌
+            </Button>
+          </Stack>
 
-        <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
-          供脚本用 <code>Authorization: Bearer mcl_…</code> 调用，权限与当前账号完全一致。明文只在创建时显示一次。
-        </Typography>
+          <Divider sx={{ mb: 2 }} />
 
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+            供脚本用 <code>Authorization: Bearer mcl_…</code>{' '}
+            调用，权限与当前账号完全一致。明文只在创建时显示一次。
+          </Typography>
 
-        {renderList()}
-      </CardContent>
+          {error && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {error}
+            </Alert>
+          )}
 
-      <Dialog open={createOpen} onClose={closeCreate} fullWidth maxWidth="sm">
-        <DialogTitle>{created ? '令牌已创建' : '新建访问令牌'}</DialogTitle>
+          {renderList()}
+        </CardContent>
 
-        {created ? (
-          <>
-            <DialogContent>
-              <Alert severity="warning" sx={{ mb: 2 }}>
-                明文令牌只显示这一次，关闭后无法再次查看，请立即复制并妥善保存。
-              </Alert>
+        <Dialog open={createOpen} onClose={closeCreate} fullWidth maxWidth="sm">
+          <DialogTitle>{created ? '令牌已创建' : '新建访问令牌'}</DialogTitle>
 
-              <Box
-                sx={{
-                  p: 1.5,
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  borderRadius: 1,
-                  bgcolor: 'action.hover',
-                }}
-              >
-                <Typography
-                  variant="body2"
-                  sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}
+          {created ? (
+            <>
+              <DialogContent>
+                <Alert severity="warning" sx={{ mb: 2 }}>
+                  明文令牌只显示这一次，关闭后无法再次查看，请立即复制并妥善保存。
+                </Alert>
+
+                <Box
+                  sx={{
+                    p: 1.5,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 1,
+                    bgcolor: 'action.hover',
+                  }}
                 >
-                  {created.token}
-                </Typography>
-              </Box>
-            </DialogContent>
+                  <Typography
+                    variant="body2"
+                    sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}
+                  >
+                    {created.token}
+                  </Typography>
+                </Box>
+              </DialogContent>
 
-            <DialogActions>
-              <Button onClick={() => void handleCopy(created.token)}>
-                {copied ? '已复制' : '复制'}
-              </Button>
-              <Button variant="contained" onClick={closeCreate}>
-                我已保存
-              </Button>
-            </DialogActions>
-          </>
-        ) : (
-          <Box component="form" onSubmit={handleCreate}>
-            <DialogContent>
-              <Stack spacing={2}>
-                <TextField
-                  label="名称"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="例如：CI 脚本"
-                  autoFocus
-                  fullWidth
-                  required
-                />
-                <TextField
-                  label="有效期（天）"
-                  type="number"
-                  value={days}
-                  onChange={(event) => setDays(event.target.value)}
-                  fullWidth
-                  slotProps={{ htmlInput: { min: 1, max: 3650 } }}
-                />
-              </Stack>
-            </DialogContent>
+              <DialogActions>
+                <Button onClick={() => void handleCopy(created.token)}>
+                  {copied ? '已复制' : '复制'}
+                </Button>
+                <Button variant="contained" onClick={closeCreate}>
+                  我已保存
+                </Button>
+              </DialogActions>
+            </>
+          ) : (
+            <Box component="form" onSubmit={handleCreate}>
+              <DialogContent>
+                <Stack spacing={2}>
+                  <TextField
+                    label="名称"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="例如：CI 脚本"
+                    autoFocus
+                    fullWidth
+                    required
+                  />
+                  <TextField
+                    label="有效期（天）"
+                    type="number"
+                    value={days}
+                    onChange={(event) => setDays(event.target.value)}
+                    fullWidth
+                    slotProps={{ htmlInput: { min: 1, max: 3650 } }}
+                  />
+                </Stack>
+              </DialogContent>
 
-            <DialogActions>
-              <Button onClick={closeCreate}>取消</Button>
-              <Button type="submit" variant="contained" disabled={submitting}>
-                {submitting ? '创建中…' : '创建'}
-              </Button>
-            </DialogActions>
-          </Box>
-        )}
-      </Dialog>
-    </Card>
+              <DialogActions>
+                <Button onClick={closeCreate}>取消</Button>
+                <Button type="submit" variant="contained" disabled={submitting}>
+                  {submitting ? '创建中…' : '创建'}
+                </Button>
+              </DialogActions>
+            </Box>
+          )}
+        </Dialog>
+      </Card>
+    </Stack>
   );
 
   // ----------------------------------------------------------------------

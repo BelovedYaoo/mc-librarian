@@ -24,6 +24,7 @@ from mc_librarian.schemas import (
     ASK_MIN_ANSWER_TOKENS,
     ASK_MIN_CONTEXT_TOKENS,
     JAVA_XMX_PATTERN,
+    SUMMARY_CONCURRENCY_MAX,
 )
 
 DATA_DIR_ENV: Final = "MC_LIBRARIAN_DATA_DIR"
@@ -153,7 +154,7 @@ class Settings(BaseSettings):
     # 摘要按 package 分批，每批类数（规格 §3 建议 30–50，默认 40）。
     summary_batch_size: int = Field(default=40, ge=1, le=500)
     # 摘要生成的并发批次上限（规格 §3 定死 4，用 asyncio 信号量限制）。
-    summary_concurrency: int = Field(default=4, ge=1, le=64)
+    summary_concurrency: int = Field(default=4, ge=1, le=SUMMARY_CONCURRENCY_MAX)
 
     # 问答（#8）：服务端「检索 → 读取 → 作答」循环。
     # `MC_LIBRARIAN_ASK_ENABLED=false` 时 `/v1/ask` 返回 429（异常时快速止血）。

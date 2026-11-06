@@ -949,9 +949,44 @@ export interface components {
              *     迁移 v10 之前落库的历史行为 null，前端回退到当前选中的版本并提示。
              */
             version?: string | null;
+            /**
+             * @description 有序片段（正文段与工具批次段交替），顺序即渲染顺序。
+             *
+             *     只存 `content` 的话，历史恢复时工具轨迹全丢，模型在两次调工具之间说的话还会和最终
+             *     答案粘成一段（`…源码。## 一、`）。`content` 仍是完整正文，`segments` 用于还原轨迹。
+             *     v13 之前落库的历史为 null，前端退化成「整段正文」。
+             */
+            segments?: components["schemas"]["MessageSegment"][] | null;
             /** Format: date-time */
             created_at: string;
         };
+        MessageStep: {
+            tool: string;
+            args?: {
+                [key: string]: unknown;
+            };
+            ok?: boolean;
+            hits?: number;
+            /** @description 失败原因（`ok: false` 时才有，截断到 300 字符） */
+            error?: string;
+        };
+        MessageStepsSegment: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "steps";
+            steps: components["schemas"]["MessageStep"][];
+        };
+        MessageTextSegment: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "text";
+            text: string;
+        };
+        MessageSegment: components["schemas"]["MessageStepsSegment"] | components["schemas"]["MessageTextSegment"];
         ConversationDetail: {
             id: string;
             title: string;

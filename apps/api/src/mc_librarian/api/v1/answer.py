@@ -311,6 +311,9 @@ def _record_answer(database: Database, run: AskRun) -> None:
                 citations=run.citations,
                 usage=run.usage,
                 version=run.version,
+                # 有序片段（正文 / 工具批次交替）：历史恢复时按它还原轨迹，
+                # 否则一次深度检索的历史只剩一大段正文，中间调过什么全看不见。
+                segments=run.segments,
             )
             conversations.touch(connection, conversation_id=run.conversation_id)
     except Exception:  # 写历史失败不该把一次成功的问答变成 500

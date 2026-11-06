@@ -71,9 +71,7 @@ const EXAMPLE_QUESTIONS = [
  * `answer` 会把中间那几段正文挤到所有工具之后，用户看到的是「一堆工具 → 全部正文」，
  * 与真实过程不符。片段按到达顺序排列，渲染时原样展开。
  */
-type Segment =
-  | { kind: 'steps'; steps: StepTrace[] }
-  | { kind: 'text'; text: string };
+type Segment = { kind: 'steps'; steps: StepTrace[] } | { kind: 'text'; text: string };
 
 type Turn = {
   question: string;
@@ -94,6 +92,28 @@ type Turn = {
 
 function errorText(cause: unknown): string {
   return cause instanceof ApiError ? cause.message : String(cause);
+}
+
+/**
+ * 历史消息 → 渲染片段。
+ *
+ * 片段是**渲染**用的，`content` 才是完整正文；两者由同一份数据生成。服务端没给片段
+ * （v13 之前落库的历史）时退化成一段正文——那时的轨迹本来就没存。
+ */
+function segmentsFromHistory(assistant: ConversationDetail['messages'][number] | null): Segment[] {
+  if (!assistant) return [];
+
+  const stored = assistant.segments;
+
+  if (stored && stored.length > 0) {
+    return stored.map((segment) =>
+      segment.kind === 'steps'
+        ? { kind: 'steps', steps: segment.steps.map((step) => ({ ...step })) }
+        : { kind: 'text', text: segment.text }
+    );
+  }
+
+  return assistant.content === '' ? [] : [{ kind: 'text', text: assistant.content }];
 }
 
 function emptyTurn(question: string, version: string): Turn {
@@ -128,11 +148,9 @@ function turnsFromDetail(detail: ConversationDetail): Turn[] {
       question: message.content,
       // 每轮记下当时用的版本（迁移 v10 之前落库的历史行为 null → 回退到当前选择）。
       version: assistant?.version ?? '',
-      // 历史里没有工具轨迹，整段答案就是一个正文片段。
-      segments:
-        assistant?.content !== undefined && assistant.content !== ''
-          ? [{ kind: 'text', text: assistant.content }]
-          : [],
+      // 服务端存了有序片段（v13+）就直接用：轨迹与正文的交替顺序能原样还原。
+      // 更早的历史没有片段，退化成「整段正文」——那时的轨迹本来就没落库。
+      segments: segmentsFromHistory(assistant),
       answer: assistant?.content ?? '',
       citations: assistant?.citations ?? [],
       reason: null,
@@ -162,7 +180,10 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
         if (last?.kind === 'steps') {
           return {
             ...turn,
-            segments: [...turn.segments.slice(0, -1), { kind: 'steps', steps: [...last.steps, step] }],
+            segments: [
+              ...turn.segments.slice(0, -1),
+              { kind: 'steps', steps: [...last.steps, step] },
+            ],
           };
         }
 
@@ -179,9 +200,7 @@ function applyEvent(turn: Turn, event: AskEvent): Turn {
       if (last?.kind !== 'steps') return turn;
 
       const steps = [...last.steps];
-      const target = steps.findIndex(
-        (step) => step.ok === undefined && step.tool === event.tool
-      );
+      const target = steps.findIndex((step) => step.ok === undefined && step.tool === event.tool);
 
       if (target === -1) return turn;
 
@@ -917,7 +936,11 @@ function CitationRow({ citation, onOpen }: { citation: Citation; onOpen: () => v
           size="small"
           variant="outlined"
           label={chipLabel}
-          sx={{ flexShrink: 0, maxWidth: 320, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+          sx={{
+            flexShrink: 0,
+            maxWidth: 320,
+            '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' },
+          }}
         />
 
         {/* `minWidth: 0` 是单行省略的前提：flex 子项默认不会收缩到内容宽度以下。 */}

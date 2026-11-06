@@ -56,6 +56,9 @@ DEGRADED_NOTICE: Final = "模型暂不可用，以下是相关代码位置"
 # 失败原因写进事件的长度上限：够说清「行号越界 / 文件不存在 / 参数非法」，
 # 又不至于把整段工具输出塞进事件。
 STEP_ERROR_CHARS: Final = 300
+# 两段正文之间的分隔（工具批次把一轮回答切成多段）。模型自己不会写这个换行：
+# 它以为两个 assistant 回合是分开的，直接拼接会得到「…源码。## 一、整体链路」，标题都被吃掉。
+TEXT_SEPARATOR: Final = chr(10) + chr(10)
 
 MAX_STEPS_NOTICE: Final = "已达检索步数上限，以下基于已获取的信息"
 # 收尾时追加给模型的指令：光撤掉工具不够——模型会继续「想调工具」而给出空文本，
@@ -127,6 +130,11 @@ class AskRun:
         # 那几句已经显示给用户了。只记「发过没发过」会让 `_finish` 要么丢掉已经显示的前缀、
         # 要么把整段再发一遍。按长度记，`_finish` 只补发剩下的部分，界面与落库内容始终一致。
         self._streamed_chars = 0
+        # 有序片段：正文段与工具批次段交替，顺序即事件到达顺序。前端整轮渲染用它，
+        # 落库后历史恢复也用它——只存一个 steps[] 加一段 answer，中间的插话会被挤到末尾。
+        self.segments: list[dict[str, Any]] = []
+        # 当前「还开着」的正文段（事件里没有「本轮结束」这种标记，只能靠「遇到工具批次」收口）。
+        self._open_text: dict[str, Any] | None = None
 
     @property
     def latency_ms(self) -> int:
@@ -180,10 +188,14 @@ class AskRun:
             # 事后算会串号，压缩时的「丢弃标签」就指错对象。
             plan = _plan_tool_calls(completion.tool_calls, len(self.steps))
 
-            # 先把整批的「开始」发出去（前端据此立刻显示在跑哪几次调用），再并发跑工具。
+            # 先在片段里开一批工具段，再发事件：顺序与前端看到的完全一致。
+            batch = self._open_steps()
+
+            # 整批的「开始」先发出去（前端据此立刻显示在跑哪几次调用），再并发跑工具。
             for item in plan:
                 yield {"type": "step", "tool": item.name, "args": item.args}
                 self.steps.append(AskStep(tool=item.name, args=item.args))
+                batch["steps"].append({"tool": item.name, "args": item.args})
 
             outcomes = await self._execute_batch(plan)
 
@@ -202,6 +214,18 @@ class AskRun:
                     step_event["error"] = outcome.text[:STEP_ERROR_CHARS]
 
                 yield step_event
+                # 同一批里按「请求顺序」配对：并发下完成先后不固定，前端也是 FIFO。
+                entry = next(
+                    (item for item in batch["steps"] if item.get("ok") is None), None
+                )
+
+                if entry is not None:
+                    entry["ok"] = outcome.ok
+                    entry["hits"] = outcome.hits
+
+                    if not outcome.ok:
+                        entry["error"] = outcome.text[:STEP_ERROR_CHARS]
+
                 messages.append(
                     {
                         "role": "tool",
@@ -225,6 +249,26 @@ class AskRun:
 
         async for event in self._forced_finish(messages):
             yield event
+
+    def _append_text(self, text: str) -> None:
+        """把一段正文接进「当前打开的那个正文段」；没有就新开一段。"""
+        if self._open_text is None:
+            self._open_text = {"kind": "text", "text": ""}
+            self.segments.append(self._open_text)
+
+        self._open_text["text"] += text
+
+    def _open_steps(self) -> dict[str, Any]:
+        """开一批工具段：把当前正文段收口，返回可原地追加的段对象。
+
+        收口是必须的：模型可能说完一句话就去调工具，那句话属于**这一批之前**，
+        不在这里断开就会和后面的正文连成一段（历史恢复时尤其明显）。
+        """
+        self._open_text = None
+        segment: dict[str, Any] = {"kind": "steps", "steps": []}
+        self.segments.append(segment)
+
+        return segment
 
     async def _execute_batch(self, plan: list[_PlannedCall]) -> list[ToolOutcome]:
         """并发执行整批工具调用，返回与 `plan` 同序的结果（`gather` 保证按入参顺序）。"""
@@ -261,6 +305,9 @@ class AskRun:
                     notice_sent = True
                     self.answer += prefix
                     self._streamed_chars += len(prefix)
+                    # 上限说明属于正文，也要进片段：否则历史恢复时答案里没有这句话。
+                    self._open_text = None
+                    self._append_text(prefix)
                     yield {"type": "delta", "text": prefix}
                 yield event
         except (ChatError, TimeoutError, OSError) as error:
@@ -361,9 +408,14 @@ class AskRun:
         ):
             if chunk.content:
                 content_parts.append(chunk.content)
-                self.answer += chunk.content
-                self._streamed_chars += len(chunk.content)
-                yield {"type": "delta", "text": chunk.content}
+                # 工具批次之后的正文是**新的一段**，与上一段之间必须有分隔：
+                # 模型自己不会写（它以为两个 assistant 回合是分开的），直接拼起来会变成
+                # 「…相关的源码。## 一、整体链路」，连 Markdown 标题都会被吃掉。
+                separator = TEXT_SEPARATOR if self._open_text is None and self.answer else ""
+                self.answer += separator + chunk.content
+                self._streamed_chars += len(separator) + len(chunk.content)
+                self._append_text(chunk.content)
+                yield {"type": "delta", "text": separator + chunk.content}
 
             if chunk.tool_calls or chunk.usage is not None:
                 final = chunk

@@ -375,6 +375,14 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
             "UPDATE versions SET mc_version = version WHERE mc_version IS NULL",
         ),
     ),
+    # v13：`messages.segments_json`（有序片段：正文段与工具批次段交替）。
+    # 只存 `content` 的话，历史恢复时工具轨迹全丢、模型在两次调工具之间说的话会和最终答案
+    # 粘成一段（`…源码。## 一、`）。片段是**渲染**用的，`content` 仍是完整正文（检索/导出用），
+    # 两者由同一份数据生成，不会不一致。v13 之前的历史为 NULL，前端回退成「整段正文」。
+    Migration(
+        version=13,
+        statements=("ALTER TABLE messages ADD COLUMN segments_json TEXT",),
+    ),
 )
 
 LATEST_VERSION: Final = MIGRATIONS[-1].version
