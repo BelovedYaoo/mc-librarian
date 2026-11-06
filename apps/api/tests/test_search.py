@@ -893,3 +893,66 @@ def test_patch_hit_without_summaries_still_matches_identifiers(
     response = search_multi(client, {"query": "checkDespawn", "detail": "locate"})
 
     assert any(hit["type"] == "patch" and "patch" in hit["why"] for hit in response["hits"])
+
+
+# ----------------------------------------------------------------------
+# 中文提问里的英文标识符（issue #23）
+# ----------------------------------------------------------------------
+
+
+def test_identifiers_are_extracted_from_a_chinese_question() -> None:
+    """提问里写着的类名/方法名要能被抽出来，用于符号、引用、字面量三路。
+
+    之前整句中文被原样送进这三路：`symbol` 拿「谁调用了 LootTable 的 getRandomItems」
+    去比类名，必然 0 命中——30 题评测里这直接吃掉 5 题。
+    """
+    from mc_librarian.retrieval.terms import identifiers
+
+    assert identifiers("谁调用了 LootTable 的 getRandomItems") == ("LootTable", "getRandomItems")
+    assert identifiers("两个版本的 GameRules 分别放在哪个包") == ("GameRules",)
+    # 纯中文没有标识符；版本号（1.20.1）不是标识符。
+    assert identifiers("1.20.1 与 26.3 的刷怪逻辑有什么不同") == ()
+    # 噪声与过短的词不算。
+    assert identifiers("解析合成表 JSON 的类在哪") == ()
+
+
+def test_search_routes_identifiers_to_symbol_and_reference(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection
+) -> None:
+    """「谁调用了 <类> 的 <方法>」要命中符号表与引用表，而不是把它们当成整句去比。"""
+    from mc_librarian.retrieval.terms import identifiers
+
+    # 夹具源码里 `World.tick` 调用了 `Mob.tick`（见 fixtures/source）。
+    register(settings, conn)
+
+    assert identifiers("谁调用了 Mob 的 tick") == ("Mob", "tick")
+
+    body = post_search(
+        user_client, {"query": "谁调用了 Mob 的 tick", "detail": "locate", "limit": 5}
+    )
+    symbols = [hit.get("symbol") for hit in body["hits"]]
+
+    assert any(
+        symbol and symbol.startswith("net.minecraft.world.Mob") for symbol in symbols
+    ), symbols
+
+
+def test_fusion_caps_each_channel_before_scoring() -> None:
+    """每路只喂前 `CHANNEL_CANDIDATE_CAP` 条进 RRF：不截断时长尾会把强信号淹掉。"""
+    from mc_librarian.retrieval.channels import Candidate
+    from mc_librarian.retrieval.fuse import CHANNEL_CANDIDATE_CAP, fuse
+
+    def candidate(index: int) -> Candidate:
+        return Candidate(
+            channel="summary",
+            path=f"net/F{index}.java",
+            symbol=f"net.F{index}",
+            kind="class",
+            start_line=1,
+            end_line=2,
+        )
+
+    long_list = [candidate(index) for index in range(CHANNEL_CANDIDATE_CAP + 20)]
+    fused = fuse({"summary": long_list})
+
+    assert len(fused) == CHANNEL_CANDIDATE_CAP, "超出上限的候选不该进融合"

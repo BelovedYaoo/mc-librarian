@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from typing import Final
 
 from mc_librarian.config import Settings
@@ -27,6 +28,7 @@ from mc_librarian.retrieval.channels import (
     symbol_candidates,
 )
 from mc_librarian.retrieval.fuse import FusedHit, apply_token_budget, fuse
+from mc_librarian.retrieval.terms import identifiers
 from mc_librarian.schemas import (
     FileSlice,
     Hit,
@@ -56,11 +58,44 @@ class RetrievalNotFound(LookupError):
     """
 
 
+def merge_ranked(lists: list[list[Candidate]]) -> list[Candidate]:
+    """多组候选按「同一个实体取最好名次」合并成一路。
+
+    一个提问可能带好几个标识符（`LootTable` 与 `getRandomItems`），它们查出来的实体有重叠。
+    融合层会按名次给分，所以这里必须保留**真实名次**：按实体在各自列表里的最好名次排序，
+    而不是简单拼接（拼接会让第二个标识符的结果整体沉到后面）。
+    """
+    best: dict[str, tuple[int, int, Candidate]] = {}
+
+    for order, candidates in enumerate(lists):
+        for rank, candidate in enumerate(candidates):
+            current = best.get(candidate.key)
+
+            if current is None or (rank, order) < (current[0], current[1]):
+                best[candidate.key] = (rank, order, candidate)
+
+    ordered = sorted(best.values(), key=lambda item: item[:2])
+
+    return [candidate for _rank, _order, candidate in ordered]
+
+
 def search(
     connection: sqlite3.Connection, settings: Settings, request: SearchRequest
 ) -> SearchResponse:
     """跑一次混合检索。`connection` 是已只读打开的索引库连接。"""
     started = time.perf_counter()
+    # 查询按目标分流（issue #23）：中文提问里常常直接写着类名 / 方法名，那几个英文字串对
+    # 符号表、引用表、源码字面量是最精确的键；把整句中文交给它们必然 0 命中
+    # （`symbol` 拿「谁调用了 LootTable 的 getRandomItems」去比类名）。
+    names = identifiers(request.query)
+
+    def by_names(lookup: Callable[[str], list[Candidate]]) -> list[Candidate]:
+        """逐个标识符查，按「最好名次」合并成一路（没有标识符时退回整句）。"""
+        if not names:
+            return lookup(request.query)
+
+        return merge_ranked([lookup(name) for name in names])
+
     channels: dict[Channel, list[Candidate]] = {
         "summary": summary_candidates(
             connection,
@@ -68,22 +103,28 @@ def search(
             path_prefix=request.path_prefix,
             source=request.source,
         ),
-        "symbol": symbol_candidates(
-            connection,
-            request.query,
-            kind=request.kind,
-            path_prefix=request.path_prefix,
-            source=request.source,
+        "symbol": by_names(
+            lambda name: symbol_candidates(
+                connection,
+                name,
+                kind=request.kind,
+                path_prefix=request.path_prefix,
+                source=request.source,
+            )
         ),
-        "literal": literal_candidates(
-            connection,
-            source_root(settings.data_dir, request.version),
-            request.query,
-            path_prefix=request.path_prefix,
-            source=request.source,
+        "literal": by_names(
+            lambda text: literal_candidates(
+                connection,
+                source_root(settings.data_dir, request.version),
+                text,
+                path_prefix=request.path_prefix,
+                source=request.source,
+            )
         ),
-        "reference": reference_candidates(
-            connection, request.query, path_prefix=request.path_prefix, source=request.source
+        "reference": by_names(
+            lambda name: reference_candidates(
+                connection, name, path_prefix=request.path_prefix, source=request.source
+            )
         ),
         "patch": patch_candidates(
             connection,

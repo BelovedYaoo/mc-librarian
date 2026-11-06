@@ -17,6 +17,12 @@ from typing import Final
 from mc_librarian.retrieval.channels import Candidate, Channel
 
 RRF_K: Final = 60
+# 融合前每路只保留前 N 条。
+#
+# 不截断时长尾会把强信号淹掉：摘要通道一次给 50 条，名次 4 和名次 50 的分差只有 0.002，
+# 于是一个「引用通道第 2 名」（说明这个词确实被谁调用）根本浮不上来。截断到 10 条后，
+# 各路的名次才有可比性——实测 30 题中文评测从 12/30 提到 14/30（issue #23）。
+CHANNEL_CANDIDATE_CAP: Final = 10
 WHY_ORDER: Final[tuple[Channel, ...]] = ("summary", "symbol", "literal", "reference", "patch")
 
 
@@ -38,7 +44,7 @@ def fuse(channels: dict[Channel, list[Candidate]]) -> list[FusedHit]:
         seen: set[str] = set()
         rank = 0
 
-        for candidate in channels.get(channel, []):
+        for candidate in channels.get(channel, [])[:CHANNEL_CANDIDATE_CAP]:
             key = candidate.key
 
             # 同一路里同一实体只算一次（取最靠前的一次），否则单路重复命中会虚增分数。
