@@ -1,6 +1,7 @@
 import type { Components } from 'react-markdown';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Children, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import Box from '@mui/material/Box';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
@@ -131,6 +132,72 @@ function parseCodeReference(text: string): Citation | null {
   return { path: matched[1], lines: [start, end] };
 }
 
+const CODE_REFERENCE_ALL = new RegExp(CODE_REFERENCE.source, 'g');
+
+/** 引用片段的统一样式：点线 + 手型，悬停有底色。内联代码与纯文本共用。 */
+const referenceSx = {
+  cursor: 'pointer',
+  textDecoration: 'underline dotted',
+  textUnderlineOffset: '3px',
+  '&:hover': { backgroundColor: 'action.selected' },
+} as const;
+
+/**
+ * 把一段**纯文本**里的代码引用拆成「文本 + 可点击片段」。
+ *
+ * 模型写的引用有两种形态：包在反引号里的行内代码（由 `code` 渲染器处理），以及直接写在
+ * 正文里的裸路径（`NaturalSpawner.java:499-506`）。后者更常见，不处理的话正文里绝大多数
+ * 位置都点不开。
+ */
+function splitReferences(
+  text: string,
+  onOpenCitation: (citation: Citation) => void
+): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+
+  for (const matched of text.matchAll(CODE_REFERENCE_ALL)) {
+    const start = matched.index ?? 0;
+
+    if (start > cursor) nodes.push(text.slice(cursor, start));
+
+    const citation: Citation = {
+      path: matched[1],
+      lines: [Number(matched[2]), matched[3] === undefined ? Number(matched[2]) : Number(matched[3])],
+    };
+
+    nodes.push(
+      <Box
+        component="span"
+        key={`ref-${start}`}
+        onClick={() => onOpenCitation(citation)}
+        title={`打开 ${citation.path}:${citation.lines.join('-')}`}
+        sx={referenceSx}
+      >
+        {matched[0]}
+      </Box>
+    );
+
+    cursor = start + matched[0].length;
+  }
+
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+
+  return nodes;
+}
+
+/** 把子节点里的纯文本过一遍 `splitReferences`；元素节点原样保留。 */
+function withReferences(
+  children: ReactNode,
+  onOpenCitation?: (citation: Citation) => void
+): ReactNode {
+  if (onOpenCitation === undefined) return children;
+
+  return Children.map(children, (child) =>
+    typeof child === 'string' ? splitReferences(child, onOpenCitation) : child
+  );
+}
+
 /** markdown 渲染器：表格横向可滚；内联代码里带路径+行号的做成可点击。 */
 function buildComponents(onOpenCitation?: (citation: Citation) => void): Components {
   return {
@@ -138,6 +205,13 @@ function buildComponents(onOpenCitation?: (citation: Citation) => void): Compone
       <Box sx={{ overflowX: 'auto', my: 1.5 }}>
         <table {...props} />
       </Box>
+    ),
+    // 段落与列表项是引用出现最多的地方：把其中的裸路径也变成可点击。
+    p: ({ node: _node, children, ...props }) => (
+      <p {...props}>{withReferences(children, onOpenCitation)}</p>
+    ),
+    li: ({ node: _node, children, ...props }) => (
+      <li {...props}>{withReferences(children, onOpenCitation)}</li>
     ),
     code: ({ node: _node, className, children, ...props }) => {
       const raw = String(children ?? '');
@@ -159,13 +233,8 @@ function buildComponents(onOpenCitation?: (citation: Citation) => void): Compone
           {...props}
           onClick={() => onOpenCitation?.(citation)}
           title={`打开 ${citation.path}:${citation.lines.join('-')}`}
-          sx={{
-            cursor: 'pointer',
-            // 点线而不是实线下划线：与普通内联代码的观感拉开一档，又不至于像链接那么抢眼。
-            textDecoration: 'underline dotted',
-            textUnderlineOffset: '3px',
-            '&:hover': { backgroundColor: 'action.selected' },
-          }}
+          // 点线而不是实线下划线：与普通内联代码的观感拉开一档，又不至于像链接那么抢眼。
+          sx={referenceSx}
         >
           {children}
         </Box>
