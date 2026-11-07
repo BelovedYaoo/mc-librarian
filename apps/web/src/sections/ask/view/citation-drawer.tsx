@@ -1,6 +1,6 @@
 import type { Citation, FileSlice } from 'src/lib/api-client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -382,13 +382,38 @@ function FileViewer({
     if (row === null) return;
 
     element.scrollTop = Math.max(0, row.offsetTop - element.clientHeight * 0.35);
-  }, [focusLine, startLine, slice.content, rows.length]);
+    // 不依赖 `rows.length`：折叠会改变行数，如果这里跟着重跑，会把刚补偿好的视口又拽回引用行。
+  }, [focusLine, startLine, slice.content]);
+
+  // 折叠会一次性插入/移除几十行，`scrollTop` 是绝对像素值——不补偿的话视口会跳到别处。
+  // 记下「点击的那一行」相对视口的位置，渲染完成后把它放回原位。
+  const anchor = useRef<{ lineNo: number; offset: number } | null>(null);
 
   const toggleFold = (start: number) => {
+    const element = scrollRef.current;
+    const row = element?.querySelector<HTMLElement>(`[data-line="${start}"]`);
+
+    if (element !== null && row !== null && row !== undefined) {
+      anchor.current = { lineNo: start, offset: row.offsetTop - element.scrollTop };
+    }
+
     setFolded((current) =>
       current.includes(start) ? current.filter((item) => item !== start) : [...current, start]
     );
   };
+
+  // 用 layout effect：在浏览器绘制前校正，否则会先看到一次跳动。
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    const pending = anchor.current;
+
+    if (element === null || pending === null) return;
+
+    anchor.current = null;
+    const row = element.querySelector<HTMLElement>(`[data-line="${pending.lineNo}"]`);
+
+    if (row !== null) element.scrollTop = Math.max(0, row.offsetTop - pending.offset);
+  }, [folded]);
 
   return (
     <Box
