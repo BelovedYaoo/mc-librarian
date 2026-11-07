@@ -8,10 +8,14 @@ HTTP 端点与这里共用一份实现。`version` 由请求给出，模型改�
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Final, cast
 
 from mc_librarian.config import Settings
+from mc_librarian.indexing import query
 from mc_librarian.indexing.text import split_lines
 from mc_librarian.retrieval import (
     RetrievalNotFound,
@@ -159,12 +163,34 @@ class ToolOutcome:
 
 
 class ToolBox:
-    """在某个版本的索引 + 源码上执行工具。`execute` 是阻塞的，调用方用 `asyncio.to_thread`。"""
+    """在某个版本的索引 + 源码上执行工具。`execute` 是阻塞的，调用方用 `asyncio.to_thread`。
 
-    def __init__(self, connection: sqlite3.Connection, settings: Settings, version: str) -> None:
-        self._connection = connection
+    **每次工具调用自己开一个只读连接、用完立刻关**，不在实例上持有连接。
+
+    为什么不共享：并发工具会共用一个连接，而 CPython 的 per-connection 语句缓存在跨线程时
+    无锁共享——实测 400 次里 19 次 `bad parameter or other API misuse`、2000 次里出现
+    静默读错行（`#27`）。
+
+    为什么不池化/线程本地：实测开+读+关只要 0.17ms（80 次并发检索，每次调用 27.0s vs 共享
+    99.9s）。而 `asyncio.to_thread` 的线程是**跨请求复用**的，线程本地连接会按「线程 × 版本」
+    累积且永不关闭（5 版本 × 32 线程 × 默认 2MB 页缓存 ≈ 300MB），与 2C/2G 的目标冲突。
+    每次调用开一个：没有生命周期状态、不可能泄漏，且保住了 3.7× 的并发收益。
+    """
+
+    def __init__(self, index_path: Path, settings: Settings, version: str) -> None:
+        self._index_path = index_path
         self._settings = settings
         self._version = version
+
+    @contextmanager
+    def _index(self) -> Iterator[sqlite3.Connection]:
+        """本次工具调用专用的只读连接（作用域就是一次调用）。"""
+        connection = query.open_readonly(self._index_path)
+
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def execute(self, name: str, args: dict[str, Any]) -> ToolOutcome:
         """执行一次工具调用；参数不合法 / 目标不存在都返回 `ok=False`，不抛异常。"""
@@ -206,7 +232,8 @@ class ToolBox:
         )
         # 问答循环里**总是走智能检索**：模型自己写的查询未必是最优召回词，多花两次 LLM 调用
         # 换召回（实测纯字面 43% → 智能 93%）。纯标识符查询内部会直通字面，不会白花。
-        response = search_smart(self._connection, self._settings, request)
+        with self._index() as connection:
+            response = search_smart(connection, self._settings, request)
 
         return ToolOutcome(
             ok=True,
@@ -216,12 +243,13 @@ class ToolBox:
         )
 
     def _symbol(self, args: dict[str, Any]) -> ToolOutcome:
-        matches = symbol_matches(
-            self._connection,
-            _require_str(args, "name"),
-            fuzzy=bool(args.get("fuzzy", True)),
-            kind=str(args.get("kind") or "any"),
-        )
+        with self._index() as connection:
+            matches = symbol_matches(
+                connection,
+                _require_str(args, "name"),
+                fuzzy=bool(args.get("fuzzy", True)),
+                kind=str(args.get("kind") or "any"),
+            )
 
         return ToolOutcome(
             ok=True,
@@ -234,12 +262,13 @@ class ToolBox:
         )
 
     def _references(self, args: dict[str, Any]) -> ToolOutcome:
-        response = reference_list(
-            self._connection,
-            self._version,
-            _require_str(args, "symbol"),
-            limit=_bounded_int(args, "limit", 50, 1, REFERENCES_MAX_LIMIT),
-        )
+        with self._index() as connection:
+            response = reference_list(
+                connection,
+                self._version,
+                _require_str(args, "symbol"),
+                limit=_bounded_int(args, "limit", 50, 1, REFERENCES_MAX_LIMIT),
+            )
 
         return ToolOutcome(
             ok=True,
@@ -252,9 +281,10 @@ class ToolBox:
         )
 
     def _outline(self, args: dict[str, Any]) -> ToolOutcome:
-        outline = file_outline(
-            self._connection, self._settings, self._version, _require_str(args, "path")
-        )
+        with self._index() as connection:
+            outline = file_outline(
+                connection, self._settings, self._version, _require_str(args, "path")
+            )
 
         return ToolOutcome(
             ok=True,
@@ -274,7 +304,9 @@ class ToolBox:
         # 补丁文件的正文在索引库里（`patches` 表的 hunk），不在源码树上。
         # 模型常从检索命中的 `path`（`xxx.java.patch`）直接来读，这里接住，不让它白跑一轮。
         if text is None:
-            text = read_patch(self._connection, path)
+            # 只有补丁回退才需要索引库：普通源码文件不白开连接。
+            with self._index() as connection:
+                text = read_patch(connection, path)
 
         if text is None:
             raise RetrievalNotFound(f"源码树里没有这个文件：{path}")

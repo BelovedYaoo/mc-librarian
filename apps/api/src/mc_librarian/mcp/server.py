@@ -172,9 +172,8 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
     def searchable_versions() -> list[str]:
         return [row["version"] for row in version_states() if row["searchable"]]
 
-    @contextmanager
-    def index_of(version: str) -> Iterator[sqlite3.Connection]:
-        """按版本打开只读索引库。未注册 / 无索引文件时抛 `LookupError`（调用方转成 error JSON）。
+    def resolve_index(version: str) -> Path:
+        """版本 → 索引文件路径（校验注册与文件存在）。未注册/文件缺失抛 `LookupError`。
 
         `LookupError` 的消息里**直接带上可检索版本清单**：只说「先调 versions」会让模型多绕
         一轮，而版本串本身模型是猜不出来的（`neoforge-21.1.265+1.21.1` 这种）。
@@ -197,8 +196,13 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
                 f"版本 {version} 的索引文件不存在：{path}。可检索的版本：{_join(available)}"
             )
 
+        return path
+
+    @contextmanager
+    def index_of(version: str) -> Iterator[sqlite3.Connection]:
+        """按版本打开只读索引库（工具调用用完即关）。"""
         # `check_same_thread=False`：MCPServer 可能把同步工具丢到线程池执行，连接建在事件循环线程。
-        connection = query.open_readonly(path, check_same_thread=False)
+        connection = query.open_readonly(resolve_index(version), check_same_thread=False)
 
         try:
             yield connection
@@ -382,9 +386,10 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
             return _error(f"模型未配置：{error}")
 
         try:
-            with index_of(version) as index:
-                run = _new_run(config, index, config_now, question, version)
-                await _drain(run)
+            # 工具自己按调用开连接（`ToolBox._index`），这里只需要路径。
+            index_db = resolve_index(version)
+            run = _new_run(config, index_db, config_now, question, version)
+            await _drain(run)
         except LookupError as error:
             return _error(str(error))
 
@@ -426,12 +431,12 @@ def _detail(value: str) -> SearchDetail:
 
 
 def _new_run(
-    config: Any, index: sqlite3.Connection, settings: Settings, question: str, version: str
+    config: Any, index_db: Path, settings: Settings, question: str, version: str
 ) -> AskRun:
     """构造一次问答循环。与 `/v1/ask` 用同一套 `AskRun` + `ToolBox`，只是不落会话历史。"""
     return AskRun(
         client=OpenAiCompatChatClient(config),
-        toolbox=ToolBox(index, settings, version),
+        toolbox=ToolBox(index_db, settings, version),
         question=question,
         version=version,
         max_steps=settings.ask_max_steps,

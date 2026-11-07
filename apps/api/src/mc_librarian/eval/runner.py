@@ -167,7 +167,7 @@ async def _measure_steps(
 ) -> list[int]:
     """逐个问题跑 `/v1/ask` 的循环，数每题 `AskStep` 的条数。"""
     client = OpenAiCompatChatClient(config)
-    toolbox = ToolBox(index, settings, version)
+    toolbox = ToolBox(index_path(settings.data_dir, version), settings, version)
     counts: list[int] = []
 
     for question in questions:

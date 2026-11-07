@@ -41,7 +41,6 @@ from mc_librarian.config import (
     resolve_llm_config,
 )
 from mc_librarian.db import Database, transaction
-from mc_librarian.indexing import query
 from mc_librarian.problems import ProblemException, problem_response
 from mc_librarian.schemas import AskRequest, AskResponse, User
 
@@ -118,18 +117,16 @@ async def ask(
         )
 
     # 槽位从这一刻起被占用：到响应返回之前的任何失败路径都必须归还，否则闸门会永久收紧。
-    index: sqlite3.Connection | None = None
-
     try:
         index_path = require_index(conn, settings, body.version)
         config = resolve_llm_config(settings)
-        index = query.open_readonly(index_path, check_same_thread=False)
         # 会话解析 / 新建 + 用户问题落库。给错 `conversation_id` 时这里抛 404，与其余失败路径
         # 一样走到 `except BaseException` 归还槽位。
         conversation_id = _open_conversation(conn, user, body)
         run = AskRun(
             client=OpenAiCompatChatClient(config),
-            toolbox=ToolBox(index, settings, body.version),
+            # 工具自己按调用开连接（`ToolBox._index`），这里只给路径。
+            toolbox=ToolBox(index_path, settings, body.version),
             question=body.question,
             version=body.version,
             # 省略时用服务端设置（设置页可改，见 `settings.ask.max_steps`）。
@@ -141,10 +138,10 @@ async def ask(
             conversation_id=conversation_id,
         )
     except LlmConfigError as error:
-        _abandon(index, limiter)
+        _abandon(limiter)
         raise ProblemException(503, "服务不可用", str(error)) from error
     except BaseException:
-        _abandon(index, limiter)
+        _abandon(limiter)
         raise
 
     runs: AskRuns = request.app.state.ask_runs
@@ -157,7 +154,6 @@ async def ask(
             user=user,
             model=config.model,
             version=body.version,
-            index=index,
             limiter=limiter,
             settings=settings,
         ),
@@ -194,11 +190,8 @@ async def _sse_stream(running: RunningAsk) -> AsyncIterator[bytes]:
         yield _encode(event)
 
 
-def _abandon(index: sqlite3.Connection | None, limiter: AskLimiter) -> None:
-    """响应还没返回就失败：关掉可能已打开的索引连接，并归还槽位。"""
-    if index is not None:
-        index.close()
-
+def _abandon(limiter: AskLimiter) -> None:
+    """响应还没返回就失败：归还槽位（连接由各工具自己开/关，这里没有要收的）。"""
     limiter.release()
 
 
@@ -341,7 +334,6 @@ def _finalize_ask(
     user: User,
     model: str,
     version: str,
-    index: sqlite3.Connection,
     limiter: AskLimiter,
     settings: Settings,
 ) -> None:
@@ -352,7 +344,6 @@ def _finalize_ask(
     """
     # 槽位先还：后面几步即使失败，槽位也不会漏（漏了就没有任何补救路径）。
     limiter.release()
-    index.close()
     _record_answer(database, run)
     _record_usage(database, run, user, model, version, settings)
 
