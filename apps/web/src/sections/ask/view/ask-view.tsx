@@ -168,8 +168,11 @@ function turnsFromDetail(detail: ConversationDetail): Turn[] {
 
     turns.push({
       question: message.content,
-      // 每轮记下当时用的版本（迁移 v10 之前落库的历史行为 null → 回退到当前选择）。
-      version: assistant?.version ?? '',
+      // 每轮记下当时用的版本。**用户消息上也存了版本**：助手消息要等生成结束才落库，
+      // 刷新时若还在生成，就只有用户消息可读——只读助手消息会误判成「版本未知」
+      // （生产上表现为「此轮版本未知，按当前选择的 X 打开」）。
+      // 迁移 v10 之前落库的行为 null，才回退到当前选择。
+      version: message.version ?? assistant?.version ?? '',
       // 服务端存了有序片段（v13+）就直接用：轨迹与正文的交替顺序能原样还原。
       // 更早的历史没有片段，退化成「整段正文」——那时的轨迹本来就没落库。
       segments: segmentsFromHistory(assistant),
