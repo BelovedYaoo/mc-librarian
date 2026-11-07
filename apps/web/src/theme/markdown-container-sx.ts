@@ -1,4 +1,6 @@
 import type { Theme } from '@mui/material/styles';
+
+import { alpha } from '@mui/material/styles';
 // ----------------------------------------------------------------------
 
 /**
@@ -86,13 +88,39 @@ export function markdownContainerSx(theme: Theme) {
       borderRadius: 0.5,
       bgcolor: 'rgba(0, 167, 111, 0.08)',
     },
-    // 代码块：底色用调色板里的「凹陷」表面——浅色是淡绿、暗色是同系深绿，两态下 token 色都读得出来。
+    // 代码块的外壳（底色/边框/header/限高）由 `CodeBlockPre` 提供，这里只把 `pre` 自身的中
+    // 间距与底色清掉——否则 `& pre` 的后代选择器（特异性更高）会盖掉组件上的 `sx`。
     '& pre': {
-      my: 1.5,
-      p: 1.5,
-      bgcolor: 'background.neutral',
-      borderRadius: 1,
-      overflowX: 'auto',
+      m: 0,
+      p: 0,
+      bgcolor: 'transparent',
+      borderRadius: 0,
+      overflowX: 'visible',
+    },
+    '& .code-line': {
+      display: 'block',
+      position: 'relative',
+      counterIncrement: 'code-line',
+      minHeight: '1.6em',
+      pl: '3.4em',
+      pr: 2,
+      // 行尾多余空白不撑出横向滚动；长行本身仍按 `pre` 横向滚。
+      '&::before': {
+        content: 'counter(code-line)',
+        position: 'absolute',
+        left: 0,
+        width: '2.4em',
+        textAlign: 'right',
+        color: 'text.secondary',
+        opacity: 0.6,
+        userSelect: 'none',
+      },
+    },
+    '& .code-line.diff-add': {
+      bgcolor: alpha(theme.palette.success.main, 0.12),
+    },
+    '& .code-line.diff-del': {
+      bgcolor: alpha(theme.palette.error.main, 0.12),
     },
     // 代码正文与 token 色。`rehype-highlight` 把 `.hljs` 加在 `<code>` 上、`.hljs-*` 加在 token 的
     // `<span>` 上，所以在这里统一覆盖；不引任何 highlight.js 主题 CSS。
@@ -100,6 +128,8 @@ export function markdownContainerSx(theme: Theme) {
       display: 'block',
       bgcolor: 'transparent',
       p: 0,
+      // 一行一个 `span.code-line`（rehype 阶段切好），行号用 CSS counter——不占复制内容。
+      counterReset: 'code-line',
       fontSize: '0.8125rem',
       lineHeight: 1.6,
       whiteSpace: 'pre',

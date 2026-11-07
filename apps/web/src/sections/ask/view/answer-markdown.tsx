@@ -10,6 +10,8 @@ import remarkGfm from 'remark-gfm';
 import type { Citation } from 'src/lib/api-client';
 import { markdownContainerSx } from 'src/theme';
 
+import { CodeBlockPre, rehypeCodeLines } from './code-block';
+
 // ----------------------------------------------------------------------
 
 /** ~80ms 的节流窗口：足够把几十个 delta 合并成几次渲染，又不至于看出卡顿。 */
@@ -49,7 +51,8 @@ export function AnswerMarkdown({
     <Box sx={markdownContainerSx}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        // 先让 highlight.js 上色，再按行摊平（行号/复制/diff 着色都基于摊平结果）。
+        rehypePlugins={[rehypeHighlight, rehypeCodeLines]}
         components={components}
       >
         {closeOpenFence(source)}
@@ -230,6 +233,8 @@ function buildComponents(
         <table {...props} />
       </Box>
     ),
+    // 代码块：语言标签 + 复制 + 行号 + 限高内滚（见 `code-block.tsx`）。
+    pre: (props) => <CodeBlockPre {...props} />,
     // 段落与列表项是引用出现最多的地方：把其中的裸路径也变成可点击。
     p: ({ node: _node, children, ...props }) => (
       <p {...props}>{withReferences(children, onOpenCitation, citations)}</p>
