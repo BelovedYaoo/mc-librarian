@@ -63,6 +63,8 @@ export function CitationDrawer({
   const [copied, setCopied] = useState(false);
   // 自动换行：抽屉很高，横向滚动条会落在最底部够不到（实测长行被右缘截断）。
   const [wrap, setWrap] = useState(true);
+  // 只看引用：大文件里引用常常在第 900 行，全文铺开时找不到重点。
+  const [focusOnly, setFocusOnly] = useState(false);
 
   useEffect(() => {
     if (!open || citation === null) return undefined;
@@ -172,6 +174,17 @@ export function CitationDrawer({
 
               <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', ml: 'auto' }}>
                 <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  只看引用
+                </Typography>
+                <Switch
+                  size="small"
+                  checked={focusOnly}
+                  onChange={(e) => setFocusOnly(e.target.checked)}
+                />
+              </Stack>
+
+              <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
                   自动换行
                 </Typography>
                 <Switch size="small" checked={wrap} onChange={(e) => setWrap(e.target.checked)} />
@@ -202,6 +215,7 @@ export function CitationDrawer({
 
                 <FileViewer
                   wrap={wrap}
+                  focusOnly={focusOnly}
                   slice={state.slice}
                   highlight={citation.lines}
                   focusLine={citation.lines[0]}
@@ -221,16 +235,68 @@ export function CitationDrawer({
  * 整个文件的分行视图：按滚动位置只渲染可视区 ±200 行（几千行的文件不会生成几千个 DOM 节点）。
  * 行号固定宽度，高亮行用明显底色；打开时把 `focusLine` 滚到「居中偏上」。
  */
+type FoldRegion = { start: number; end: number; label: string };
+
+/**
+ * Java 文件里可以折叠的区间。目前只做 **import 块**——它最长、最没信息量，也是 IDEA 默认折叠的。
+ *
+ * 识别方式：连续的 `import ...` 行（允许中间夹空行）。返回的 `start`/`end` 是**文件行号**
+ * （与 `slice.start` 对齐），不是数组下标。
+ */
+function foldableRegions(lines: string[], startLine: number): FoldRegion[] {
+  const regions: FoldRegion[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    if (!/^\s*import\s/.test(lines[index])) {
+      index += 1;
+      continue;
+    }
+
+    const first = index;
+    let last = index;
+    let cursor = index + 1;
+
+    while (cursor < lines.length) {
+      if (/^\s*import\s/.test(lines[cursor])) {
+        last = cursor;
+        cursor += 1;
+        continue;
+      }
+      // 空行后面还跟着 import：仍算同一块（有些文件按包分组留空行）。
+      if (
+        /^\s*$/.test(lines[cursor]) &&
+        cursor + 1 < lines.length &&
+        /^\s*import\s/.test(lines[cursor + 1])
+      ) {
+        cursor += 1;
+        continue;
+      }
+      break;
+    }
+
+    regions.push({ start: startLine + first, end: startLine + last, label: 'import' });
+    index = last + 1;
+  }
+
+  return regions;
+}
+
+/** 「只看引用」时上下各留多少行上下文。 */
+const FOCUS_CONTEXT_LINES = 30;
+
 function FileViewer({
   slice,
   highlight,
   focusLine,
   wrap,
+  focusOnly,
 }: {
   slice: FileSlice;
   highlight: readonly number[];
   focusLine: number;
   wrap: boolean;
+  focusOnly: boolean;
 }) {
   // 按换行切行；`split` 的入参是单字符换行符。
   const lines = useMemo(() => slice.content.split(NEWLINE), [slice]);
@@ -248,6 +314,61 @@ function FileViewer({
     themeForMode(palette.mode)
   );
 
+  const regions = useMemo(() => foldableRegions(lines, startLine), [lines, startLine]);
+  // 折叠状态按「区间起始行号」记；默认把 import 折叠起来（和 IDEA 一致）。
+  const [folded, setFolded] = useState<readonly number[]>([]);
+
+  useEffect(() => {
+    setFolded(regions.map((region) => region.start));
+  }, [regions]);
+
+  // 引用行落在折叠区间里时必须展开它，否则打开抽屉看到的是「import 已折叠」而不是代码。
+  useEffect(() => {
+    setFolded((current) =>
+      current.filter(
+        (start) =>
+          !regions.some(
+            (region) => region.start === start && focusLine >= region.start && focusLine <= region.end
+          )
+      )
+    );
+  }, [focusLine, regions]);
+
+  const foldedStarts = useMemo(() => new Set(folded), [folded]);
+  const regionByStart = useMemo(
+    () => new Map(regions.map((region) => [region.start, region])),
+    [regions]
+  );
+
+  const focusWindow = focusOnly
+    ? ([highlight[0] - FOCUS_CONTEXT_LINES, highlight[1] + FOCUS_CONTEXT_LINES] as const)
+    : null;
+
+  // 生成要渲染的行：折叠区间收成一行摘要；「只看引用」再把窗口外的行跳过。
+  const rows: Array<
+    | { kind: 'line'; lineNo: number; index: number; text: string; foldable: FoldRegion | null }
+    | { kind: 'fold'; region: FoldRegion }
+  > = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const lineNo = startLine + index;
+    const region = regionByStart.get(lineNo) ?? null;
+
+    if (region !== null && foldedStarts.has(region.start)) {
+      rows.push({ kind: 'fold', region });
+      index += region.end - region.start;
+      continue;
+    }
+
+    if (focusWindow !== null && (lineNo < focusWindow[0] || lineNo > focusWindow[1])) continue;
+
+    rows.push({ kind: 'line', lineNo, index, text: lines[index], foldable: region });
+  }
+
+  const hiddenByFocus = focusOnly
+    ? lines.length - rows.filter((row) => row.kind === 'line').length
+    : 0;
+
   useEffect(() => {
     const element = scrollRef.current;
 
@@ -261,7 +382,13 @@ function FileViewer({
     if (row === null) return;
 
     element.scrollTop = Math.max(0, row.offsetTop - element.clientHeight * 0.35);
-  }, [focusLine, startLine, slice.content]);
+  }, [focusLine, startLine, slice.content, rows.length]);
+
+  const toggleFold = (start: number) => {
+    setFolded((current) =>
+      current.includes(start) ? current.filter((item) => item !== start) : [...current, start]
+    );
+  };
 
   return (
     <Box
@@ -277,9 +404,64 @@ function FileViewer({
         fontSize: 13,
       }}
     >
-      {lines.map((line, index) => {
-        const lineNo = startLine + index;
+      {focusOnly && hiddenByFocus > 0 && (
+        <Box
+          sx={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 1,
+            px: 1.5,
+            py: 0.5,
+            fontSize: 12,
+            color: 'text.secondary',
+            bgcolor: 'background.paper',
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+          }}
+        >
+          只看引用 ±{FOCUS_CONTEXT_LINES} 行（隐藏了 {hiddenByFocus} 行，关掉开关可看全文）
+        </Box>
+      )}
+
+      {rows.map((row) => {
+        if (row.kind === 'fold') {
+          const { region } = row;
+
+          return (
+            <Box
+              key={`fold-${region.start}`}
+              data-line={region.start}
+              onClick={() => toggleFold(region.start)}
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                px: 1,
+                height: LINE_HEIGHT,
+                lineHeight: `${LINE_HEIGHT}px`,
+                cursor: 'pointer',
+                color: 'text.secondary',
+                fontStyle: 'italic',
+                bgcolor: 'action.hover',
+                borderTop: '1px solid',
+                borderBottom: '1px solid',
+                borderColor: 'divider',
+                '&:hover': { bgcolor: 'action.selected' },
+              }}
+            >
+              <Box component="span" sx={{ width: 12, textAlign: 'center' }}>
+                ▸
+              </Box>
+              <Box component="span">
+                {region.label} …（{region.end - region.start + 1} 行，第 {region.start}-{region.end} 行）
+              </Box>
+            </Box>
+          );
+        }
+
+        const { lineNo, text, index, foldable } = row;
         const marked = lineNo >= highlight[0] && lineNo <= highlight[1];
+        const canFold = foldable !== null && foldable.start === lineNo;
 
         return (
           <Box
@@ -298,16 +480,31 @@ function FileViewer({
           >
             <Box
               component="span"
+              onClick={canFold ? () => toggleFold(lineNo) : undefined}
               sx={{
-                width: 56,
+                width: 14,
+                flexShrink: 0,
+                textAlign: 'center',
+                color: 'text.secondary',
+                cursor: canFold ? 'pointer' : 'default',
+                userSelect: 'none',
+                opacity: canFold ? 1 : 0,
+                '&:hover': { color: 'text.primary' },
+              }}
+            >
+              ▾
+            </Box>
+
+            <Box
+              component="span"
+              sx={{
+                width: 52,
                 flexShrink: 0,
                 pr: 1.5,
                 textAlign: 'right',
                 // 用 `text.secondary` 而不是 `text.disabled`：灰色 disabled 在高亮行
                 // （`warning.light`）上只有 1.96:1，行号会消失。暗色下 `text.secondary` 是
-                // `grey[400]`（`#C4CDD5`），在高亮行 `#1C3A30` 上 7.68:1、在普通行底
-                // （`action.hover` 叠 `paper`）上 8.45:1，仍明显暗于代码正文（`#E1E4E8` 的
-                // 9.70:1），「比正文淡」的行号观感还在，所以不另给行号单独取色。
+                // `#95A1B2`，在高亮行 `#2C313C` 上 4.52:1、在普通行底上 5.88:1。
                 color: 'text.secondary',
                 userSelect: 'none',
               }}
@@ -325,7 +522,7 @@ function FileViewer({
                 pr: 1,
               }}
             >
-              <CodeText line={line} tokens={highlighted?.[index] ?? null} />
+              <CodeText line={text} tokens={highlighted?.[index] ?? null} />
             </Box>
           </Box>
         );
