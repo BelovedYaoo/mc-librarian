@@ -77,16 +77,14 @@ from mc_librarian.indexing.summarize import (
 )
 from mc_librarian.jobs import store
 from mc_librarian.schemas import LogLevel
+from mc_librarian.stages import FINAL_STAGE, SOURCE_STAGES, STAGES
 
 logger = logging.getLogger("mc_librarian.jobs")
 
 # 全部阶段的规范顺序；`stages_for` 按任务参数选子集。
 # 给了 `options.source_dir` 的任务从 `parse` 开始（`SOURCE_STAGES`）；不给则从官方 jar 起跑
 # 完整五段（`STAGES`）。
-STAGES: Final[tuple[str, ...]] = ("download", "decompile", "parse", "summarize", "finalize")
-SOURCE_STAGES: Final[tuple[str, ...]] = STAGES[2:]
-# 收尾阶段，取消时用来描述停在哪（五段全跑时）。
-FINAL_STAGE: Final = "finalize"
+# 阶段序列的唯一来源是 `mc_librarian.stages`（`db` 的 CHECK 约束也由它生成）。
 
 # 停止 runner 时最多等一个任务收尾多久，超时就取消 asyncio 任务。
 STOP_TIMEOUT_S: Final = 5.0

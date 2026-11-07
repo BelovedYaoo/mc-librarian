@@ -17,6 +17,8 @@ from mc_librarian.problems import Problem
 Role = Literal["admin", "user"]
 JobKind = Literal["index"]
 JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
+# 取值域必须与 `stages.STAGES` 一致；`tests/test_stages.py` 断言两边相等
+# （mypy 不支持 `Literal[*tuple]`，只能各写一份，靠测试防漂移）。
 JobStage = Literal["download", "decompile", "parse", "summarize", "finalize"]
 LogLevel = Literal["debug", "info", "warn", "error"]
 

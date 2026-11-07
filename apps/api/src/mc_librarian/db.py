@@ -21,6 +21,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
+from mc_librarian.stages import sql_stage_check
+
 CONTROL_DB_NAME: Final = "control.sqlite"
 
 # 定宽、带 Z 的 UTC 时间戳：`expires_at > now` 之类的比较可以按字符串做。
@@ -158,7 +160,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(
         version=4,
         statements=(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS jobs (
               id               TEXT PRIMARY KEY,
               kind             TEXT NOT NULL CHECK (kind IN ('index')),
@@ -166,14 +168,12 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
               status           TEXT NOT NULL CHECK (
                                  status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')
                                ),
-              stage            TEXT CHECK (stage IS NULL OR stage IN (
-                                 'parse', 'summarize', 'finalize'
-                               )),
+              stage            TEXT CHECK ({sql_stage_check()}),
               progress         REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
               message          TEXT,
               error            TEXT,
-              checkpoint       TEXT NOT NULL DEFAULT '{}',
-              options          TEXT NOT NULL DEFAULT '{}',
+              checkpoint       TEXT NOT NULL DEFAULT '{{}}',
+              options          TEXT NOT NULL DEFAULT '{{}}',
               cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
               created_at       TEXT NOT NULL,
               started_at       TEXT,
@@ -219,7 +219,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         version=5,
         foreign_keys_off=True,
         statements=(
-            """
+            f"""
             CREATE TABLE jobs_v5 (
               id               TEXT PRIMARY KEY,
               kind             TEXT NOT NULL CHECK (kind IN ('index')),
@@ -227,14 +227,12 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
               status           TEXT NOT NULL CHECK (
                                  status IN ('queued', 'running', 'succeeded', 'failed', 'canceled')
                                ),
-              stage            TEXT CHECK (stage IS NULL OR stage IN (
-                                 'download', 'decompile', 'parse', 'summarize', 'finalize'
-                               )),
+              stage            TEXT CHECK ({sql_stage_check()}),
               progress         REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
               message          TEXT,
               error            TEXT,
-              checkpoint       TEXT NOT NULL DEFAULT '{}',
-              options          TEXT NOT NULL DEFAULT '{}',
+              checkpoint       TEXT NOT NULL DEFAULT '{{}}',
+              options          TEXT NOT NULL DEFAULT '{{}}',
               cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
               created_at       TEXT NOT NULL,
               started_at       TEXT,

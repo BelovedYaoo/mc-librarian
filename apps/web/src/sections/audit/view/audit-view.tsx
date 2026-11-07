@@ -21,6 +21,8 @@ import Typography from '@mui/material/Typography';
 import { useAudit } from 'src/hooks';
 import { listUsers } from 'src/lib/api-client';
 
+import { formatTime } from 'src/utils/format-time';
+
 // ----------------------------------------------------------------------
 
 /**
@@ -183,10 +185,4 @@ function formatDetail(entry: AuditEntry): string {
   const keys = Object.keys(entry.detail ?? {});
 
   return keys.length === 0 ? '—' : JSON.stringify(entry.detail);
-}
-
-function formatTime(value: string): string {
-  const parsed = new Date(value);
-
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN');
 }

@@ -41,7 +41,13 @@ from mc_librarian.config import (
     resolve_llm_config,
 )
 from mc_librarian.db import Database, transaction
-from mc_librarian.problems import ProblemException, problem_response
+from mc_librarian.problems import (
+    TITLE_NOT_FOUND as NOT_FOUND_TITLE,
+)
+from mc_librarian.problems import (
+    ProblemException,
+    problem_response,
+)
 from mc_librarian.schemas import AskRequest, AskResponse, User
 
 logger = logging.getLogger("mc_librarian.api.answer")
@@ -50,7 +56,6 @@ router = APIRouter()
 
 ASK_DISABLED_TITLE: Final = "问答已暂停"
 TOO_MANY_TITLE: Final = "请求过于频繁"
-NOT_FOUND_TITLE: Final = "资源不存在"
 JSON_ACCEPT: Final = "application/json"
 # 浏览器与反代对 SSE 的常规要求：不缓存、不缓冲（nginx 默认会缓冲 `text/event-stream`）。
 SSE_HEADERS: Final = {

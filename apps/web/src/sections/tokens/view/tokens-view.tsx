@@ -27,6 +27,8 @@ import { McpGuide } from './mcp-guide';
 
 import { createToken, listTokens, revokeToken } from 'src/lib/api-client';
 
+import { formatTime } from 'src/utils/format-time';
+
 // ----------------------------------------------------------------------
 
 /**
@@ -289,12 +291,3 @@ export function TokensView() {
 }
 
 // ----------------------------------------------------------------------
-
-/** 后端时间是 UTC 的 `YYYY-MM-DDTHH:MM:SSZ`，按本地时区展示。 */
-function formatTime(value?: string): string {
-  if (!value) return '—';
-
-  const date = new Date(value);
-
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN');
-}

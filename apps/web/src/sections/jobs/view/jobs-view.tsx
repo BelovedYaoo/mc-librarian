@@ -20,6 +20,8 @@ import { useJobLogs, useJobs } from 'src/hooks';
 
 import { ApiError, cancelJob, retryJob } from 'src/lib/api-client';
 
+import { formatTime } from 'src/utils/format-time';
+
 // ----------------------------------------------------------------------
 
 // 阶段枚举与后端 `Job.stage` 一致（五段）：`#4` 的带源目录任务跑后三段，
@@ -312,10 +314,4 @@ function Row({ label, value, mono = false }: RowProps) {
       </Typography>
     </Stack>
   );
-}
-
-function formatTime(value: string): string {
-  const parsed = new Date(value);
-
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN');
 }

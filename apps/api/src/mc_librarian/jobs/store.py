@@ -11,13 +11,18 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from mc_librarian.db import utc_now
 from mc_librarian.schemas import Job, JobLog, LogLevel, VersionInfo
 
 # 可以重试的终态：保留 checkpoint 重新入队，从下一个未完成阶段续跑。
 RETRYABLE_STATUSES: tuple[str, ...] = ("failed", "canceled")
+
+# 瞬态列：任务回到队列后，上一轮的阶段与进度都不该继续展示给用户。
+# 三处 `UPDATE ... status = 'queued'` 共用这一份，避免「改一处忘一处」。
+# `request_cancel` 不复用：取消要**保留** `stage`，界面要显示「停在哪一步」。
+RESET_TRANSIENT: Final = "stage = NULL, progress = 0, error = NULL"
 
 # 加载器版本的标识形式：`<loader>-<loader_version>+<mc_version>`（issue #24 规格 §1）。
 # 加载器名只允许字母/数字（NeoForge / Forge / Fabric），因此第一个 `-` 一定是分隔符。
@@ -320,8 +325,8 @@ def requeue(conn: sqlite3.Connection, job_id: str) -> Job | None:
     """
     placeholders = ", ".join("?" for _ in RETRYABLE_STATUSES)
     cursor = conn.execute(
-        "UPDATE jobs SET status = 'queued', cancel_requested = 0, stage = NULL, progress = 0,"
-        " message = NULL, error = NULL, started_at = NULL, finished_at = NULL"
+        "UPDATE jobs SET status = 'queued', cancel_requested = 0, "
+        f"{RESET_TRANSIENT}, message = NULL, started_at = NULL, finished_at = NULL"
         f" WHERE id = ? AND status IN ({placeholders})",
         (job_id, *RETRYABLE_STATUSES),
     )
@@ -360,8 +365,8 @@ def requeue_running(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
 
     if requeued:
         conn.execute(
-            "UPDATE jobs SET status = 'queued', started_at = NULL, message = ?"
-            " WHERE status = 'running' AND cancel_requested = 0",
+            f"UPDATE jobs SET status = 'queued', {RESET_TRANSIENT}, started_at = NULL,"
+            " message = ? WHERE status = 'running' AND cancel_requested = 0",
             ("服务重启，任务重新排队",),
         )
 

@@ -30,6 +30,8 @@ import { ApiError, createJob, registerVersion } from 'src/lib/api-client';
 
 import { paths } from 'src/routes/paths';
 
+import { formatTime } from 'src/utils/format-time';
+
 // ----------------------------------------------------------------------
 
 /** 版本列表 + 新建索引抽屉（仅 admin 可见可操作）。 */
@@ -101,11 +103,7 @@ export function VersionsView() {
       )}
 
       {isAdmin && !indexDisabled && (
-        <IndexDrawer
-          open={drawerOpen}
-          onClose={() => setDrawerOpen(false)}
-          onCreated={refresh}
-        />
+        <IndexDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onCreated={refresh} />
       )}
     </Stack>
   );
@@ -183,12 +181,6 @@ function coverageLabel(version: VersionInfo): string | null {
   if (version.class_count == null) return null;
 
   return `${(version.summary_count ?? 0).toLocaleString('zh-CN')} / ${version.class_count.toLocaleString('zh-CN')}`;
-}
-
-function formatTime(value: string): string {
-  const parsed = new Date(value);
-
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN');
 }
 
 // ----------------------------------------------------------------------

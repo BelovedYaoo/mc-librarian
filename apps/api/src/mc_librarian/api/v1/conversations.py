@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Final
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response
 
@@ -16,7 +16,13 @@ from mc_librarian import conversations
 from mc_librarian.answer import AskRuns
 from mc_librarian.auth.deps import CurrentUser, DbConn
 from mc_librarian.db import transaction
-from mc_librarian.problems import ProblemException, problem_response
+from mc_librarian.problems import (
+    TITLE_NOT_FOUND as NOT_FOUND_TITLE,
+)
+from mc_librarian.problems import (
+    ProblemException,
+    problem_response,
+)
 from mc_librarian.schemas import ConversationDetail, ConversationList
 
 router = APIRouter()
@@ -28,7 +34,6 @@ def _runs(request: Request) -> AskRuns:
 
     return runs
 
-NOT_FOUND_TITLE: Final = "资源不存在"
 
 
 def _responses(*statuses: int) -> dict[int | str, dict[str, Any]]:

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
-from .runner import STAGES, JobContext, JobRunner, run_stage
+from mc_librarian.stages import STAGES
+
+from .runner import JobContext, JobRunner, run_stage
 
 __all__ = ["STAGES", "JobContext", "JobRunner", "run_stage"]

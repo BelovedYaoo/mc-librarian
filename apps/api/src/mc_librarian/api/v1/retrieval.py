@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Annotated, Any, Final
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 
@@ -19,7 +19,14 @@ from mc_librarian.indexing import query
 from mc_librarian.indexing.layout import source_root
 from mc_librarian.indexing.text import split_lines
 from mc_librarian.jobs import store
-from mc_librarian.problems import ProblemException, problem_response
+from mc_librarian.problems import (
+    TITLE_BAD_REQUEST,
+    ProblemException,
+    problem_response,
+)
+from mc_librarian.problems import (
+    TITLE_NOT_FOUND as NOT_FOUND_TITLE,
+)
 from mc_librarian.retrieval import (
     RetrievalNotFound,
     file_outline,
@@ -47,8 +54,6 @@ from mc_librarian.schemas import (
 
 router = APIRouter()
 
-NOT_FOUND_TITLE: Final = "资源不存在"
-BAD_REQUEST_TITLE: Final = "请求不合法"
 
 VersionQuery = Annotated[str, Query(description="目标版本，必须已完成索引；不支持 latest")]
 PathQuery = Annotated[str, Query(description="相对该版本源码根（`src/<version>/`）的路径")]
@@ -241,7 +246,7 @@ def read_file(
 
     if start < 1 or end < start or end > total_lines:
         raise ProblemException(
-            422, BAD_REQUEST_TITLE, f"行号超出范围：文件共 {total_lines} 行"
+            422, TITLE_BAD_REQUEST, f"行号超出范围：文件共 {total_lines} 行"
         )
 
     return slice_lines(lines, path, version, start, end, max_tokens)

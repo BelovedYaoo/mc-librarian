@@ -14,14 +14,17 @@ from mc_librarian import audit
 from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
 from mc_librarian.db import transaction
 from mc_librarian.jobs import store
-from mc_librarian.problems import ProblemException, problem_response
+from mc_librarian.problems import (
+    TITLE_BAD_REQUEST,
+    TITLE_NOT_FOUND,
+    ProblemException,
+    problem_response,
+)
 from mc_librarian.schemas import Job, JobCreate, JobList, JobLogList, JobStatus
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-NOT_FOUND_TITLE = "资源不存在"
 CONFLICT_TITLE = "冲突"
-BAD_REQUEST_TITLE = "请求不合法"
 FORBIDDEN_TITLE = "无权访问"
 
 # `options` 可省略：省略即从官方 jar 跑完整五段；给了 `options` 但既无 `source_dir` 也无
@@ -60,7 +63,7 @@ def _require_job(conn: DbConn, job_id: str) -> Job:
     job = store.find(conn, job_id)
 
     if job is None:
-        raise ProblemException(404, NOT_FOUND_TITLE, f"任务不存在：{job_id}")
+        raise ProblemException(404, TITLE_NOT_FOUND, f"任务不存在：{job_id}")
 
     return job
 
@@ -101,16 +104,16 @@ def create_job(
         # `sources` 则 422；两者同时给 / kinds 重复也是 422（语义不清）。
         if options is not None:
             if options.source_dir and options.sources:
-                raise ProblemException(422, BAD_REQUEST_TITLE, AMBIGUOUS_SOURCE_DETAIL)
+                raise ProblemException(422, TITLE_BAD_REQUEST, AMBIGUOUS_SOURCE_DETAIL)
 
             if options.sources:
                 kinds = [source.kind for source in options.sources]
 
                 if len(set(kinds)) != len(kinds):
-                    raise ProblemException(422, BAD_REQUEST_TITLE, DUPLICATE_SOURCE_KIND_DETAIL)
+                    raise ProblemException(422, TITLE_BAD_REQUEST, DUPLICATE_SOURCE_KIND_DETAIL)
 
             if not options.source_dir and not options.sources:
-                raise ProblemException(422, BAD_REQUEST_TITLE, MISSING_SOURCE_DETAIL)
+                raise ProblemException(422, TITLE_BAD_REQUEST, MISSING_SOURCE_DETAIL)
 
         # 显式 `obfuscated: null` 与「省略该字段」不同：前者是笔误（契约里非 nullable），回 422。
         if (
@@ -118,7 +121,7 @@ def create_job(
             and "obfuscated" in options.model_fields_set
             and options.obfuscated is None
         ):
-            raise ProblemException(422, BAD_REQUEST_TITLE, NULL_OBFUSCATED_DETAIL)
+            raise ProblemException(422, TITLE_BAD_REQUEST, NULL_OBFUSCATED_DETAIL)
 
         force = options.force if options is not None else False
 

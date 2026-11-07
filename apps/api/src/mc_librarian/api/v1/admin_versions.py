@@ -20,12 +20,11 @@ from mc_librarian.db import transaction
 from mc_librarian.indexing.build import source_tree_size_bytes
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
-from mc_librarian.problems import ProblemException, problem_response
+from mc_librarian.problems import TITLE_BAD_REQUEST, ProblemException, problem_response
 from mc_librarian.schemas import RegisterVersionRequest, VersionInfo
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-BAD_REQUEST_TITLE = "请求不合法"
 
 
 @dataclass(frozen=True)
@@ -115,12 +114,12 @@ def register_version(
     path = index_path(settings.data_dir, payload.version)
 
     if not path.is_file():
-        raise ProblemException(422, BAD_REQUEST_TITLE, f"索引文件不存在：{path}")
+        raise ProblemException(422, TITLE_BAD_REQUEST, f"索引文件不存在：{path}")
 
     stats = read_index_stats(path)
 
     if stats is None:
-        raise ProblemException(422, BAD_REQUEST_TITLE, f"索引文件不是合法的 sqlite：{path}")
+        raise ProblemException(422, TITLE_BAD_REQUEST, f"索引文件不是合法的 sqlite：{path}")
 
     # `source_size_bytes` 的语义是「源码树字节数」（与任务产出一致），不是索引 sqlite 的大小。
     # 注册时源码树不一定在数据根里（只上传了 db/）：此时传 None，让 upsert 保留原值而不是
