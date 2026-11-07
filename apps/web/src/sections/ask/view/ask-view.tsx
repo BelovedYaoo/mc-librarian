@@ -53,6 +53,8 @@ const COMPOSER_CONTROL_HEIGHT = 44;
 const STICK_TO_BOTTOM_PX = 120;
 /** URL 里当前会话的参数名（`?c=<id>`），刷新与分享链接靠它回到同一个会话。 */
 const CONVERSATION_PARAM = 'c';
+/** 引用列表默认显示几条（其余折叠；一次深度检索常有 20 条）。 */
+const COLLAPSED_CITATIONS = 5;
 
 /**
  * 空态的示例问题（硬编码，不读后端）。
@@ -911,17 +913,7 @@ function TurnBlock({
           )}
 
           {turn.citations.length > 0 && (
-            <Stack spacing={1}>
-              <Typography variant="subtitle2">引用（点击查看整个文件）</Typography>
-
-              {turn.citations.map((citation, index) => (
-                <CitationRow
-                  key={`${citation.path}:${citation.lines.join('-')}:${index}`}
-                  citation={citation}
-                  onOpen={() => onOpenCitation(citation)}
-                />
-              ))}
-            </Stack>
+            <CitationList citations={turn.citations} onOpen={onOpenCitation} />
           )}
 
           {turn.usage && turn.status === 'done' && (
@@ -958,6 +950,51 @@ function VersionBadge({ version, current }: { version: string; current: string }
   if (version === current) return null;
 
   return <Chip size="small" variant="outlined" label={`此轮版本 ${version}`} />;
+}
+
+/**
+ * 引用列表：默认只显示前 `COLLAPSED_CITATIONS` 条，其余折叠。
+ *
+ * 一次深度检索会带回 20 条引用（服务端 `MAX_CITATIONS`），全部铺开时一屏都是路径，
+ * 把答案本身挤没了。折叠后只留最相关的前几条，需要时再展开。
+ */
+function CitationList({
+  citations,
+  onOpen,
+}: {
+  citations: Citation[];
+  onOpen: (citation: Citation) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const hidden = citations.length - COLLAPSED_CITATIONS;
+  const visible = expanded ? citations : citations.slice(0, COLLAPSED_CITATIONS);
+
+  return (
+    <Stack spacing={1}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <Typography variant="subtitle2">引用 · {citations.length} 条</Typography>
+        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+          点击任意一条查看整个文件
+        </Typography>
+      </Stack>
+
+      {visible.map((citation, index) => (
+        <CitationRow
+          key={`${citation.path}:${citation.lines.join('-')}:${index}`}
+          citation={citation}
+          onOpen={() => onOpen(citation)}
+        />
+      ))}
+
+      {hidden > 0 && (
+        <Box>
+          <Button size="small" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? '收起引用' : `展开其余 ${hidden} 条`}
+          </Button>
+        </Box>
+      )}
+    </Stack>
+  );
 }
 
 /** 一条引用：点击后打开右侧抽屉，展示整个文件并高亮这几行（不跳走，不丢上下文）。 */
