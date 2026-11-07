@@ -30,14 +30,17 @@ RUN groupadd --gid "${APP_GID}" app \
 # 反编译 / remap 工具链。版本随镜像固定，运行时不下载（与 docs/00-overview.md §6 实测口径一致）。
 ARG VINEFLOWER_VERSION=1.12.0
 ARG SPECIALSOURCE_VERSION=1.11.5
+# 下载地址可覆盖：GitHub / Maven Central 在部分网络不可达，离线构建可指向本地镜像。
+ARG VINEFLOWER_URL="https://github.com/Vineflower/vineflower/releases/download/${VINEFLOWER_VERSION}/vineflower-${VINEFLOWER_VERSION}.jar"
+ARG SPECIALSOURCE_URL="https://repo1.maven.org/maven2/net/md-5/SpecialSource/${SPECIALSOURCE_VERSION}/SpecialSource-${SPECIALSOURCE_VERSION}-shaded.jar"
 RUN set -eux \
  && mkdir -p /opt/mc-librarian/tools \
  && curl --fail --silent --show-error --location \
       --output /opt/mc-librarian/tools/vineflower.jar \
-      "https://github.com/Vineflower/vineflower/releases/download/${VINEFLOWER_VERSION}/vineflower-${VINEFLOWER_VERSION}.jar" \
+      "${VINEFLOWER_URL}" \
  && curl --fail --silent --show-error --location \
       --output /opt/mc-librarian/tools/specialsource-shaded.jar \
-      "https://repo1.maven.org/maven2/net/md-5/SpecialSource/${SPECIALSOURCE_VERSION}/SpecialSource-${SPECIALSOURCE_VERSION}-shaded.jar"
+      "${SPECIALSOURCE_URL}"
 
 WORKDIR /app
 COPY apps/api/pyproject.toml apps/api/README.md ./

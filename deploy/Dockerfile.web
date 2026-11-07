@@ -14,6 +14,10 @@ COPY package.json bun.lock ./
 COPY apps/web/package.json apps/web/package.json
 RUN bun install --frozen-lockfile
 
+# bun workspaces 把依赖提升到根 `node_modules`，而 `bun run --cwd apps/web` 执行脚本时
+# 不会自动把根的 `.bin` 加进 PATH——`tsc` / `vite` 会「找不到」（实测 classic builder 下必现）。
+ENV PATH="/src/node_modules/.bin:${PATH}"
+
 COPY apps/web apps/web
 # `bun run build` = `tsc --noEmit && vite build`；契约类型（src/types/api.d.ts）已入库，
 # 构建期不需要再跑 openapi-typescript。

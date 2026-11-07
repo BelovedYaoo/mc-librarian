@@ -1,0 +1,10 @@
+# 构建上下文是仓库根；这些目录必须排除：宿主的依赖/产物会覆盖镜像里刚装好的那一份
+# （web 镜像曾因此出现 `tsc: not found`——COPY apps/web 把容器内 node_modules 盖掉了）。
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+apps/api/.venv
+.git
+.scratch
+mc-librarian-data
