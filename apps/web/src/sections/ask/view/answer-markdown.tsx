@@ -1,11 +1,12 @@
 import type { Components } from 'react-markdown';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 
+import type { Citation } from 'src/lib/api-client';
 import { markdownContainerSx } from 'src/theme';
 
 // ----------------------------------------------------------------------
@@ -22,7 +23,17 @@ const STREAM_THROTTLE_MS = 80;
  * 2. 未闭合围栏：流式中间态常出现只有开头 ``` 没有结尾，渲染前补一个临时闭合（不改原文本）。
  * 3. 光标：`streaming` 时在末尾显示一个闪烁方块，`done` 后消失。
  */
-export function AnswerMarkdown({ text, streaming }: { text: string; streaming: boolean }) {
+export function AnswerMarkdown({
+  text,
+  streaming,
+  onOpenCitation,
+}: {
+  text: string;
+  streaming: boolean;
+  /** 点击答案里的 `xxx.java:12-34` 时打开源码抽屉；不传则内联代码保持纯文本。 */
+  onOpenCitation?: (citation: Citation) => void;
+}) {
+  const components = useMemo<Components>(() => buildComponents(onOpenCitation), [onOpenCitation]);
   const throttled = useThrottledValue(text, STREAM_THROTTLE_MS);
   // `done` 后直接用原文，保证最终内容与后端返回逐字一致（节流的尾帧可能还在路上）。
   const source = streaming ? throttled : text;
@@ -32,7 +43,7 @@ export function AnswerMarkdown({ text, streaming }: { text: string; streaming: b
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
-        components={markdownComponents}
+        components={components}
       >
         {closeOpenFence(source)}
       </ReactMarkdown>
@@ -97,13 +108,71 @@ function closeOpenFence(markdown: string): string {
 /**
  * 表格需要横向滚动容器；其余元素靠 `markdownContainerSx` 的后代选择器统一上样式。
  */
-const markdownComponents: Components = {
-  table: ({ node: _node, ...props }) => (
-    <Box sx={{ overflowX: 'auto', my: 1.5 }}>
-      <table {...props} />
-    </Box>
-  ),
-};
+/**
+ * 答案里的代码位置引用：`net/minecraft/.../Foo.java:401-496`、`Foo.java:45`、`...java.patch:12-34`。
+ *
+ * 只匹配**路径 + 行号**——单纯的 `:466-493`（同上文同一个文件）无法独立定位，保持纯文本。
+ */
+/** 换行符常量：字面量 `'
+'` 在本仓的编辑链里被吞过两次，统一走常量。 */
+const NEWLINE = String.fromCharCode(10);
+
+const CODE_REFERENCE = /([\w./$-]+\.(?:java|patch)):(\d+)(?:-(\d+))?/;
+
+/** 从一段文字里抽出第一个可定位的代码引用；抽不到返回 null。 */
+function parseCodeReference(text: string): Citation | null {
+  const matched = CODE_REFERENCE.exec(text);
+
+  if (matched === null) return null;
+
+  const start = Number(matched[2]);
+  const end = matched[3] === undefined ? start : Number(matched[3]);
+
+  return { path: matched[1], lines: [start, end] };
+}
+
+/** markdown 渲染器：表格横向可滚；内联代码里带路径+行号的做成可点击。 */
+function buildComponents(onOpenCitation?: (citation: Citation) => void): Components {
+  return {
+    table: ({ node: _node, ...props }) => (
+      <Box sx={{ overflowX: 'auto', my: 1.5 }}>
+        <table {...props} />
+      </Box>
+    ),
+    code: ({ node: _node, className, children, ...props }) => {
+      const raw = String(children ?? '');
+      const isBlock = (className ?? '').includes('language-') || raw.includes(NEWLINE);
+      const citation = !isBlock && onOpenCitation !== undefined ? parseCodeReference(raw) : null;
+
+      if (citation === null) {
+        return (
+          <code className={className} {...props}>
+            {children}
+          </code>
+        );
+      }
+
+      return (
+        <Box
+          component="code"
+          className={className}
+          {...props}
+          onClick={() => onOpenCitation?.(citation)}
+          title={`打开 ${citation.path}:${citation.lines.join('-')}`}
+          sx={{
+            cursor: 'pointer',
+            // 点线而不是实线下划线：与普通内联代码的观感拉开一档，又不至于像链接那么抢眼。
+            textDecoration: 'underline dotted',
+            textUnderlineOffset: '3px',
+            '&:hover': { backgroundColor: 'action.selected' },
+          }}
+        >
+          {children}
+        </Box>
+      );
+    },
+  };
+}
 
 const cursorSx = {
   display: 'inline-block',
