@@ -6,7 +6,7 @@ import type { HighlighterCore, ThemedToken } from 'shiki/core';
 export type HighlightLanguage = 'java' | 'json';
 
 /** 主题跟随 MUI 明暗（`useTheme().palette.mode`）。 */
-export type HighlightTheme = 'github-light' | 'github-dark';
+export type HighlightTheme = 'github-light' | 'bemylover-dark';
 
 /** 一行的高亮结果：Shiki 的 token 序列（每段带 `color`）。 */
 export type HighlightedLine = ThemedToken[];
@@ -23,9 +23,8 @@ type ThemeLike = { tokenColors?: ThemeRule[]; settings?: ThemeRule[] };
  * （dark 在 `#22322B` 上 2.57:1、light 在 `#F1F7F4` 上 4.36:1），所以只覆盖这一条 token 色，
  * 其余照用官方值。取值与 markdown 容器的注释色一致，两处渲染器的观感因此统一。
  */
-const COMMENT_COLOR: Record<HighlightTheme, string> = {
+const COMMENT_COLOR: Record<'github-light', string> = {
   'github-light': '#454F5B',
-  'github-dark': '#919EAB',
 };
 
 function scopesOf(rule: ThemeRule): string[] {
@@ -50,6 +49,52 @@ function withCommentColor<T extends ThemeLike>(theme: T, color: string): T {
 }
 
 /**
+ * 暗色主题：直接由用户提供的 `Bemylover.icls`（Atom One Dark 系）的 Java 属性色构造。
+ *
+ * 为什么自己拼而不是改 Shiki 自带的 `github-dark`：Shiki 主题是「作用域 → 颜色」的规则表，
+ * 改一条注释色用 `withCommentColor` 还行，改一整套（关键字/字符串/数字/类名/函数）等于重写。
+ * 这里只挑本仓会渲染的两类语言（Java / JSON）真正用到的 scope。
+ */
+const BEMYLOVER_DARK = {
+  name: 'bemylover-dark',
+  type: 'dark' as const,
+  colors: {
+    'editor.background': '#15161A',
+    'editor.foreground': '#ABB2BF',
+  },
+  settings: [
+    { settings: { foreground: '#ABB2BF', background: '#15161A' } },
+    {
+      scope: ['comment', 'punctuation.definition.comment'],
+      settings: { foreground: '#7F8B9D', fontStyle: 'italic' },
+    },
+    { scope: ['keyword', 'storage', 'storage.type'], settings: { foreground: '#749DED' } },
+    { scope: ['string', 'string.quoted'], settings: { foreground: '#89CA78' } },
+    {
+      scope: ['constant.numeric', 'constant.language', 'constant.character'],
+      settings: { foreground: '#D19A66' },
+    },
+    {
+      scope: ['entity.name.type', 'entity.name.class', 'support.class', 'support.type'],
+      settings: { foreground: '#E5C07B' },
+    },
+    {
+      scope: ['entity.name.function', 'support.function', 'meta.function-call'],
+      settings: { foreground: '#61AFEF' },
+    },
+    { scope: ['variable.parameter'], settings: { foreground: '#D19A66' } },
+    { scope: ['variable', 'variable.other'], settings: { foreground: '#ABB2BF' } },
+    {
+      scope: ['string.regexp', 'constant.character.escape'],
+      settings: { foreground: '#56B6C2' },
+    },
+    { scope: ['keyword.operator'], settings: { foreground: '#ABB2BF' } },
+    { scope: ['entity.name.tag'], settings: { foreground: '#E06C75' } },
+    { scope: ['invalid'], settings: { foreground: '#E06C75' } },
+  ],
+};
+
+/**
  * 全局单例：高亮器只建一次，两种语言与两套主题都只加载一次。
  *
  * 走细粒度入口（`shiki/core` + 显式 `import()`）而不是 `shiki` 的 `createHighlighter`：
@@ -66,13 +111,9 @@ function loadHighlighter(): Promise<HighlighterCore> {
     import('shiki/langs/java.mjs'),
     import('shiki/langs/json.mjs'),
     import('shiki/themes/github-light.mjs'),
-    import('shiki/themes/github-dark.mjs'),
-  ]).then(([core, engine, java, json, light, dark]) =>
+  ]).then(([core, engine, java, json, light]) =>
     core.createHighlighterCore({
-      themes: [
-        withCommentColor(light.default, COMMENT_COLOR['github-light']),
-        withCommentColor(dark.default, COMMENT_COLOR['github-dark']),
-      ],
+      themes: [withCommentColor(light.default, COMMENT_COLOR['github-light']), BEMYLOVER_DARK],
       langs: [java.default, json.default],
       engine: engine.createJavaScriptRegexEngine(),
     })
@@ -92,7 +133,7 @@ export function languageForPath(path: string): HighlightLanguage | 'text' {
 
 /** 明暗模式 → Shiki 主题名。 */
 export function themeForMode(mode: 'light' | 'dark'): HighlightTheme {
-  return mode === 'dark' ? 'github-dark' : 'github-light';
+  return mode === 'dark' ? 'bemylover-dark' : 'github-light';
 }
 
 /** 把一段源码切成逐行 token；只传可视窗口的代码，不传整文件。 */

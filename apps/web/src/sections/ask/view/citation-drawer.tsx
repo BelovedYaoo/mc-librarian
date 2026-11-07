@@ -29,16 +29,11 @@ const HIGHLIGHT_DEBOUNCE_MS = 80;
 
 /**
  * 引用区间的底色（暗色）。浅色用 `warning.light`（`#FFD666`）——亮黄底配 github-light 的深色 token。
- * 暗色下那个亮黄底配 Shiki github-dark 的浅色 token 只有 ~1.1:1，读不出来；`warning.dark`
- * （`#B76E00`）也只有 ~3.1:1。改用低饱和暗绿 `#1C3A30`：色相 160°，与主色 `#00A76F` 同系，
- * 在冷灰蓝底 + 绿色主色的页面上大面积着色不冲突（此前用的 `#33290D` 是色相 44° 的琥珀 / 橄榄褐，
- * 与页面色系相差 ~116°）。正文 token `#E1E4E8` → 9.70:1、关键字 `#F97583` → 4.65:1、
- * 行号（`text.secondary` `#C4CDD5`）→ 7.68:1。
- *
- * 注释 token 不在这里处理：Shiki 官方主题的 `#6A737D` 配任何底色都上不了 AA（在本底色上只有
- * 2.57:1），已在 `shiki-highlighter.ts` 里按模式换成调色板值（light `#454F5B` / dark `#919EAB`）。
+ * 暗色下取 `Bemylover.icls` 的「光标行」色 `#2C313C`：与新增的深灰底（page `#191A1C` /
+ * paper `#21252B`）同源，大面积着色不抢眼。实测正文 `#ABB2BF` 6.11:1、关键字 `#749DED` 4.83:1、
+ * 行号（`text.secondary` `#8D99AB`）4.52:1，三项都过 AA。
  */
-const HIGHLIGHT_DARK = '#1C3A30';
+const HIGHLIGHT_DARK = '#2C313C';
 
 type LoadState =
   | { status: 'idle' }

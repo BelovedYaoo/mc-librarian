@@ -94,14 +94,12 @@ const blackChannel = '0, 0, 0';
 const NEUTRAL_BACKGROUND_LIGHT = '#F1F7F4';
 
 /**
- * 暗色的「凹陷」表面。**这是暗色调色板里唯一偏离 Minimal 的值。**
+ * 暗色的「凹陷」表面（代码块、行内代码、表格表头）。
  *
- * Minimal 的 dark 用 `#28323D`（色相 211° 的冷蓝灰），与主色 `#00A76F`（色相 160°）差 51°；
- * 浅色模式已经因为同样的偏蓝冷灰（`#F4F6F8` → `#F1F7F4`）被用户否过一次。暗色同理换成与浅色
- * `#F1F7F4` 同系（色相 154°）的 `#22322B`。亮度 0.0280 ≈ Minimal `#28323D` 的 0.0307，
- * 所以对比度不受影响。
+ * 取值来自用户提供的 IntelliJ 配色 `Bemylover.icls`（Atom One Dark 系）：比 paper 更深一档，
+ * 让代码块看起来是「刻」在卡片里的。代码正文 `#ABB2BF` 在它上面 8.48:1。
  */
-const NEUTRAL_BACKGROUND_DARK = '#22322B';
+const NEUTRAL_BACKGROUND_DARK = '#15161A';
 
 /**
  * 卡片阴影：照抄 minimal-vite-ts 的 `core/custom-shadows.ts` 里 `customShadows.card`
@@ -180,18 +178,37 @@ const darkPalette: PaletteOptions = {
   ...semanticColors,
   grey,
   common: { black: '#000000', white: '#FFFFFF' },
-  divider: `rgba(${grey500}, 0.2)`,
+  // 分隔线直接用方案里的「光标行」色：比 rgba 叠加更可控，也不会随底色漂移。
+  divider: '#2C313C',
   text: {
-    primary: '#FFFFFF',
-    secondary: grey[400],
-    disabled: grey[600],
+    // 以下三色与代码高亮取自 `Bemylover.icls`（Atom One Dark 系）：
+    // 正文 `#ABB2BF`（paper 上 7.22:1）、次要 `#8D99AB`（5.33:1）、禁用 `#5C6370`（禁用态不要求 AA）。
+    // 次要色比方案里的行注释色 `#7F8B9D` 提亮了一档：深底上的浅灰小字观感比同比值的浅底更暗
+    // （Helmholtz–Kohlrausch 效应），4.46:1 的注释色放在 12px 的时间/用量上会读不清。
+    primary: '#ABB2BF',
+    secondary: '#8D99AB',
+    disabled: '#5C6370',
   },
   background: {
-    paper: grey[800],
-    default: grey[900],
+    // page 用编辑器底色、paper 提亮一档做卡片、neutral 再压深一档给代码块。
+    paper: '#21252B',
+    default: '#191A1C',
     neutral: NEUTRAL_BACKGROUND_DARK,
   },
-  action: actionPalette('dark'),
+  // 交互态用方案正文色的低透明度叠加（与 Minimal 的 `grey[500]` 叠加同一做法，只换基色）。
+  action: {
+    active: '#ABB2BF',
+    hover: 'rgba(171, 178, 191, 0.08)',
+    selected: 'rgba(171, 178, 191, 0.16)',
+    focus: 'rgba(171, 178, 191, 0.24)',
+    disabled: 'rgba(171, 178, 191, 0.8)',
+    disabledBackground: 'rgba(171, 178, 191, 0.24)',
+    hoverOpacity: 0.08,
+    selectedOpacity: 0.08,
+    focusOpacity: 0.12,
+    activatedOpacity: 0.12,
+    disabledOpacity: 0.48,
+  },
 };
 
 const baseOptions: ThemeOptions = {

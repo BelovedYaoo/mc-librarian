@@ -25,18 +25,17 @@ const codeTokenColors = {
     builtIn: '#E36209',
   },
   dark: {
-    text: '#E6EDF3',
-    keyword: '#FF7B72',
-    string: '#A5D6FF',
-    /**
-     * github-dark 的官方注释色是 `#8B949E`，但那是配它自己的底色（`#0D1117`）的；本项目的代码块底
-     * 是 `background.neutral`（`#22322B`，亮度高于 `#0D1117`），`#8B949E` 在它上面只有 4.38:1，
-     * 低于 AA 的 4.5。改用 `grey[500]`（`#919EAB`）→ 4.93:1。
-     */
-    comment: '#919EAB',
-    number: '#79C0FF',
-    title: '#D2A8FF',
-    builtIn: '#FFA657',
+    // 取自 `Bemylover.icls`（Atom One Dark 系）的 Java 属性色，底为 `background.neutral`（#15161A）：
+    // 正文 #ABB2BF 8.48:1、关键字 #749DED 6.70:1、字符串 #89CA78 9.28:1、
+    // 数字/参数 #D19A66 7.34:1、类名 #E5C07B 10.47:1、函数调用 #61AFEF 7.65:1。
+    text: '#ABB2BF',
+    keyword: '#749DED',
+    string: '#89CA78',
+    // 方案里的行注释色 #7F8B9D（5.24:1，过 AA）；块注释 #5C6370 只有 2.99:1，不用于代码正文。
+    comment: '#7F8B9D',
+    number: '#D19A66',
+    title: '#E5C07B',
+    builtIn: '#61AFEF',
   },
 } as const;
 
