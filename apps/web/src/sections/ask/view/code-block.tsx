@@ -104,8 +104,18 @@ export function rehypeCodeLines() {
 
           code.children = lines.map((children) => {
             const text = textOf(children);
-            const kind =
-              /^\+\+\+|^---/.test(text) ? '' : text.startsWith('+') ? 'diff-add' : text.startsWith('-') ? 'diff-del' : '';
+            // 三种行分类：hunk 头（`@@`）、新增（`+`）、删除（`-`）。
+            // `+++`/`---` 是 diff 的文件头，不算增删；`@@` 压弱成注释色（highlight.js 的 diff
+            // 语法不包 meta，只能按行首判断）。
+            const kind = /^\+\+\+|^---/.test(text)
+              ? ''
+              : text.startsWith('@@')
+                ? 'diff-hunk'
+                : text.startsWith('+')
+                  ? 'diff-add'
+                  : text.startsWith('-')
+                    ? 'diff-del'
+                    : '';
 
             return {
               type: 'element',

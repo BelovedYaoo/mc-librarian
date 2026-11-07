@@ -130,7 +130,9 @@ export function markdownContainerSx(theme: Theme) {
     '& .code-line.diff-del': {
       bgcolor: alpha(theme.palette.error.main, 0.16),
     },
-    // highlight.js 的 diff 语法把 `+`/`-` 行标成 addition/deletion、`@@` 标成 meta；
+    // hunk 头（`@@ -48,6 +_,7 @@`）：highlight.js 的 diff 语法不包 meta，按行首加类。
+    '& .code-line.diff-hunk': { color: 'text.secondary' },
+    // highlight.js 的 diff 语法把 `+`/`-` 行标成 addition/deletion；
     // 不映射的话它们会落回正文色，整块看着是一团灰。
     '& .hljs-addition': { color: tokens.inserted },
     '& .hljs-deletion': { color: tokens.deleted },
