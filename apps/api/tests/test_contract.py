@@ -759,6 +759,7 @@ def test_search_request_schema_matches() -> None:
     assert set(runtime["properties"]) == set(contract["properties"]) == {
         "query",
         "version",
+        "mode",
         "path_prefix",
         "source",
         "kind",

@@ -33,6 +33,7 @@ from mc_librarian.retrieval import (
 from mc_librarian.retrieval import (
     search as run_search,
 )
+from mc_librarian.retrieval import search_smart as run_search_smart
 from mc_librarian.schemas import (
     FileSlice,
     Outline,
@@ -107,6 +108,10 @@ def search(
     index = query.open_readonly(require_index(conn, settings, body.version))
 
     try:
+        # `mode=smart`：扩展召回 + LLM 精排；失败自动退回字面（见 `retrieval.smart`）。
+        if body.mode == "smart":
+            return run_search_smart(index, settings, body)
+
         return run_search(index, settings, body)
     finally:
         index.close()

@@ -758,6 +758,16 @@ export interface components {
         SearchRequest: {
             query: string;
             version: string;
+            /**
+             * @description `lexical`（默认，毫秒级、不调 LLM）或 `smart`（扩展召回 + LLM 列表精排）。
+             *
+             *     `smart` 的召回是「原句」与「LLM 扩展词」两路的并集（实测召回上限 29/30 vs 字面 17/30），
+             *     再用 LLM 从**真实候选**里挑前 5（不让模型凭记忆编造）。每查询最多 2 次 LLM 调用，
+             *     扩展词按查询缓存；任一步失败自动退回纯字面，结果不会比 `lexical` 差。
+             * @default lexical
+             * @enum {string}
+             */
+            mode: "lexical" | "smart";
             path_prefix?: string;
             source?: components["schemas"]["SourceKind"];
             kind?: components["schemas"]["SymbolKind"];
@@ -779,6 +789,8 @@ export interface components {
             /** @description 融合前的候选总数（各路候选之和），不因 limit / max_tokens 截断而变 */
             total: number;
             took_ms: number;
+            /** @description 智能检索实际用到的扩展词（`lexical` 或扩展失败时为 null） */
+            expanded_query?: string | null;
         };
         Hit: {
             /**

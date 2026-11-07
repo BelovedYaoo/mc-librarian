@@ -42,7 +42,7 @@ from mc_librarian.eval.report import (
 )
 from mc_librarian.indexing import query
 from mc_librarian.indexing.layout import index_path, source_root
-from mc_librarian.retrieval import search
+from mc_librarian.retrieval import search, search_smart
 from mc_librarian.schemas import SearchRequest
 
 # 没配 LLM 时写进报告的未测原因（规格 §3 定死的文案）。
@@ -59,6 +59,8 @@ def run_eval(
     question_set: QuestionSet,
     *,
     top_n: int,
+    mode: str = "lexical",
+    measure_ask: bool = True,
 ) -> EvalReport:
     """跑完题目集，产出报告。索引以只读打开，跑完关闭。"""
     path = index_path(settings.data_dir, version)
@@ -73,10 +75,16 @@ def run_eval(
     try:
         has_summaries = query.has_table(index, "summaries_fts")
         hits = [
-            _retrieval_hits(index, settings, version, question, top_n)
+            _retrieval_hits(index, settings, version, question, top_n, mode)
             for question in question_set.questions
         ]
-        steps, untested = _tool_steps(settings, version, index, question_set.questions)
+        if measure_ask:
+            steps, untested = _tool_steps(settings, version, index, question_set.questions)
+        else:
+            steps = []
+            untested = [
+                UntestedMetric(name="平均工具调用轮数", reason="跳过（--no-ask）")
+            ]
     finally:
         index.close()
 
@@ -102,6 +110,7 @@ def run_eval(
         index_path=path,
         source_root=root,
         index_has_summaries=has_summaries,
+        mode=mode,
         set_name=question_set.name,
         set_path=question_set.path,
         generated_at=utc_now(),
@@ -120,12 +129,15 @@ def _retrieval_hits(
     version: str,
     question: Question,
     top_n: int,
+    mode: str = "lexical",
 ) -> tuple[HitSummary, ...]:
     """一题的 Top-N 命中（`detail=locate`，与 `/v1/search` 同一条路径）。"""
-    response = search(
-        index,
-        settings,
-        SearchRequest(version=version, query=question.question, detail="locate", limit=top_n),
+    request = SearchRequest(
+        version=version, query=question.question, detail="locate", limit=top_n,
+        mode="smart" if mode == "smart" else "lexical",
+    )
+    response = search_smart(index, settings, request) if request.mode == "smart" else search(
+        index, settings, request
     )
 
     return tuple(HitSummary.from_hit(rank, hit) for rank, hit in enumerate(response.hits, start=1))

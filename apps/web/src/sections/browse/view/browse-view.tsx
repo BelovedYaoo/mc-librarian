@@ -21,6 +21,8 @@ import Divider from '@mui/material/Divider';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
+import Switch from '@mui/material/Switch';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Typography from '@mui/material/Typography';
 
 import { useVersions } from 'src/hooks';
@@ -65,6 +67,8 @@ export function BrowseView() {
 
   const [version, setVersion] = useState('');
   const [query, setQuery] = useState('');
+  // 智能检索：扩展召回 + LLM 精排（较慢）。默认关，保持毫秒级的纯字面检索。
+  const [smart, setSmart] = useState(false);
   const [pathPrefix, setPathPrefix] = useState('');
   const [kind, setKind] = useState<SymbolKind>('any');
   const [detail, setDetail] = useState<'snippet' | 'locate'>('snippet');
@@ -113,6 +117,7 @@ export function BrowseView() {
       const body = await search({
         query: text,
         version,
+        mode: smart ? 'smart' : 'lexical',
         kind,
         detail,
         limit,
@@ -269,7 +274,17 @@ export function BrowseView() {
                 />
               </Stack>
 
-              <Stack direction="row" spacing={2}>
+              <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+                <FormControlLabel
+                  control={
+                    <Switch checked={smart} onChange={(event) => setSmart(event.target.checked)} />
+                  }
+                  label="智能检索"
+                />
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  先让模型改写查询再召回，并从真实候选里挑最相关的 5 条；慢 5–10 秒、额外消耗 token
+                </Typography>
+
                 <Box sx={{ flex: '1 1 auto' }} />
 
                 <Button

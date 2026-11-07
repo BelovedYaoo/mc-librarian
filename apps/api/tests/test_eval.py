@@ -253,6 +253,7 @@ def make_report(
         index_path=index_path(tmp_path, VERSION),
         source_root=source_root(tmp_path, VERSION),
         index_has_summaries=False,
+        mode="lexical",
         set_name="测试题目集",
         set_path=tmp_path / "questions.json",
         generated_at="2026-01-01T00:00:00Z",

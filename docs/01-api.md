@@ -201,6 +201,26 @@ event: done      {"usage":{"prompt_tokens":18234,"completion_tokens":412,"latenc
 
 前端类型由 `openapi-typescript` 从本文件生成到 `apps/web/src/types/api.d.ts`（`bun run --cwd apps/web gen:api`）。**本仓没有 CI**，契约守卫是两道脚本/测试：`scripts/check.mjs` 的契约漂移守卫（重新生成类型，目录里的文件与生成结果不一致就失败）与 `apps/api/tests/test_contract.py`（比对运行时 `app.openapi()` 与本文件），防止「文档写了、代码没做」。
 
+## 8.1 检索模式（`SearchRequest.mode`）
+
+`/v1/search` 有两种模式：
+
+| 模式 | 行为 | 耗时 | 成本 |
+|---|---|---|---|
+| `lexical`（默认） | 五路召回 + RRF 融合 | 毫秒级 | 零 |
+| `smart` | 扩展召回（原句 ∪ LLM 改写词）+ LLM 列表精排 | 5–10 秒 | 每次最多 2 次 LLM 调用 |
+
+`smart` 的依据（issue #23 实测，26.3、30 题）：
+
+- **瓶颈是召回不是排序**：纯字面把金标排进前 50 的只有 17/30，任何精排都凑不出 Top-5
+  （LLM 精排对纯字面候选只有 16/30）；
+- 让模型把问题改写成检索词后**再召回一次**，并集把上限拉到 **29/30**；
+- 有了候选集，LLM 列表精排几乎不丢分（29/30 = 并集上限）；同候选集上
+  `jina-reranker-v2` 这类小 cross-encoder 只有 20/30——中文语义排序要 LLM。
+
+约束（都由测试守着）：LLM 未配置 / 超时 / 返回不可解析时**退回字面结果**，不劣化；
+扩展词按查询缓存（同一问题第二次为 0 次 LLM）；精排只允许从索引里真实存在的候选里挑。
+
 ## 9. MCP 端点（`/mcp`）
 
 把同一套检索能力以 **MCP（Model Context Protocol，streamable HTTP）** 暴露给外部 agent 客户端（pi / Claude Code / Cursor）。它**不是**第二个实现：七个工具全部转调 `mc_librarian.retrieval.service` 与 `mc_librarian.answer`，召回行为与 `/v1/search` 同源。

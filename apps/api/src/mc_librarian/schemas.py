@@ -50,6 +50,8 @@ ReferenceKind = Literal["call", "field", "type", "other"]
 MemberKind = Literal["method", "field"]
 # 索引来源（issue #24 规格 §2）：`patched` 打过补丁的 MC、`loader` 加载器自身、`patch` 补丁 hunk。
 SourceKind = Literal["patched", "loader", "patch"]
+# 检索模式（`SearchRequest.mode`）。
+SearchMode = Literal["lexical", "smart"]
 
 __all__ = [
     "VERSION_PATTERN",
@@ -637,6 +639,9 @@ class SearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=512)
     version: str
+    # `lexical` = 纯字面（毫秒级、不调 LLM）；`smart` = 扩展召回 + LLM 列表精排（较慢、更准）。
+    # 智能检索的任何一步失败都会退回字面结果，所以可以放心地做成开关。
+    mode: SearchMode = "lexical"
     path_prefix: str | None = None
     source: SourceKind | None = None
     kind: SymbolKind = "any"
@@ -678,6 +683,8 @@ class SearchResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
     total: int
     took_ms: int
+    # 智能检索实际用到的扩展词（`mode=lexical` 或扩展失败时为 None），便于排查与界面提示。
+    expanded_query: str | None = None
 
 
 # ----------------------------------------------------------------------

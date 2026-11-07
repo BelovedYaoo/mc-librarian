@@ -1,0 +1,326 @@
+{
+ "name": "mc-librarian 独立题集（代码结构生成，不看摘要）",
+ "description": "由类结构（包/父类/成员）生成问题，生成时不给摘要，避免与索引措辞共享词汇。",
+ "questions": [
+  {
+   "id": "ind-01",
+   "category": "定位",
+   "question": "兴趣点管理器里用来按“任意、还有空位、已被占满”筛选兴趣点的占用状态枚举是哪个？",
+   "gold": [
+    "net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy"
+   ]
+  },
+  {
+   "id": "ind-02",
+   "category": "定位",
+   "question": "在模组里给创造模式加一个能自定义图标、标题、背景纹理、是否可滚动以及是否显示标题的物品栏标签页，该用哪个内置类型来建？",
+   "gold": [
+    "net.minecraft.world.item.CreativeModeTab"
+   ]
+  },
+  {
+   "id": "ind-03",
+   "category": "定位",
+   "question": "玩家信息更新包里，那个能逐项设置玩家标识、皮肤资料、是否在列表里、延迟、游戏模式、显示名、帽子显示和排序位置，再生成一条玩家信息的内部构建器是哪个？",
+   "gold": [
+    "net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.EntryBuilder"
+   ]
+  },
+  {
+   "id": "ind-04",
+   "category": "定位",
+   "question": "Minecraft 的资源包回退管理器里，包住打开的资源输入流、在它没关闭就被垃圾回收时打出泄漏警告的那个输入流包装类是啥？",
+   "gold": [
+    "net.minecraft.server.packs.resources.FallbackResourceManager.LeakedResourceWarningInputStream"
+   ]
+  },
+  {
+   "id": "ind-05",
+   "category": "定位",
+   "question": "用代码自定义一个只生成单个固定宽度和深度结构片的遗迹时，应该继承哪个结构类并重写生成点和拼片生成逻辑？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.structure.SinglePieceStructure"
+   ]
+  },
+  {
+   "id": "ind-06",
+   "category": "定位",
+   "question": "渲染珍珠后端的着色器模块里，专门提供输入、输出、描述符和推送常量这些反射信息的接口叫啥？",
+   "gold": [
+    "com.mojang.renderpearl.backend.api.SpvModule.Reflection"
+   ]
+  },
+  {
+   "id": "ind-07",
+   "category": "定位",
+   "question": "客户端里用来存放实体模型根节点、能按模型层位置烘焙模型，还自带原版和空实例的那个模型集合叫啥？",
+   "gold": [
+    "net.minecraft.client.model.geom.EntityModelSet"
+   ]
+  },
+  {
+   "id": "ind-08",
+   "category": "定位",
+   "question": "用多方块图案（比如传送门框架）去世界里找匹配时，返回的那个记录前左上角、前向和上向、宽高深以及已缓存方块位置，并能按相对坐标取方块的结果对象叫啥？",
+   "gold": [
+    "net.minecraft.world.level.block.state.pattern.BlockPattern.BlockPatternMatch"
+   ]
+  },
+  {
+   "id": "ind-09",
+   "category": "定位",
+   "question": "游戏里哪个敌对生物会随机搬起方块、被直视后激怒，攻击时获得移速加成，还带有传送最大半径和直径、凝视音效间隔以及脱战计时这些参数？",
+   "gold": [
+    "net.minecraft.world.entity.monster.Enderman"
+   ]
+  },
+  {
+   "id": "ind-10",
+   "category": "定位",
+   "question": "在物品组件谓词里，用来同时匹配烟花火箭的爆炸效果和飞行时长的记录是什么？",
+   "gold": [
+    "net.minecraft.core.component.predicates.FireworksPredicate"
+   ]
+  },
+  {
+   "id": "ind-11",
+   "category": "定位",
+   "question": "物品模型里用来按收纳袋已装内容和容量算出 0 到 1 装满比例、供模型选择的数值属性是哪一个？",
+   "gold": [
+    "net.minecraft.client.renderer.item.properties.numeric.BundleFullness"
+   ]
+  },
+  {
+   "id": "ind-12",
+   "category": "定位",
+   "question": "Minecraft 客户端里，专门用经验球纹理、按方块光照等级算亮度并负责提取和提交经验球渲染状态的实体渲染器叫啥？",
+   "gold": [
+    "net.minecraft.client.renderer.entity.ExperienceOrbRenderer"
+   ]
+  },
+  {
+   "id": "ind-13",
+   "category": "定位",
+   "question": "在我的世界里，哪个珊瑚植株方块的基类自身定义了含水状态和固定形状，并在周围没有水时通过扫描找水来安排六十到一百刻后的死亡刻？",
+   "gold": [
+    "net.minecraft.world.level.block.BaseCoralPlantTypeBlock"
+   ]
+  },
+  {
+   "id": "ind-14",
+   "category": "定位",
+   "question": "在客户端模型数据生成里，模型提供器内部那个专门接收简单模型、最后统一保存到输出目录的收集器叫啥？",
+   "gold": [
+    "net.minecraft.client.data.models.ModelProvider.SimpleModelCollector"
+   ]
+  },
+  {
+   "id": "ind-15",
+   "category": "跨类调用",
+   "question": "驯服动物用主人上次被谁攻击的记录和时间戳，判断要不要替主人反击那个攻击者，这是哪个目标 AI？",
+   "gold": [
+    "net.minecraft.world.entity.ai.goal.target.OwnerHurtByTargetGoal"
+   ]
+  },
+  {
+   "id": "ind-16",
+   "category": "定位",
+   "question": "数据组件谓词里用来表示单种谓词类型、自带编解码器和流编解码器，并提供解包、复制创建类型、包装编解码及单流编解码方法的内部接口，是什么？",
+   "gold": [
+    "net.minecraft.core.component.predicates.DataComponentPredicate.Type"
+   ]
+  },
+  {
+   "id": "ind-17",
+   "category": "定位",
+   "question": "设置里“攻击指示器”可选的关、准星和快捷栏三种状态，是由哪个枚举定义的？",
+   "gold": [
+    "net.minecraft.client.AttackIndicatorStatus"
+   ]
+  },
+  {
+   "id": "ind-18",
+   "category": "数值",
+   "question": "我的世界客户端模型几何包里，用来描述模型部件相对父部件的位置偏移、三轴旋转和缩放，并带有零位、单独偏移、单独旋转、偏移加旋转以及缩放相关工厂方法的那个不可变记录类型叫什么？",
+   "gold": [
+    "net.minecraft.client.model.geom.PartPose"
+   ]
+  },
+  {
+   "id": "ind-19",
+   "category": "定位",
+   "question": "在客户端实体渲染里，专门负责蝙蝠贴图定位、创建并提取蝙蝠渲染状态的那个渲染器叫什么？",
+   "gold": [
+    "net.minecraft.client.renderer.entity.BatRenderer"
+   ]
+  },
+  {
+   "id": "ind-20",
+   "category": "定位",
+   "question": "实体数据同步里，每个被跟踪参数挂着的、同时保存访问器、当前值、初始值和脏标记的那个内部数据项叫什么？",
+   "gold": [
+    "net.minecraft.network.syncher.SynchedEntityData.DataItem"
+   ]
+  },
+  {
+   "id": "ind-21",
+   "category": "定位",
+   "question": "Minecraft 顶部那套 Boss 血条叠加层是在哪里根据 Boss 事件更新、提取血条和背景精灵，并判断要不要播放 Boss 音乐、要不要压暗屏幕的？",
+   "gold": [
+    "net.minecraft.client.gui.components.BossHealthOverlay"
+   ]
+  },
+  {
+   "id": "ind-22",
+   "category": "定位",
+   "question": "Minecraft 客户端声音系统里，用来表示一个声音事件、保存多条带权重的候选音效和字幕文本，并能按权重随机挑出一个音效播放的数据结构叫什么？",
+   "gold": [
+    "net.minecraft.client.sounds.WeighedSoundEvents"
+   ]
+  },
+  {
+   "id": "ind-23",
+   "category": "配置读取",
+   "question": "地物生成配置里，负责按方块坐标和随机源给出方块状态、并支持直接状态与各种规则提供方式之间编解码的那个接口叫什么？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider"
+   ]
+  },
+  {
+   "id": "ind-24",
+   "category": "定位",
+   "question": "想让下界传送门那种紫色粒子反着往传送门中心收、连尺寸变化也反过来时，该用哪种客户端粒子效果？",
+   "gold": [
+    "net.minecraft.client.particle.ReversePortalParticle"
+   ]
+  },
+  {
+   "id": "ind-25",
+   "category": "定位",
+   "question": "在数据生成里专门用来构建熔炉、烟熏、高炉和营火这类单材料烹饪配方，并能设置经验、烹饪时间、分组和进度解锁条件的构建器是哪个？",
+   "gold": [
+    "net.minecraft.data.recipes.SimpleCookingRecipeBuilder"
+   ]
+  },
+  {
+   "id": "ind-26",
+   "category": "定位",
+   "question": "客户端方块预测收到服务端确认时，用来把玩家位置、预测序号和确认后的方块状态一起存下来的那个内部记录类型叫啥？",
+   "gold": [
+    "net.minecraft.client.multiplayer.prediction.BlockStatePredictionHandler.ServerVerifiedState"
+   ]
+  },
+  {
+   "id": "ind-27",
+   "category": "定位",
+   "question": "游戏里哪个动物 AI 目标会先用非战斗、8 格、无视视线的条件挑一个同种且尚未进入求爱的伙伴，靠近后把求爱计时累计到约 60 游戏刻并触发繁殖？",
+   "gold": [
+    "net.minecraft.world.entity.ai.goal.BreedGoal"
+   ]
+  },
+  {
+   "id": "ind-28",
+   "category": "定位",
+   "question": "渲染特性分发器里，按特性组序号、特性类型、严格排序开关和包含式上下界来组织一批渲染特性，并提供准备、执行和未检查切片操作的那个内部准备组具体是干什么用的？",
+   "gold": [
+    "net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedGroup"
+   ]
+  },
+  {
+   "id": "ind-29",
+   "category": "定位",
+   "question": "命令参数里解析方块坐标、支持相对和局部坐标，并且会分别校验目标位置是否已加载、是否越界以及是否超出可生成范围的是哪个参数类型？",
+   "gold": [
+    "net.minecraft.commands.arguments.coordinates.BlockPosArgument"
+   ]
+  },
+  {
+   "id": "ind-30",
+   "category": "定位",
+   "question": "蜡烛方块里那个统一处理按根数算亮度、火焰粒子从哪冒、被箭打中就熄灭的抽象父类是什么？",
+   "gold": [
+    "net.minecraft.world.level.block.AbstractCandleBlock"
+   ]
+  },
+  {
+   "id": "ind-31",
+   "category": "配置读取",
+   "question": "自定义松树时，树叶摆放器配置里只有高度提供器、没有树干高度参数，并按圆锥分层从树顶往下逐渐加宽，这种树叶摆放器叫什么？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.feature.foliageplacers.PineFoliagePlacer"
+   ]
+  },
+  {
+   "id": "ind-32",
+   "category": "定位",
+   "question": "滴水石锥上的岩浆滴在下落阶段用的、带一个贴图精灵字段并在生成粒子时选贴图的那个粒子提供器叫啥？",
+   "gold": [
+    "net.minecraft.client.particle.DripParticle.DripstoneLavaFallProvider"
+   ]
+  },
+  {
+   "id": "ind-33",
+   "category": "配置读取",
+   "question": "Minecraft 服务端 JSON-RPC 的 WebSocket 安全校验中，哪个通道处理器会先按配置检查 Origin 白名单，再从 Authorization 的 Bearer 或 Sec-WebSocket-Protocol 子协",
+   "gold": [
+    "net.minecraft.server.jsonrpc.security.AuthenticationHandler"
+   ]
+  },
+  {
+   "id": "ind-34",
+   "category": "配置读取",
+   "question": "给结构模板往世界里摆放时，把镜像、旋转角度、旋转支点、是否忽略实体、边界框、液体处理、随机源和调色板这些参数打包在一起的是哪个配置对象？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlaceSettings"
+   ]
+  },
+  {
+   "id": "ind-35",
+   "category": "定位",
+   "question": "原版里负责在存档中统一保存所有袭击、给袭击分配递增编号并每刻更新，还能判断生物能否加入、按编号取袭击以及创建或延长袭击的那套数据管理器是哪个？",
+   "gold": [
+    "net.minecraft.world.entity.raid.Raids"
+   ]
+  },
+  {
+   "id": "ind-36",
+   "category": "定位",
+   "question": "在配方展示系统里，哪个槽位展示类型的单例专门表示空槽、解析时返回空列表？",
+   "gold": [
+    "net.minecraft.world.item.crafting.display.SlotDisplay.Empty"
+   ]
+  },
+  {
+   "id": "ind-37",
+   "category": "定位",
+   "question": "地表规则里想按群系温度（而不是高度、噪声或生物群系标签）决定是否替换方块时，应该用哪个带编解码器并能编译成温度判断的枚举条件？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.material.condition.TemperatureCondition"
+   ]
+  },
+  {
+   "id": "ind-38",
+   "category": "定位",
+   "question": "下界要塞里那个用来做小型走廊十字路口、会向四个方向继续接走廊的拼图段是哪个？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.structure.structures.NetherFortressPieces.CastleSmallCorridorCrossingPiece"
+   ]
+  },
+  {
+   "id": "ind-39",
+   "category": "配置读取",
+   "question": "服务端实体不需要做客户端位置插值、默认挂上一个所有插值方法全是空实现的无操作处理器时，这个处理器叫什么？",
+   "gold": [
+    "net.minecraft.world.entity.InterpolationHandler.NoOpInterpolationHandler"
+   ]
+  },
+  {
+   "id": "ind-40",
+   "category": "机制",
+   "question": "末地出生点那座中央岛的地形密度函数，具体是怎么按水平距离算高度、超过某个半径阈值后就一路往负值压的？",
+   "gold": [
+    "net.minecraft.world.level.levelgen.densityfunction.generator.EndIslandFunction"
+   ]
+  }
+ ]
+}

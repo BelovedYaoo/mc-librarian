@@ -59,6 +59,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="检索深度 Top-N，默认 5",
     )
+    parser.add_argument(
+        "--no-ask",
+        action="store_true",
+        help="只测检索指标，跳过每题的 /v1/ask 循环（快很多，适合调检索）",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("lexical", "smart"),
+        default="lexical",
+        help="检索模式：lexical（默认，纯字面）或 smart（扩展召回 + LLM 精排）",
+    )
 
     return parser
 
@@ -92,7 +103,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        report = run_eval(settings, args.version, question_set, top_n=args.limit)
+        report = run_eval(
+            settings,
+            args.version,
+            question_set,
+            top_n=args.limit,
+            mode=args.mode,
+            measure_ask=not args.no_ask,
+        )
     except EvalError as error:
         print(f"评测失败：{error}", file=sys.stderr)
         return 2

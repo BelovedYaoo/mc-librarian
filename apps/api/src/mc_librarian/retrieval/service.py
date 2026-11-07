@@ -28,6 +28,7 @@ from mc_librarian.retrieval.channels import (
     symbol_candidates,
 )
 from mc_librarian.retrieval.fuse import FusedHit, apply_token_budget, fuse
+from mc_librarian.retrieval.smart import SMART_CANDIDATE_LIMIT, expand_query, rerank
 from mc_librarian.retrieval.terms import identifiers
 from mc_librarian.schemas import (
     FileSlice,
@@ -79,14 +80,10 @@ def merge_ranked(lists: list[list[Candidate]]) -> list[Candidate]:
     return [candidate for _rank, _order, candidate in ordered]
 
 
-def search(
+def _channels(
     connection: sqlite3.Connection, settings: Settings, request: SearchRequest
-) -> SearchResponse:
-    """跑一次混合检索。`connection` 是已只读打开的索引库连接。"""
-    started = time.perf_counter()
-    # 查询按目标分流（issue #23）：中文提问里常常直接写着类名 / 方法名，那几个英文字串对
-    # 符号表、引用表、源码字面量是最精确的键；把整句中文交给它们必然 0 命中
-    # （`symbol` 拿「谁调用了 LootTable 的 getRandomItems」去比类名）。
+) -> dict[Channel, list[Candidate]]:
+    """五路召回。查询按目标分流：中文给摘要/补丁，抽出的英文标识符给符号/引用/字面量。"""
     names = identifiers(request.query)
 
     def by_names(lookup: Callable[[str], list[Candidate]]) -> list[Candidate]:
@@ -96,7 +93,7 @@ def search(
 
         return merge_ranked([lookup(name) for name in names])
 
-    channels: dict[Channel, list[Candidate]] = {
+    return {
         "summary": summary_candidates(
             connection,
             request.query,
@@ -133,17 +130,45 @@ def search(
             source=request.source,
         ),
     }
-    # `total` 是融合前的候选总数（各路候选之和），不因 `limit` / `max_tokens` 截断而变（规格 §6）。
-    total = sum(len(candidates) for candidates in channels.values())
-    fused = fuse(channels)[: request.limit]
 
-    snippets = _snippets(settings, request, fused)
+
+def _fused(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    request: SearchRequest,
+    query: str | None = None,
+) -> tuple[list[FusedHit], int]:
+    """跑一次融合，返回 (融合结果, 融合前候选总数)。
+
+    `query` 可替换查询文本：智能检索用它拿「扩展词」再召回一遍（并集）。
+    """
+    effective = request if query is None else request.model_copy(update={"query": query})
+    channels = _channels(connection, settings, effective)
+
+    return fuse(channels), sum(len(candidates) for candidates in channels.values())
+
+
+def _respond(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    request: SearchRequest,
+    fused: list[FusedHit],
+    total: int,
+    started: float,
+    *,
+    expanded_query: str | None = None,
+) -> SearchResponse:
+    """把（可能已被精排重排过的）融合结果做成响应：切片、预算、`suggestions`。"""
+    kept_fused = fused[: request.limit]
+    snippets = _snippets(settings, request, kept_fused)
     costs = [
         count_tokens(_content_text(request, hit, snippet))
-        for hit, snippet in zip(fused, snippets, strict=True)
+        for hit, snippet in zip(kept_fused, snippets, strict=True)
     ]
     kept = apply_token_budget(costs, request.max_tokens)
-    hits = [_to_hit(request, fused[index], snippets[index], costs[index]) for index in kept]
+    hits = [
+        _to_hit(request, kept_fused[index], snippets[index], costs[index]) for index in kept
+    ]
 
     return SearchResponse(
         query=request.query,
@@ -152,6 +177,57 @@ def search(
         suggestions=_suggestions(connection, request.query, hits),
         total=total,
         took_ms=int((time.perf_counter() - started) * 1000),
+        expanded_query=expanded_query,
+    )
+
+
+def search(
+    connection: sqlite3.Connection, settings: Settings, request: SearchRequest
+) -> SearchResponse:
+    """跑一次混合检索（纯字面，毫秒级、不调 LLM）。`connection` 是只读打开的索引库连接。"""
+    started = time.perf_counter()
+    fused, total = _fused(connection, settings, request)
+
+    return _respond(connection, settings, request, fused, total, started)
+
+
+def search_smart(
+    connection: sqlite3.Connection, settings: Settings, request: SearchRequest
+) -> SearchResponse:
+    """智能检索：查询扩展的**并集召回** + LLM 列表精排（`mode=smart`）。
+
+    两段的分工来自 issue #23 的实测：
+
+    - 纯字面召回上限 17/30，精排再准也凑不出答案；扩展召回的并集能到 29/30；
+    - 有了候选集，LLM 列表精排几乎不丢分（29/30 = 并集上限）。
+
+    **任何一步失败都退回纯字面**：LLM 未配置、超时、返回不可解析——结果与 `mode=lexical` 相同，
+    只是慢了一点。所以调用方可以放心把它做成开关。
+    """
+    started = time.perf_counter()
+    fused, total = _fused(connection, settings, request)
+    expansion = expand_query(settings, request.query)
+
+    if expansion:
+        extra, extra_total = _fused(connection, settings, request, query=expansion)
+        total += extra_total
+        seen = {hit.candidate.key for hit in fused}
+        fused = fused + [hit for hit in extra if hit.candidate.key not in seen]
+
+    if not expansion:
+        # 扩展失败：连精排也不必做（候选集本来就不够），保持与纯字面完全一致的行为。
+        return _respond(connection, settings, request, fused, total, started)
+
+    reranked = rerank(settings, request.query, fused[:SMART_CANDIDATE_LIMIT])
+
+    return _respond(
+        connection,
+        settings,
+        request,
+        reranked,
+        total,
+        started,
+        expanded_query=expansion,
     )
 
 

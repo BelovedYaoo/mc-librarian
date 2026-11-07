@@ -97,6 +97,7 @@ class EvalReport:
     index_path: Path
     source_root: Path
     index_has_summaries: bool
+    mode: str
     set_name: str
     set_path: Path
     generated_at: str

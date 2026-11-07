@@ -243,6 +243,7 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
         description=(
             "多路融合检索（中文摘要 / 符号 / 字面量 / 引用 / 补丁）。"
             "中文提问的主入口；返回带 why 与 suggestions 的命中。"
+            "mode=smart 时做扩展召回 + LLM 精排（更准但慢 5–10 秒、额外消耗 token）。"
         )
     )
     def search(
@@ -252,12 +253,17 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
         path_prefix: str | None = None,
         detail: str = "snippet",
         limit: int = 10,
+        mode: str = "lexical",
     ) -> str:
-        """`source` 只对加载器版本有意义：patched / loader / patch。"""
+        """`source` 只对加载器版本有意义：patched / loader / patch。
+
+        `mode`：`lexical`（默认，毫秒级）或 `smart`（扩展召回 + LLM 精排，失败自动退回字面）。
+        """
         try:
             request = SearchRequest(
                 query=query_text,
                 version=version,
+                mode="smart" if mode == "smart" else "lexical",
                 source=_source(source),
                 path_prefix=path_prefix,
                 detail=_detail(detail),
@@ -268,7 +274,10 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
 
         try:
             with index_of(version) as index:
-                response = service.search(index, effective(), request)
+                if request.mode == "smart":
+                    response = service.search_smart(index, effective(), request)
+                else:
+                    response = service.search(index, effective(), request)
         except LookupError as error:
             return _error(str(error))
         except sqlite3.Error as error:
