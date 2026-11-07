@@ -13,7 +13,7 @@ from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Query
 
-from mc_librarian.auth.deps import CurrentUser, DbConn, SettingsDep
+from mc_librarian.auth.deps import CurrentUser, DbConn, EffectiveSettingsDep, SettingsDep
 from mc_librarian.config import Settings
 from mc_librarian.indexing import query
 from mc_librarian.indexing.layout import source_root
@@ -102,9 +102,11 @@ def require_index(conn: sqlite3.Connection, settings: Settings, version: str) ->
 def search(
     conn: DbConn,
     _user: CurrentUser,
-    settings: SettingsDep,
+    settings: EffectiveSettingsDep,
     body: SearchRequest,
 ) -> SearchResponse:
+    # 用**有效设置**（环境 + `settings` 表覆盖）而不是原始环境配置：模型配置通常在设置页里写，
+    # 只读环境变量会让 `mode=smart` 永远回退成字面（实测生产就是这个现象）。
     index = query.open_readonly(require_index(conn, settings, body.version))
 
     try:
