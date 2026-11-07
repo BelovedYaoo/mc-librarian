@@ -84,11 +84,23 @@ const BEMYLOVER_DARK = {
     },
     { scope: ['variable.parameter'], settings: { foreground: '#D19A66' } },
     { scope: ['variable', 'variable.other'], settings: { foreground: '#ABB2BF' } },
+    // 局部变量 / 方法调用的接收者（`counts.`、`category.`）：icls 的 DEFAULT_LOCAL_VARIABLE。
+    // Java 的 TextMate 语法只给「对象」这一层作用域，参数名（`pos`）没有独立 scope，
+    // 所以这一条是短片段里最能拉开层次的颜色。
+    {
+      scope: [
+        'variable.other.object',
+        'variable.other.object.property',
+        'variable.other.readwrite',
+      ],
+      settings: { foreground: '#E7CC79' },
+    },
     {
       scope: ['string.regexp', 'constant.character.escape'],
       settings: { foreground: '#56B6C2' },
     },
-    { scope: ['keyword.operator'], settings: { foreground: '#ABB2BF' } },
+    // 运算符用 icls 的转义色（青）：`<`、`<=`、`=` 在长表达式里一眼能分段。
+    { scope: ['keyword.operator'], settings: { foreground: '#56B6C2' } },
     { scope: ['entity.name.tag'], settings: { foreground: '#E06C75' } },
     { scope: ['invalid'], settings: { foreground: '#E06C75' } },
   ],

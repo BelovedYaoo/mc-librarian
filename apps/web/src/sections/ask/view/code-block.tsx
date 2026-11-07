@@ -1,165 +1,101 @@
 /**
- * 回答里的 fenced 代码块：行号、语言标签、复制、diff 着色、限高内滚。
+ * 回答里的 fenced 代码块：行号、语言标签、复制、diff 着色、限高内滚、按内容自适应宽度。
  *
- * 为什么不直接用 shadcn / beui 的 `code-block`：它们都是 Tailwind + shadcn 的组件，本项目是
- * MUI + `sx`，装进来等于再引一套样式系统（和 beautifului 那次同一个问题）。这里只借它们的
- * **交互设计**，用 MUI 重写，约 150 行。
+ * 为什么用 Shiki 而不是 `rehype-highlight`：后者的 Java 语法**不给方法调用着色**
+ * （`getOrDefault`、`getMaxInstancesPerChunk` 全是正文色），短片段看起来就是一片灰。
+ * 抽屉里的源码用的是 Shiki + `Bemylover.icls` 主题，这里复用同一套，两处观感一致。
  *
- * 行号为什么放在 rehype 阶段做：markdown 的代码块在 React 里是一棵 `span` 树（highlight.js
- * 已经把 token 拆开了），在组件层没法按行切。这里加一个轻量插件，把 `<pre><code>` 的子节点
- * 按换行摊平成「一行一个 `span.code-line`」，行号交给 CSS counter，token 的 `hljs-*` 类原样保留。
+ * 宽度：`width: fit-content` —— 单行片段只占内容那么宽，长行再撑满并横向滚动。
+ *
+ * 行号在组件里渲染（不用 CSS counter）：行是一次性排好的 `span.code-line`，行号是独立的
+ * 不可选列，复制走原始 `code` 字符串，不会把行号带进去。
  */
 
-import type { ReactNode } from 'react';
+import type { ThemedToken } from 'shiki/core';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Typography from '@mui/material/Typography';
+import { useTheme } from '@mui/material/styles';
+
+import type { HighlightLanguage } from './shiki-highlighter';
+
+import { highlightLines, themeForMode } from './shiki-highlighter';
 
 // ----------------------------------------------------------------------
 
-/**
- * 换行符常量：字面量写在本仓的编辑链里被吞过几次（Python heredoc 会把 `
-` 变成真换行），
- * 统一走 `fromCharCode`，不再依赖转义。
- */
+/** 换行符常量：字面量写在本仓的编辑链里被吞过几次，统一走 `fromCharCode`。 */
 const NEWLINE = String.fromCharCode(10);
+/** 行高（px）：13px 字号配 22px，中文注释与英文代码都不会挤。 */
+const LINE_HEIGHT = 22;
+/** 高亮的防抖窗口：流式输出时代码块每个 delta 都在变，逐次高亮会白烧 CPU。 */
+const HIGHLIGHT_DEBOUNCE_MS = 120;
 
-/** hast 节点的最小结构（只覆盖本文件用到的字段）。 */
-type HastNode = {
-  type: string;
-  tagName?: string;
-  value?: string;
-  properties?: Record<string, unknown>;
-  children?: HastNode[];
-};
+/** `language-java` → `java`；其它一律按纯文本。 */
+function normalizeLanguage(raw: string): HighlightLanguage | 'text' {
+  const name = raw.toLowerCase();
 
-/**
- * 把若干 hast 子节点按换行切成「每行一组」，**保留 token 的 span 外壳**。
- *
- * 关键点：换行可能落在某个 `<span class="hljs-string">` 内部（多行字符串/注释），
- * 这时要把该 span 拆成多个克隆，各自带走自己那一行的文本——不能直接把它拍平成文本，
- * 否则高亮就丢了。
- */
-function splitChildren(children: HastNode[]): HastNode[][] {
-  const lines: HastNode[][] = [[]];
+  if (name === 'java') return 'java';
 
-  for (const child of children) {
-    if (child.type === 'text') {
-      const parts = (child.value ?? '').split(NEWLINE);
+  if (name === 'json') return 'json';
 
-      parts.forEach((part, index) => {
-        if (index > 0) lines.push([]);
-        if (part !== '') lines[lines.length - 1].push({ type: 'text', value: part });
-      });
-
-      continue;
-    }
-
-    const inner = splitChildren(child.children ?? []);
-
-    inner.forEach((part, index) => {
-      if (index > 0) lines.push([]);
-
-      if (part.length > 0) {
-        lines[lines.length - 1].push({ ...child, children: part });
-      }
-    });
-  }
-
-  return lines;
+  return 'text';
 }
 
-/** 一行里的纯文本（用于判断 diff 前缀与空行）。 */
-function textOf(nodes: HastNode[]): string {
-  return nodes
-    .map((node) => (node.type === 'text' ? (node.value ?? '') : textOf(node.children ?? [])))
-    .join('');
+/** Shiki 的 `fontStyle` 是位掩码（1=italic、2=bold）。 */
+function fontStyleOf(style: number | undefined): string | undefined {
+  if (style === undefined) return undefined;
+
+  const parts: string[] = [];
+  if (style & 1) parts.push('italic');
+  if (style & 2) parts.push('bold');
+
+  return parts.length > 0 ? parts.join(' ') : undefined;
 }
 
-/**
- * 把 `<pre><code>` 的内容按行摊平，并给 `<pre>` 打上 `data-language`。
- *
- * 只处理 `pre > code`（fenced 代码块）：行内 `code` 不受影响。
- */
-export function rehypeCodeLines() {
-  return (tree: HastNode) => {
-    const visit = (node: HastNode) => {
-      if (node.type === 'element' && node.tagName === 'pre') {
-        const code = (node.children ?? []).find(
-          (child) => child.type === 'element' && child.tagName === 'code'
-        );
+/** 一行代码的渲染数据：原始文本（判 diff 前缀）+ 高亮后的 token（未高亮时为 null）。 */
+type RenderedLine = { text: string; tokens: ThemedToken[] | null };
 
-        if (code !== undefined) {
-          const className = String((code.properties?.className ?? []).toString());
-          const language = /language-([\w-]+)/.exec(className)?.[1] ?? 'text';
-
-          node.properties = { ...node.properties, 'data-language': language };
-
-          const lines = splitChildren(code.children ?? []);
-
-          // 围栏内容常以换行结尾（最后一行只有换行符），会多出一个空行——它不该占一个行号。
-          while (lines.length > 1 && lines[lines.length - 1].length === 0) lines.pop();
-
-          code.children = lines.map((children) => {
-            const text = textOf(children);
-            // 三种行分类：hunk 头（`@@`）、新增（`+`）、删除（`-`）。
-            // `+++`/`---` 是 diff 的文件头，不算增删；`@@` 压弱成注释色（highlight.js 的 diff
-            // 语法不包 meta，只能按行首判断）。
-            const kind = /^\+\+\+|^---/.test(text)
-              ? ''
-              : text.startsWith('@@')
-                ? 'diff-hunk'
-                : text.startsWith('+')
-                  ? 'diff-add'
-                  : text.startsWith('-')
-                    ? 'diff-del'
-                    : '';
-
-            return {
-              type: 'element',
-              tagName: 'span',
-              properties: { className: ['code-line', kind].filter(Boolean) },
-              children,
-            };
-          });
-        }
-      }
-
-      for (const child of node.children ?? []) visit(child);
-    };
-
-    visit(tree);
-  };
-}
-
-// ----------------------------------------------------------------------
-
-/**
- * fenced 代码块的外壳：顶部一条 header（语言 + 复制），内容限高内滚。
- *
- * 复制取的是 `<pre>` 的 `innerText`：行号是 CSS `::before` 生成的，不在 `innerText` 里，
- * 所以复制结果是干净的代码。
- */
-export function CodeBlockPre({
-  node,
-  children,
-  ...props
-}: {
-  node?: HastNode;
-  children?: ReactNode;
-  [key: string]: unknown;
-}) {
-  const preRef = useRef<HTMLPreElement | null>(null);
+export function MarkdownCode({ code, language }: { code: string; language: string }) {
+  const { palette } = useTheme();
+  const [lines, setLines] = useState<RenderedLine[]>(() => plainLines(code));
   const [copied, setCopied] = useState(false);
-  const language = String(node?.properties?.['data-language'] ?? 'text');
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const lang = normalizeLanguage(language);
+
+    // 先立刻给一份纯文本：高亮是异步的（Shiki 的 chunk 首次还要下载），不能让代码块空着。
+    setLines(plainLines(code));
+
+    if (lang === 'text') return undefined;
+
+    if (timer.current !== null) clearTimeout(timer.current);
+
+    timer.current = setTimeout(() => {
+      highlightLines(code, lang, themeForMode(palette.mode))
+        .then((tokens) => {
+          setLines(
+            code.split(NEWLINE).map((text, index) => ({
+              text,
+              tokens: tokens[index] ?? null,
+            }))
+          );
+        })
+        .catch(() => {
+          // 高亮失败就停在纯文本，不影响阅读与复制。
+        });
+    }, HIGHLIGHT_DEBOUNCE_MS);
+
+    return () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    };
+  }, [code, language, palette.mode]);
 
   const copy = async () => {
-    const text = preRef.current?.innerText ?? '';
-
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(code);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -171,6 +107,9 @@ export function CodeBlockPre({
     <Box
       sx={{
         my: 1.5,
+        // 短片段不铺满整行；长行仍被 `maxWidth` 收住，由内层横向滚动。
+        width: 'fit-content',
+        maxWidth: '100%',
         border: '1px solid',
         borderColor: 'divider',
         borderRadius: 1.5,
@@ -193,18 +132,88 @@ export function CodeBlockPre({
           {language}
         </Typography>
 
-        <Box sx={{ flex: '1 1 auto' }} />
+        <Box sx={{ flex: '1 1 auto', minWidth: 24 }} />
 
         <Button size="small" onClick={() => void copy()} sx={{ minWidth: 0, fontSize: 12 }}>
           {copied ? '已复制' : '复制'}
         </Button>
       </Box>
 
-      <Box sx={{ maxHeight: 420, overflow: 'auto' }}>
-        <Box component="pre" ref={preRef} {...props} sx={{ m: 0, px: 1.5, py: 1 }}>
-          {children}
+      {/* 内边距放在滚动容器上：markdown 容器的 `& pre { p: 0 }` 特异性更高，写在 `pre` 上会被盖掉。 */}
+      <Box sx={{ maxHeight: 420, overflow: 'auto', px: 1.5, py: 1 }}>
+        <Box component="pre" sx={{ m: 0, fontSize: 13, lineHeight: `${LINE_HEIGHT}px` }}>
+          {lines.map((line, index) => {
+            const kind = lineKind(line.text);
+
+            return (
+              <Box
+                component="span"
+                key={index}
+                className={kind === '' ? 'code-line' : `code-line ${kind}`}
+                sx={{
+                  display: 'flex',
+                  // 空行也要占一行、也要有行号。
+                  minHeight: `${LINE_HEIGHT}px`,
+                  borderRadius: 0.5,
+                }}
+              >
+                <Box
+                  component="span"
+                  sx={{
+                    width: '2.8em',
+                    flexShrink: 0,
+                    pr: 1.5,
+                    textAlign: 'right',
+                    color: 'text.secondary',
+                    opacity: 0.6,
+                    userSelect: 'none',
+                  }}
+                >
+                  {index + 1}
+                </Box>
+
+                <Box component="span" sx={{ whiteSpace: 'pre' }}>
+                  {line.tokens === null
+                    ? line.text
+                    : line.tokens.map((token, position) => (
+                        <span
+                          key={position}
+                          style={{
+                            color: token.color,
+                            fontStyle: fontStyleOf(token.fontStyle),
+                          }}
+                        >
+                          {token.content}
+                        </span>
+                      ))}
+                </Box>
+              </Box>
+            );
+          })}
         </Box>
       </Box>
     </Box>
   );
+}
+
+/** 纯文本行（高亮未就绪 / 语言不支持时）。 */
+function plainLines(code: string): RenderedLine[] {
+  return code.split(NEWLINE).map((text) => ({ text, tokens: null }));
+}
+
+/**
+ * 行分类：hunk 头（`@@`）、新增（`+`）、删除（`-`）。
+ *
+ * `+++` / `---` 是 diff 的文件头，不算增删。
+ */
+function lineKind(text: string): string {
+  if (/^\+\+\+|^---/.test(text)) return '';
+
+  if (text.startsWith('@@')) return 'diff-hunk';
+
+  if (text.startsWith('+')) return 'diff-add';
+
+  if (text.startsWith('-')) return 'diff-del';
+
+  return '';
 }

@@ -4,13 +4,12 @@ import { Children, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import Box from '@mui/material/Box';
 import ReactMarkdown from 'react-markdown';
-import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 
 import type { Citation } from 'src/lib/api-client';
 import { markdownContainerSx } from 'src/theme';
 
-import { CodeBlockPre, rehypeCodeLines } from './code-block';
+import { MarkdownCode } from './code-block';
 
 // ----------------------------------------------------------------------
 
@@ -49,12 +48,7 @@ export function AnswerMarkdown({
 
   return (
     <Box sx={markdownContainerSx}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        // 先让 highlight.js 上色，再按行摊平（行号/复制/diff 着色都基于摊平结果）。
-        rehypePlugins={[rehypeHighlight, rehypeCodeLines]}
-        components={components}
-      >
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {closeOpenFence(source)}
       </ReactMarkdown>
 
@@ -233,8 +227,9 @@ function buildComponents(
         <table {...props} />
       </Box>
     ),
-    // 代码块：语言标签 + 复制 + 行号 + 限高内滚（见 `code-block.tsx`）。
-    pre: (props) => <CodeBlockPre {...props} />,
+    // 代码块由 `code` 组件自己渲染（语言标签 + 行号 + 复制 + Shiki 高亮），
+    // 所以 `pre` 只做透传，避免外面再套一层 `<pre>`。
+    pre: ({ node: _node, children }) => <>{children}</>,
     // 段落与列表项是引用出现最多的地方：把其中的裸路径也变成可点击。
     p: ({ node: _node, children, ...props }) => (
       <p {...props}>{withReferences(children, onOpenCitation, citations)}</p>
@@ -244,9 +239,15 @@ function buildComponents(
     ),
     code: ({ node: _node, className, children, ...props }) => {
       const raw = String(children ?? '');
-      const isBlock = (className ?? '').includes('language-') || raw.includes(NEWLINE);
-      const citation =
-        !isBlock && onOpenCitation !== undefined ? parseCodeReference(raw, citations) : null;
+      const language = /language-([\w-]+)/.exec(className ?? '')?.[1];
+      const isBlock = language !== undefined || raw.includes(NEWLINE);
+
+      if (isBlock) {
+        // 围栏内容以换行结尾，去掉尾部那一个：否则会多出一个空行行号。
+        return <MarkdownCode code={raw.replace(/\n$/, '')} language={language ?? 'text'} />;
+      }
+
+      const citation = onOpenCitation !== undefined ? parseCodeReference(raw, citations) : null;
 
       if (citation === null) {
         return (
