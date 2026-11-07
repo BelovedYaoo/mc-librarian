@@ -253,7 +253,7 @@ def build_server(database: Database, settings: Settings) -> MCPServer:
         path_prefix: str | None = None,
         detail: str = "snippet",
         limit: int = 10,
-        mode: str = "lexical",
+        mode: str = "smart",
     ) -> str:
         """`source` 只对加载器版本有意义：patched / loader / patch。
 

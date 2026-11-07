@@ -29,7 +29,7 @@ from mc_librarian.retrieval.channels import (
 )
 from mc_librarian.retrieval.fuse import FusedHit, apply_token_budget, fuse
 from mc_librarian.retrieval.smart import SMART_CANDIDATE_LIMIT, expand_query, rerank
-from mc_librarian.retrieval.terms import identifiers
+from mc_librarian.retrieval.terms import has_cjk, identifiers
 from mc_librarian.schemas import (
     FileSlice,
     Hit,
@@ -205,6 +205,13 @@ def search_smart(
     只是慢了一点。所以调用方可以放心把它做成开关。
     """
     started = time.perf_counter()
+    names = identifiers(request.query)
+
+    # 纯标识符查询（`LootTable`、`getMaxInstancesPerChunk`）字面通道本来就是精确匹配，
+    # 再花两次 LLM 调用不划算，也不会更准。
+    if names and not has_cjk(request.query):
+        return search(connection, settings, request)
+
     fused, total = _fused(connection, settings, request)
     expansion = expand_query(settings, request.query)
 

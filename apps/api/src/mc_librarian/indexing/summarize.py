@@ -931,26 +931,31 @@ def post_chat_completion(
     timeout: float,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    attempts: int = RETRY_ATTEMPTS,
 ) -> str:
     """带退避重试地发一次 chat completion（只重试瞬时错误）。
 
     `sleep` 可注入，便于测试不真的等待。
+
+    `attempts` 由调用方决定：摘要生成值得重试（重试一次就少一个缺摘要的类）；
+    **智能检索不值得**——它失败就该立刻回退纯字面，把 2/4/8 秒的退避叠加到一次搜索上
+    只会让用户白等（见 `retrieval.smart`）。
     """
     last: Exception | None = None
 
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
+    for attempt in range(1, max(1, attempts) + 1):
         try:
             return _post_chat_completion_once(url, payload, api_key, timeout)
         except _RetryableSummaryError as error:
             last = error
 
-            if attempt == RETRY_ATTEMPTS:
+            if attempt == max(1, attempts):
                 break
 
             # 指数退避：2s / 4s / 8s（第 4 次不再等）。
             sleep(RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
 
-    raise SummaryError(f"重试 {RETRY_ATTEMPTS} 次仍失败：{last}")
+    raise SummaryError(f"重试 {max(1, attempts)} 次仍失败：{last}")
 
 
 def _post_chat_completion_once(

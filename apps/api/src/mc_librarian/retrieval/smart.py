@@ -78,7 +78,12 @@ def _ask(settings: Settings, prompt: str) -> str:
     }
 
     return post_chat_completion(
-        f"{config.base_url}/chat/completions", payload, config.api_key, settings.llm_timeout_s
+        f"{config.base_url}/chat/completions",
+        payload,
+        config.api_key,
+        settings.llm_timeout_s,
+        # 失败就回退字面，不在这里退避重试：一次搜索不该因为 LLM 抖动多等 14 秒。
+        attempts=1,
     ).strip()
 
 

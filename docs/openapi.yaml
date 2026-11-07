@@ -1078,9 +1078,9 @@ components:
         mode:
           type: string
           enum: [lexical, smart]
-          default: lexical
+          default: smart
           description: |
-            `lexical`（默认，毫秒级、不调 LLM）或 `smart`（扩展召回 + LLM 列表精排）。
+            `smart`（默认）或 `lexical`（毫秒级、不调 LLM）。
 
             `smart` 的召回是「原句」与「LLM 扩展词」两路的并集（实测召回上限 29/30 vs 字面 17/30），
             再用 LLM 从**真实候选**里挑前 5（不让模型凭记忆编造）。每查询最多 2 次 LLM 调用，

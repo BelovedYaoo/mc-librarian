@@ -19,11 +19,9 @@ from mc_librarian.retrieval import (
     read_patch,
     read_source,
     reference_list,
+    search_smart,
     slice_lines,
     symbol_matches,
-)
-from mc_librarian.retrieval import (
-    search as run_search,
 )
 from mc_librarian.schemas import (
     Citation,
@@ -206,7 +204,9 @@ class ToolBox:
             limit=_bounded_int(args, "limit", DEFAULT_LIMIT, 1, 50),
             max_tokens=_bounded_int(args, "max_tokens", DEFAULT_MAX_TOKENS, 200, 32000),
         )
-        response = run_search(self._connection, self._settings, request)
+        # 问答循环里**总是走智能检索**：模型自己写的查询未必是最优召回词，多花两次 LLM 调用
+        # 换召回（实测纯字面 43% → 智能 93%）。纯标识符查询内部会直通字面，不会白花。
+        response = search_smart(self._connection, self._settings, request)
 
         return ToolOutcome(
             ok=True,

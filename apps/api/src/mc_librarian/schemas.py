@@ -639,9 +639,10 @@ class SearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=512)
     version: str
-    # `lexical` = 纯字面（毫秒级、不调 LLM）；`smart` = 扩展召回 + LLM 列表精排（较慢、更准）。
-    # 智能检索的任何一步失败都会退回字面结果，所以可以放心地做成开关。
-    mode: SearchMode = "lexical"
+    # `smart`（默认）= 扩展召回 + LLM 列表精排；`lexical` = 纯字面（毫秒级、不调 LLM）。
+    # 默认智能：这个库的用途就是「用中文说法找到正确的类」，召回比毫秒级延迟重要。
+    # 智能检索的任何一步失败都会退回字面，也可以显式传 `lexical` 关掉。
+    mode: SearchMode = "smart"
     path_prefix: str | None = None
     source: SourceKind | None = None
     kind: SymbolKind = "any"

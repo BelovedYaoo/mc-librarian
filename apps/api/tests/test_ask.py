@@ -998,3 +998,56 @@ def test_adjacent_tool_batches_merge_into_one_segment(
     # 两批共 3 次调用，全在同一条片段里，且每条都配上了结果。
     assert [step["tool"] for step in steps] == ["search", "symbol", "search"]
     assert all(step["ok"] is True for step in steps), steps
+
+
+def test_search_tool_uses_smart_retrieval(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """问答的 `search` 工具**默认走智能检索**：模型自己写的查询未必是最优召回词。
+
+    纯字面 43% → 智能 93%（30 题实测），所以这里不接受「省两次 LLM 调用」的优化。
+    """
+    from mc_librarian.retrieval import search_smart as original
+
+    calls: list[str] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append("smart")
+        return original(*args, **kwargs)
+
+    # 用字符串路径 patch：`tools.search_smart` 是从 `retrieval` 导入的名字，
+    # 在 mypy 的 no-implicit-reexport 下不算“本模块导出”。
+    monkeypatch.setattr("mc_librarian.answer.tools.search_smart", spy)
+    fake_chat.script = [tool_call("search", query="Mob", detail="locate"), final_answer("好。")]
+
+    ask(user_client)
+
+    assert calls == ["smart"], "search 工具必须调用智能检索"
+
+
+def test_smart_search_skips_llm_for_identifier_queries(
+    user_client: TestClient, settings: Settings, conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯英文标识符查询直通字面：字面通道本来就是精确匹配，不该白花两次 LLM 调用。"""
+    from mc_librarian.indexing import query as query_module
+    from mc_librarian.indexing.layout import index_path
+    from mc_librarian.retrieval import service as service_module
+    from mc_librarian.schemas import SearchRequest
+
+    register_version(settings, conn)
+
+    def boom(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("纯标识符查询不应调用 LLM 扩展")
+
+    monkeypatch.setattr(service_module, "expand_query", boom)
+    index = query_module.open_readonly(index_path(settings.data_dir, VERSION))
+
+    try:
+        response = service_module.search_smart(
+            index, settings, SearchRequest(version=VERSION, query="Mob", mode="smart", limit=5)
+        )
+    finally:
+        index.close()
+
+    assert response.hits, response.hits

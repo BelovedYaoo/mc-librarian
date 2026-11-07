@@ -67,8 +67,9 @@ export function BrowseView() {
 
   const [version, setVersion] = useState('');
   const [query, setQuery] = useState('');
-  // 智能检索：扩展召回 + LLM 精排（较慢）。默认关，保持毫秒级的纯字面检索。
-  const [smart, setSmart] = useState(false);
+  // 智能检索：扩展召回 + LLM 精排。**默认开**——这个库的价值是「用中文说法找到正确的类」，
+  // 召回比毫秒级延迟重要；关掉仍是原来的纯字面。
+  const [smart, setSmart] = useState(true);
   const [pathPrefix, setPathPrefix] = useState('');
   const [kind, setKind] = useState<SymbolKind>('any');
   const [detail, setDetail] = useState<'snippet' | 'locate'>('snippet');
