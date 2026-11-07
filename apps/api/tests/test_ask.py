@@ -1051,3 +1051,21 @@ def test_smart_search_skips_llm_for_identifier_queries(
         index.close()
 
     assert response.hits, response.hits
+
+
+def test_user_message_carries_the_version(
+    user_client: TestClient, indexed: Path, fake_chat: FakeChat
+) -> None:
+    """用户消息也要落版本：助手消息要等生成结束才写，刷新时可能只有用户消息可读。
+
+    前端「这一轮用哪个版本」就靠它。只存助手消息时，生成中刷新会显示成「此轮版本未知」。
+    """
+    fake_chat.script = [final_answer("好。")]
+
+    events = parse_sse(ask(user_client).text)
+    conversation_id = next(event for event in events if event["type"] == "done")["conversation_id"]
+    messages = user_client.get(f"/v1/conversations/{conversation_id}").json()["messages"]
+
+    user_message = next(item for item in messages if item["role"] == "user")
+
+    assert user_message["version"] == VERSION

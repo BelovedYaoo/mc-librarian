@@ -871,24 +871,29 @@ function TurnBlock({
 
           {/* 片段按到达顺序渲染：工具批次 → 正文 → 工具批次 → 正文。
               模型在两次调工具之间说的话属于正文，不该被挤到所有工具之后。 */}
-          {turn.segments.map((segment, index) =>
-            segment.kind === 'steps' ? (
+          {turn.segments.map((segment, index) => {
+            // 只有**最后一段**是「还在发生」的。中间的工具批次/正文都已经定稿：
+            // 之前把 streaming 传给所有批次，导致第一批明明结束了还在转圈显示「正在规划下一步」。
+            const isLast = index === turn.segments.length - 1;
+
+            return segment.kind === 'steps' ? (
               <ThinkingTrace
                 key={`steps-${index}`}
                 steps={segment.steps}
-                streaming={streaming}
+                streaming={streaming && isLast}
                 startedAt={turn.startedAt}
-                latencyMs={turn.usage?.latency_ms ?? null}
+                // 总耗时只属于整轮，贴在最后一个批次上；中间批次不显示（否则每批都写同一个总数）。
+                latencyMs={isLast ? (turn.usage?.latency_ms ?? null) : null}
               />
             ) : (
               <AnswerMarkdown
                 key={`text-${index}`}
                 text={segment.text}
                 // 只有最后一段还在流式时才显示光标；中间段落已经定稿了。
-                streaming={streaming && index === turn.segments.length - 1}
+                streaming={streaming && isLast}
               />
-            )
-          )}
+            );
+          })}
 
           {turn.status === 'error' && <Alert severity="error">问答失败：{turn.error}</Alert>}
 
