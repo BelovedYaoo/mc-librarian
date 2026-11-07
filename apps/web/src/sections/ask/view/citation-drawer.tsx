@@ -1,4 +1,4 @@
-import type { Citation, FileSlice } from 'src/lib/api-client';
+import type { Citation, FileSlice, Outline } from 'src/lib/api-client';
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Alert from '@mui/material/Alert';
@@ -12,7 +12,7 @@ import Switch from '@mui/material/Switch';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 
-import { ApiError, readFile } from 'src/lib/api-client';
+import { ApiError, getOutline, readFile } from 'src/lib/api-client';
 
 import type { HighlightLanguage, HighlightedLine, HighlightTheme } from './shiki-highlighter';
 
@@ -65,6 +65,12 @@ export function CitationDrawer({
   const [wrap, setWrap] = useState(true);
   // 只看引用：大文件里引用常常在第 900 行，全文铺开时找不到重点。
   const [focusOnly, setFocusOnly] = useState(false);
+  // 结构信息（类/方法 + 精确行区间）：方法折叠、大纲侧栏、当前符号三处共用一次请求。
+  const [outline, setOutline] = useState<Outline | null>(null);
+  // 代码区顶部当前可见的行号：用于「当前符号」与大纲高亮。
+  const [currentLine, setCurrentLine] = useState<number | null>(null);
+  // 大纲点击跳转：带 nonce 是为了「再点同一项」也能触发。
+  const [scrollTo, setScrollTo] = useState<{ line: number; nonce: number } | null>(null);
 
   useEffect(() => {
     if (!open || citation === null) return undefined;
@@ -74,6 +80,16 @@ export function CitationDrawer({
     const [start, end] = citation.lines;
 
     setState({ status: 'loading' });
+    setOutline(null);
+
+    // 结构信息与正文并行取：拿不到就不折叠/不显示侧栏，不影响读代码。
+    void getOutline({ version, path })
+      .then((data) => {
+        if (!cancelled) setOutline(data);
+      })
+      .catch(() => {
+        if (!cancelled) setOutline(null);
+      });
 
     void (async () => {
       try {
@@ -100,6 +116,9 @@ export function CitationDrawer({
   useEffect(() => {
     if (!open) setCopied(false);
   }, [open]);
+
+  // 顶部「当前符号」：由当前可见行 + outline 推出来（最内层方法优先）。
+  const symbol = symbolAt(outline, currentLine ?? citation?.lines[0] ?? 1);
 
   const handleCopy = async () => {
     if (citation === null) return;
@@ -213,13 +232,47 @@ export function CitationDrawer({
                   </Alert>
                 )}
 
-                <FileViewer
-                  wrap={wrap}
-                  focusOnly={focusOnly}
-                  slice={state.slice}
-                  highlight={citation.lines}
-                  focusLine={citation.lines[0]}
-                />
+                <Box sx={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0 }}>
+                    {symbol !== null && (
+                      <Box
+                        sx={{
+                          flexShrink: 0,
+                          px: 1.5,
+                          py: 0.5,
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                          color: 'text.secondary',
+                          bgcolor: 'background.paper',
+                          borderBottom: '1px solid',
+                          borderColor: 'divider',
+                        }}
+                      >
+                        {symbol}
+                        {currentLine !== null && ` · 第 ${currentLine} 行`}
+                      </Box>
+                    )}
+
+                    <FileViewer
+                      wrap={wrap}
+                      focusOnly={focusOnly}
+                      slice={state.slice}
+                      highlight={citation.lines}
+                      focusLine={citation.lines[0]}
+                      outline={outline}
+                      scrollTo={scrollTo}
+                      onVisibleLine={setCurrentLine}
+                    />
+                  </Box>
+
+                  {outline !== null && outline.classes.length > 0 && (
+                    <OutlinePanel
+                      outline={outline}
+                      currentLine={currentLine}
+                      onJump={(line) => setScrollTo({ line, nonce: Date.now() })}
+                    />
+                  )}
+                </Box>
               </Stack>
             )}
           </Box>
@@ -235,7 +288,12 @@ export function CitationDrawer({
  * 整个文件的分行视图：按滚动位置只渲染可视区 ±200 行（几千行的文件不会生成几千个 DOM 节点）。
  * 行号固定宽度，高亮行用明显底色；打开时把 `focusLine` 滚到「居中偏上」。
  */
-type FoldRegion = { start: number; end: number; label: string };
+type FoldRegion = {
+  start: number;
+  end: number;
+  label: string;
+  kind: 'import' | 'class' | 'method';
+};
 
 /**
  * Java 文件里可以折叠的区间。目前只做 **import 块**——它最长、最没信息量，也是 IDEA 默认折叠的。
@@ -243,7 +301,7 @@ type FoldRegion = { start: number; end: number; label: string };
  * 识别方式：连续的 `import ...` 行（允许中间夹空行）。返回的 `start`/`end` 是**文件行号**
  * （与 `slice.start` 对齐），不是数组下标。
  */
-function foldableRegions(lines: string[], startLine: number): FoldRegion[] {
+function importRegions(lines: string[], startLine: number): FoldRegion[] {
   const regions: FoldRegion[] = [];
   let index = 0;
 
@@ -275,11 +333,92 @@ function foldableRegions(lines: string[], startLine: number): FoldRegion[] {
       break;
     }
 
-    regions.push({ start: startLine + first, end: startLine + last, label: 'import' });
+    regions.push({ start: startLine + first, end: startLine + last, label: 'import', kind: 'import' });
     index = last + 1;
   }
 
   return regions;
+}
+
+/** `net.minecraft.world.Foo.Bar` → `Bar`（大纲/标题里只显示短名）。 */
+function simpleName(fqn: string): string {
+  return fqn.slice(fqn.lastIndexOf('.') + 1);
+}
+
+/**
+ * 全部可折叠区间：import 块 + 类 + 方法（后两者来自 `/v1/outline` 的精确行区间）。
+ *
+ * 方法只折「≥ 3 行」的：一行 getter 折起来没有收益，反而让 `▾` 满屏。
+ */
+function foldableRegions(
+  lines: string[],
+  startLine: number,
+  outline: Outline | null
+): FoldRegion[] {
+  const regions = importRegions(lines, startLine);
+
+  if (outline === null) return regions;
+
+  for (const cls of outline.classes) {
+    const classLines = cls.lines;
+
+    if (classLines !== undefined) {
+      regions.push({
+        start: classLines[0],
+        end: classLines[1],
+        label: simpleName(cls.fqn ?? ''),
+        kind: 'class',
+      });
+    }
+
+    for (const method of cls.methods ?? []) {
+      const methodLines = method.lines;
+
+      if (methodLines === undefined || methodLines[1] - methodLines[0] < 3) continue;
+
+      regions.push({
+        start: methodLines[0],
+        end: methodLines[1],
+        label: method.signature ?? method.name ?? '',
+        kind: 'method',
+      });
+    }
+  }
+
+  return regions;
+}
+
+/** 某一行属于哪个符号：优先最内层的方法，其次类；都不在返回 null。 */
+function symbolAt(outline: Outline | null, line: number): string | null {
+  if (outline === null) return null;
+
+  let best: { label: string; span: number } | null = null;
+
+  for (const cls of outline.classes) {
+    for (const method of cls.methods ?? []) {
+      const lines = method.lines;
+
+      if (lines === undefined || line < lines[0] || line > lines[1]) continue;
+
+      const span = lines[1] - lines[0];
+
+      if (best === null || span < best.span) {
+        best = { label: `${simpleName(cls.fqn ?? '')}#${method.name ?? ''}`, span };
+      }
+    }
+
+    const classLines = cls.lines;
+
+    if (classLines === undefined || line < classLines[0] || line > classLines[1]) continue;
+
+    const span = classLines[1] - classLines[0];
+
+    if (best === null || span < best.span) {
+      best = { label: simpleName(cls.fqn ?? ''), span };
+    }
+  }
+
+  return best?.label ?? null;
 }
 
 /** 「只看引用」时上下各留多少行上下文。 */
@@ -291,12 +430,18 @@ function FileViewer({
   focusLine,
   wrap,
   focusOnly,
+  outline,
+  onVisibleLine,
+  scrollTo,
 }: {
   slice: FileSlice;
   highlight: readonly number[];
   focusLine: number;
   wrap: boolean;
   focusOnly: boolean;
+  outline: Outline | null;
+  onVisibleLine: (line: number) => void;
+  scrollTo: { line: number; nonce: number } | null;
 }) {
   // 按换行切行；`split` 的入参是单字符换行符。
   const lines = useMemo(() => slice.content.split(NEWLINE), [slice]);
@@ -314,12 +459,16 @@ function FileViewer({
     themeForMode(palette.mode)
   );
 
-  const regions = useMemo(() => foldableRegions(lines, startLine), [lines, startLine]);
+  const regions = useMemo(
+    () => foldableRegions(lines, startLine, outline),
+    [lines, startLine, outline]
+  );
   // 折叠状态按「区间起始行号」记；默认把 import 折叠起来（和 IDEA 一致）。
   const [folded, setFolded] = useState<readonly number[]>([]);
 
   useEffect(() => {
-    setFolded(regions.map((region) => region.start));
+    // 默认只折 import：类和方法的折叠按钮交给用户按需点（全折起来只剩几行标题，反而吓人）。
+    setFolded(regions.filter((region) => region.kind === 'import').map((region) => region.start));
   }, [regions]);
 
   // 引用行落在折叠区间里时必须展开它，否则打开抽屉看到的是「import 已折叠」而不是代码。
@@ -333,6 +482,41 @@ function FileViewer({
       )
     );
   }, [focusLine, regions]);
+
+  const frame = useRef<number | null>(null);
+
+  // 滚动时算出「顶部可见行」：按 `offsetTop` 二分（换行时行高不定，不能按固定行高乘）。
+  const handleScroll = () => {
+    if (frame.current !== null) return;
+
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
+      const element = scrollRef.current;
+
+      if (element === null) return;
+
+      const rows = element.querySelectorAll<HTMLElement>('[data-line]');
+      let low = 0;
+      let high = rows.length - 1;
+      let found: HTMLElement | null = null;
+
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        const row = rows[middle];
+
+        if (row.offsetTop <= element.scrollTop + 8) {
+          found = row;
+          low = middle + 1;
+        } else {
+          high = middle - 1;
+        }
+      }
+
+      const line = found?.dataset.line;
+
+      if (line !== undefined) onVisibleLine(Number(line));
+    });
+  };
 
   const foldedStarts = useMemo(() => new Set(folded), [folded]);
   const regionByStart = useMemo(
@@ -389,6 +573,36 @@ function FileViewer({
   // 记下「点击的那一行」相对视口的位置，渲染完成后把它放回原位。
   const anchor = useRef<{ lineNo: number; offset: number } | null>(null);
 
+  // 大纲点击跳转：目标行若在折叠区间里，先展开它，再滚过去。
+  const pendingJump = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (scrollTo === null) return;
+
+    pendingJump.current = scrollTo.line;
+    setFolded((current) =>
+      current.filter((start) => {
+        const region = regions.find((item) => item.start === start);
+
+        return region === undefined || scrollTo.line < region.start || scrollTo.line > region.end;
+      })
+    );
+  }, [scrollTo, regions]);
+
+  useLayoutEffect(() => {
+    const line = pendingJump.current;
+    const element = scrollRef.current;
+
+    if (line === null || element === null) return;
+
+    const row = element.querySelector<HTMLElement>(`[data-line="${line}"]`);
+
+    if (row === null) return;
+
+    element.scrollTop = Math.max(0, row.offsetTop - element.clientHeight * 0.3);
+    pendingJump.current = null;
+  }, [folded, scrollTo]);
+
   const toggleFold = (start: number) => {
     const element = scrollRef.current;
     const row = element?.querySelector<HTMLElement>(`[data-line="${start}"]`);
@@ -418,6 +632,7 @@ function FileViewer({
   return (
     <Box
       ref={scrollRef}
+      onScroll={handleScroll}
       sx={{
         flex: '1 1 auto',
         minHeight: 0,
@@ -478,6 +693,7 @@ function FileViewer({
                 ▸
               </Box>
               <Box component="span">
+                {region.kind === 'import' ? 'import ' : ''}
                 {region.label} …（{region.end - region.start + 1} 行，第 {region.start}-{region.end} 行）
               </Box>
             </Box>
@@ -552,6 +768,110 @@ function FileViewer({
           </Box>
         );
       })}
+    </Box>
+  );
+}
+
+/**
+ * 大纲侧栏：类 + 方法的跳转列表（等价于 IDEA 的 Structure 面板）。
+ *
+ * 只渲染一层缩进（类 → 方法）：类里的内部类本身就是独立的 `classes` 条目，再嵌套反而更难扫。
+ */
+function OutlinePanel({
+  outline,
+  currentLine,
+  onJump,
+}: {
+  outline: Outline;
+  currentLine: number | null;
+  onJump: (line: number) => void;
+}) {
+  return (
+    <Box
+      component="nav"
+      sx={{
+        width: 230,
+        flexShrink: 0,
+        display: { xs: 'none', md: 'block' },
+        overflowY: 'auto',
+        borderLeft: '1px solid',
+        borderColor: 'divider',
+        bgcolor: 'background.paper',
+        py: 1,
+      }}
+    >
+      <Typography variant="caption" sx={{ px: 1.5, color: 'text.secondary' }}>
+        结构（{outline.classes.length} 类）
+      </Typography>
+
+      {outline.classes.map((cls) => {
+        const classLines = cls.lines;
+
+        return (
+          <Box key={cls.fqn ?? ''} sx={{ mt: 0.5 }}>
+            <OutlineItem
+              label={simpleName(cls.fqn ?? '')}
+              line={classLines?.[0]}
+              active={currentLine !== null && classLines !== undefined && currentLine >= classLines[0] && currentLine <= classLines[1]}
+              bold
+              onJump={onJump}
+            />
+
+            {(cls.methods ?? []).map((method) => {
+              const lines = method.lines;
+
+              return (
+                <OutlineItem
+                  key={`${cls.fqn}#${method.name}-${lines?.[0] ?? 0}`}
+                  label={method.name ?? ''}
+                  line={lines?.[0]}
+                  active={currentLine !== null && lines !== undefined && currentLine >= lines[0] && currentLine <= lines[1]}
+                  onJump={onJump}
+                />
+              );
+            })}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
+function OutlineItem({
+  label,
+  line,
+  active,
+  bold = false,
+  onJump,
+}: {
+  label: string;
+  line: number | undefined;
+  active: boolean;
+  bold?: boolean;
+  onJump: (line: number) => void;
+}) {
+  return (
+    <Box
+      onClick={line === undefined ? undefined : () => onJump(line)}
+      sx={{
+        px: 1.5,
+        pl: bold ? 1.5 : 3,
+        py: 0.25,
+        fontSize: 12,
+        fontFamily: 'monospace',
+        fontWeight: bold ? 600 : 400,
+        color: active ? 'primary.main' : 'text.secondary',
+        cursor: line === undefined ? 'default' : 'pointer',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        bgcolor: active ? 'action.selected' : 'transparent',
+        '&:hover': { bgcolor: 'action.hover' },
+      }}
+      title={label}
+    >
+      {label}
+      {line !== undefined && <Box component="span" sx={{ ml: 1, opacity: 0.6 }}>{line}</Box>}
     </Box>
   );
 }
