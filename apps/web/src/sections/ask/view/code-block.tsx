@@ -19,11 +19,14 @@ import Typography from '@mui/material/Typography';
 
 // ----------------------------------------------------------------------
 
-/** hast 节点的最小结构（只覆盖本文件用到的字段）。 */
-/** 换行符常量：字面量 `'
-'` 在本仓的编辑链里被吞过几次，统一走常量。 */
+/**
+ * 换行符常量：字面量写在本仓的编辑链里被吞过几次（Python heredoc 会把 `
+` 变成真换行），
+ * 统一走 `fromCharCode`，不再依赖转义。
+ */
 const NEWLINE = String.fromCharCode(10);
 
+/** hast 节点的最小结构（只覆盖本文件用到的字段）。 */
 type HastNode = {
   type: string;
   tagName?: string;
@@ -99,7 +102,7 @@ export function rehypeCodeLines() {
           // 围栏内容常以换行结尾（最后一行只有换行符），会多出一个空行——它不该占一个行号。
           while (lines.length > 1 && lines[lines.length - 1].length === 0) lines.pop();
 
-          code.children = lines.map((children, index) => {
+          code.children = lines.map((children) => {
             const text = textOf(children);
             const kind =
               /^\+\+\+|^---/.test(text) ? '' : text.startsWith('+') ? 'diff-add' : text.startsWith('-') ? 'diff-del' : '';
@@ -107,11 +110,7 @@ export function rehypeCodeLines() {
             return {
               type: 'element',
               tagName: 'span',
-              properties: {
-                className: ['code-line', kind].filter(Boolean),
-                'data-empty': children.length === 0 ? 'true' : 'false',
-                key: String(index),
-              },
+              properties: { className: ['code-line', kind].filter(Boolean) },
               children,
             };
           });

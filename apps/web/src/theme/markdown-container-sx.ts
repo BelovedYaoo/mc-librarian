@@ -102,14 +102,14 @@ export function markdownContainerSx(theme: Theme) {
       position: 'relative',
       counterIncrement: 'code-line',
       minHeight: '1.6em',
-      pl: '3.4em',
+      pl: '3.8em',
       pr: 2,
       // 行尾多余空白不撑出横向滚动；长行本身仍按 `pre` 横向滚。
       '&::before': {
         content: 'counter(code-line)',
         position: 'absolute',
         left: 0,
-        width: '2.4em',
+        width: '2.8em',
         textAlign: 'right',
         color: 'text.secondary',
         opacity: 0.6,
