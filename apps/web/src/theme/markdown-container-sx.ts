@@ -25,6 +25,10 @@ const codeTokenColors = {
     number: '#005CC5',
     title: '#6F42C1',
     builtIn: '#E36209',
+    // diff：新增/删除行的文字色（底色由 `.code-line.diff-*` 给），hunk 头（`@@`）压弱。
+    inserted: '#22863A',
+    deleted: '#B31D28',
+    meta: '#6A737D',
   },
   dark: {
     // 取自 `Bemylover.icls`（Atom One Dark 系）的 Java 属性色，底为 `background.neutral`（#15161A）：
@@ -38,6 +42,10 @@ const codeTokenColors = {
     number: '#D19A66',
     title: '#E5C07B',
     builtIn: '#61AFEF',
+    // 取自 Bemylover.icls：字符串绿 `#89CA78` 与默认实体红 `#E06C75`；hunk 头用注释色。
+    inserted: '#89CA78',
+    deleted: '#E06C75',
+    meta: '#7F8B9D',
   },
 } as const;
 
@@ -117,11 +125,16 @@ export function markdownContainerSx(theme: Theme) {
       },
     },
     '& .code-line.diff-add': {
-      bgcolor: alpha(theme.palette.success.main, 0.12),
+      bgcolor: alpha(theme.palette.success.main, 0.16),
     },
     '& .code-line.diff-del': {
-      bgcolor: alpha(theme.palette.error.main, 0.12),
+      bgcolor: alpha(theme.palette.error.main, 0.16),
     },
+    // highlight.js 的 diff 语法把 `+`/`-` 行标成 addition/deletion、`@@` 标成 meta；
+    // 不映射的话它们会落回正文色，整块看着是一团灰。
+    '& .hljs-addition': { color: tokens.inserted },
+    '& .hljs-deletion': { color: tokens.deleted },
+    '& .hljs-meta': { color: tokens.meta },
     // 代码正文与 token 色。`rehype-highlight` 把 `.hljs` 加在 `<code>` 上、`.hljs-*` 加在 token 的
     // `<span>` 上，所以在这里统一覆盖；不引任何 highlight.js 主题 CSS。
     '& pre code': {
