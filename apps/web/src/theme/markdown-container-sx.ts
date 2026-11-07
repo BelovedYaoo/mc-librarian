@@ -42,9 +42,11 @@ const codeTokenColors = {
     number: '#D19A66',
     title: '#E5C07B',
     builtIn: '#61AFEF',
-    // 取自 Bemylover.icls：字符串绿 `#89CA78` 与默认实体红 `#E06C75`；hunk 头用注释色。
+    // 取自 Bemylover.icls：字符串绿 `#89CA78`；hunk 头用注释色。
+    // 删除行用 `#E06C75` 的提亮版 `#FF9AA2`：原色在 16% 红底上只有 4.68:1（刚过 AA，
+    // 观感发闷），提亮后 7.4:1——同一色相，只是加亮，不引入新色。
     inserted: '#89CA78',
-    deleted: '#E06C75',
+    deleted: '#FF9AA2',
     meta: '#7F8B9D',
   },
 } as const;
