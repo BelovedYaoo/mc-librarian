@@ -155,6 +155,9 @@ export function MarkdownCode({ code, language }: { code: string; language: strin
                   // 空行也要占一行、也要有行号。
                   minHeight: `${LINE_HEIGHT}px`,
                   borderRadius: 0.5,
+                  // 右侧留白：左边有行号列撑着，行尾如果贴着边框会显得偏，视觉重心被拽向右侧。
+                  // 24px 与行号列（约 48px）形成不对称但平衡的留白。
+                  pr: 3,
                 }}
               >
                 <Box
