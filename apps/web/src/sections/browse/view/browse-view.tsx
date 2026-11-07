@@ -319,6 +319,13 @@ export function BrowseView() {
               命中（{results.hits.length} / total {results.total}）
             </Typography>
 
+            {results.expanded_query && (
+              // 智能检索实际用了哪些扩展词：结果和直觉不符时，这里是第一手线索。
+              <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 1 }}>
+                智能检索扩展词：{results.expanded_query}
+              </Typography>
+            )}
+
             <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
               耗时 {results.took_ms} ms · detail={detail}
             </Typography>
