@@ -178,15 +178,16 @@ const darkPalette: PaletteOptions = {
   ...semanticColors,
   grey,
   common: { black: '#000000', white: '#FFFFFF' },
-  // 分隔线直接用方案里的「光标行」色：比 rgba 叠加更可控，也不会随底色漂移。
-  divider: '#2C313C',
+  // 分隔线取方案里的「缩进参考线」色 `#3B4048`（比光标行 `#2C313C` 再亮一档）：
+  // 深色下页面底与卡片的明度差只有 1.13:1，层次主要靠这条边框撑起来，太暗会糊成一片。
+  divider: '#3B4048',
   text: {
     // 以下三色与代码高亮取自 `Bemylover.icls`（Atom One Dark 系）：
-    // 正文 `#ABB2BF`（paper 上 7.22:1）、次要 `#8D99AB`（5.33:1）、禁用 `#5C6370`（禁用态不要求 AA）。
-    // 次要色比方案里的行注释色 `#7F8B9D` 提亮了一档：深底上的浅灰小字观感比同比值的浅底更暗
+    // 正文 `#ABB2BF`（paper 上 7.22:1）、次要 `#95A1B2`（5.88:1）、禁用 `#5C6370`（禁用态不要求 AA）。
+    // 次要色比方案里的行注释色 `#7F8B9D` 提亮了两档：深底上的浅灰小字观感比同比值的浅底更暗
     // （Helmholtz–Kohlrausch 效应），4.46:1 的注释色放在 12px 的时间/用量上会读不清。
     primary: '#ABB2BF',
-    secondary: '#8D99AB',
+    secondary: '#95A1B2',
     disabled: '#5C6370',
   },
   background: {
