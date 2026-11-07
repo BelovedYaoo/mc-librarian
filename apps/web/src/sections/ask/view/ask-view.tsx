@@ -896,8 +896,10 @@ function TurnBlock({
                 text={segment.text}
                 // 只有最后一段还在流式时才显示光标；中间段落已经定稿了。
                 streaming={streaming && isLast}
-                // 答案里写着 `Foo.java:12-34` 的内联代码可以点开源码（与底部引用同一个抽屉）。
+                // 答案里写着 `Foo.java:12-34` 的位置可以点开源码（与底部引用同一个抽屉）；
+                // 传入本轮引用，用于把「只有文件名」的裸引用补成完整路径。
                 onOpenCitation={onOpenCitation}
+                citations={turn.citations}
               />
             );
           })}

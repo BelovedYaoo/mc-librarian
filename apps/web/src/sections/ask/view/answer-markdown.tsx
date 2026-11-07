@@ -28,13 +28,19 @@ export function AnswerMarkdown({
   text,
   streaming,
   onOpenCitation,
+  citations = [],
 }: {
   text: string;
   streaming: boolean;
   /** 点击答案里的 `xxx.java:12-34` 时打开源码抽屉；不传则内联代码保持纯文本。 */
   onOpenCitation?: (citation: Citation) => void;
+  /** 本轮引用列表：正文里的裸引用常只写文件名，用它补成完整路径（否则抽屉会 404）。 */
+  citations?: Citation[];
 }) {
-  const components = useMemo<Components>(() => buildComponents(onOpenCitation), [onOpenCitation]);
+  const components = useMemo<Components>(
+    () => buildComponents(onOpenCitation, citations),
+    [onOpenCitation, citations]
+  );
   const throttled = useThrottledValue(text, STREAM_THROTTLE_MS);
   // `done` 后直接用原文，保证最终内容与后端返回逐字一致（节流的尾帧可能还在路上）。
   const source = streaming ? throttled : text;
@@ -120,8 +126,21 @@ const NEWLINE = String.fromCharCode(10);
 
 const CODE_REFERENCE = /([\w./$-]+\.(?:java|patch)):(\d+)(?:-(\d+))?/;
 
+/**
+ * 裸引用常只写文件名（`NaturalSpawner.java:499-506`），而 `/v1/read` 要的是相对源码根的
+ * 完整路径。用本轮引用列表按「路径后缀」补全；补不上就原样返回（抽屉会给出明确的 404）。
+ */
+function resolvePath(path: string, citations: Citation[]): string {
+  if (path.includes('/')) return path;
+
+  const suffix = `/${path}`;
+  const matched = citations.find((citation) => citation.path.endsWith(suffix));
+
+  return matched?.path ?? path;
+}
+
 /** 从一段文字里抽出第一个可定位的代码引用；抽不到返回 null。 */
-function parseCodeReference(text: string): Citation | null {
+function parseCodeReference(text: string, citations: Citation[] = []): Citation | null {
   const matched = CODE_REFERENCE.exec(text);
 
   if (matched === null) return null;
@@ -129,7 +148,7 @@ function parseCodeReference(text: string): Citation | null {
   const start = Number(matched[2]);
   const end = matched[3] === undefined ? start : Number(matched[3]);
 
-  return { path: matched[1], lines: [start, end] };
+  return { path: resolvePath(matched[1], citations), lines: [start, end] };
 }
 
 const CODE_REFERENCE_ALL = new RegExp(CODE_REFERENCE.source, 'g');
@@ -151,7 +170,8 @@ const referenceSx = {
  */
 function splitReferences(
   text: string,
-  onOpenCitation: (citation: Citation) => void
+  onOpenCitation: (citation: Citation) => void,
+  citations: Citation[]
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
   let cursor = 0;
@@ -162,7 +182,7 @@ function splitReferences(
     if (start > cursor) nodes.push(text.slice(cursor, start));
 
     const citation: Citation = {
-      path: matched[1],
+      path: resolvePath(matched[1], citations),
       lines: [Number(matched[2]), matched[3] === undefined ? Number(matched[2]) : Number(matched[3])],
     };
 
@@ -189,17 +209,21 @@ function splitReferences(
 /** 把子节点里的纯文本过一遍 `splitReferences`；元素节点原样保留。 */
 function withReferences(
   children: ReactNode,
-  onOpenCitation?: (citation: Citation) => void
+  onOpenCitation: ((citation: Citation) => void) | undefined,
+  citations: Citation[]
 ): ReactNode {
   if (onOpenCitation === undefined) return children;
 
   return Children.map(children, (child) =>
-    typeof child === 'string' ? splitReferences(child, onOpenCitation) : child
+    typeof child === 'string' ? splitReferences(child, onOpenCitation, citations) : child
   );
 }
 
 /** markdown 渲染器：表格横向可滚；内联代码里带路径+行号的做成可点击。 */
-function buildComponents(onOpenCitation?: (citation: Citation) => void): Components {
+function buildComponents(
+  onOpenCitation?: (citation: Citation) => void,
+  citations: Citation[] = []
+): Components {
   return {
     table: ({ node: _node, ...props }) => (
       <Box sx={{ overflowX: 'auto', my: 1.5 }}>
@@ -208,15 +232,16 @@ function buildComponents(onOpenCitation?: (citation: Citation) => void): Compone
     ),
     // 段落与列表项是引用出现最多的地方：把其中的裸路径也变成可点击。
     p: ({ node: _node, children, ...props }) => (
-      <p {...props}>{withReferences(children, onOpenCitation)}</p>
+      <p {...props}>{withReferences(children, onOpenCitation, citations)}</p>
     ),
     li: ({ node: _node, children, ...props }) => (
-      <li {...props}>{withReferences(children, onOpenCitation)}</li>
+      <li {...props}>{withReferences(children, onOpenCitation, citations)}</li>
     ),
     code: ({ node: _node, className, children, ...props }) => {
       const raw = String(children ?? '');
       const isBlock = (className ?? '').includes('language-') || raw.includes(NEWLINE);
-      const citation = !isBlock && onOpenCitation !== undefined ? parseCodeReference(raw) : null;
+      const citation =
+        !isBlock && onOpenCitation !== undefined ? parseCodeReference(raw, citations) : null;
 
       if (citation === null) {
         return (
