@@ -693,7 +693,6 @@ function FileViewer({
                 ▸
               </Box>
               <Box component="span">
-                {region.kind === 'import' ? 'import ' : ''}
                 {region.label} …（{region.end - region.start + 1} 行，第 {region.start}-{region.end} 行）
               </Box>
             </Box>
