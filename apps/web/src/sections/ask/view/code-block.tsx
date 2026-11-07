@@ -96,9 +96,7 @@ export function rehypeCodeLines() {
 
           const lines = splitChildren(code.children ?? []);
 
-          // 围栏内容常以换行结尾（```java
-...
-```），会多出一个空行——它不该占一个行号。
+          // 围栏内容常以换行结尾（最后一行只有换行符），会多出一个空行——它不该占一个行号。
           while (lines.length > 1 && lines[lines.length - 1].length === 0) lines.pop();
 
           code.children = lines.map((children, index) => {
