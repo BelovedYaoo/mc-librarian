@@ -38,15 +38,21 @@ def list_versions(conn: DbConn, _user: CurrentUser) -> VersionList:
 
 
 def _with_coverage(version: VersionInfo, db_path: str | None) -> VersionInfo:
-    """补上摘要覆盖率；索引文件缺失/不可读时保持 `None`，不把列表接口变成 500。"""
+    """补上摘要覆盖率与索引文件大小；文件缺失/不可读时保持 `None`，不把列表接口变成 500。"""
     if not db_path:
         return version
 
-    coverage = read_summary_coverage(Path(db_path))
+    path = Path(db_path)
+    size = path.stat().st_size if path.is_file() else None
+    coverage = read_summary_coverage(path)
 
     if coverage is None:
-        return version
+        return version.model_copy(update={"index_size_bytes": size})
 
     return version.model_copy(
-        update={"summary_count": coverage.summaries, "class_count": coverage.classes}
+        update={
+            "summary_count": coverage.summaries,
+            "class_count": coverage.classes,
+            "index_size_bytes": size,
+        }
     )

@@ -41,7 +41,11 @@ KEY_ASK_MAX_CONTEXT_TOKENS: Final = "ask.max_context_tokens"
 KEY_ASK_TIMEOUT_S: Final = "ask.timeout_s"
 KEY_ASK_ENABLED: Final = "ask.enabled"
 KEY_INDEX_ENABLED: Final = "index.enabled"
+KEY_INDEX_JOBS_ENABLED: Final = "index.jobs_enabled"
 KEY_INDEX_JAVA_XMX: Final = "index.java_xmx"
+KEY_INDEX_CHUNK_CLASSES: Final = "index.chunk_classes"
+KEY_INDEX_THREADS: Final = "index.threads"
+KEY_INDEX_DISK_QUOTA_GB: Final = "index.disk_quota_gb"
 KEY_INDEX_JAVA: Final = "index.java"
 KEY_INDEX_VINEFLOWER_JAR: Final = "index.vineflower_jar"
 KEY_INDEX_SPECIALSOURCE_JAR: Final = "index.specialsource_jar"
@@ -87,7 +91,11 @@ BLOCK_SPECS: Final[dict[str, dict[str, SettingSpec]]] = {
     },
     "index": {
         "enabled": SettingSpec(KEY_INDEX_ENABLED, "index_enabled"),
+        "jobs_enabled": SettingSpec(KEY_INDEX_JOBS_ENABLED, "index_jobs_enabled"),
         "java_xmx": SettingSpec(KEY_INDEX_JAVA_XMX, "decompile_memory"),
+        "chunk_classes": SettingSpec(KEY_INDEX_CHUNK_CLASSES, "decompile_chunk_classes"),
+        "threads": SettingSpec(KEY_INDEX_THREADS, "decompile_threads"),
+        "disk_quota_gb": SettingSpec(KEY_INDEX_DISK_QUOTA_GB, "index_disk_quota_gb"),
         "java": SettingSpec(KEY_INDEX_JAVA, "java"),
         "vineflower_jar": SettingSpec(KEY_INDEX_VINEFLOWER_JAR, "vineflower_jar"),
         "specialsource_jar": SettingSpec(KEY_INDEX_SPECIALSOURCE_JAR, "specialsource_jar"),

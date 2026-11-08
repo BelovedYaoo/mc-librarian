@@ -34,6 +34,9 @@ type FormState = {
   askEnabled: boolean;
   indexEnabled: boolean;
   indexJavaXmx: string;
+  indexChunkClasses: string;
+  indexThreads: string;
+  indexDiskQuotaGb: string;
   indexJava: string;
   indexVineflowerJar: string;
   indexSpecialsourceJar: string;
@@ -153,7 +156,31 @@ const FIELDS: FieldSpec[] = [
     field: 'java_xmx',
     kind: 'text',
     label: '反编译内存（-Xmx）',
-    helper: '形如 4G / 512M；只影响本实例跑的 download/decompile',
+    helper: '形如 1G / 512M；分块后 1G 足够（整包 26.3 连 2G 都 OOM）',
+  },
+  {
+    name: 'indexChunkClasses',
+    block: 'index',
+    field: 'chunk_classes',
+    kind: 'int',
+    label: '分块类数',
+    helper: '每块最多多少类；0 = 整包一次反编译。分块后 1G 堆即可跑动新版本',
+  },
+  {
+    name: 'indexThreads',
+    block: 'index',
+    field: 'threads',
+    kind: 'int',
+    label: '反编译线程数',
+    helper: 'Vineflower 并发线程；与节点核数对齐（默认 2）',
+  },
+  {
+    name: 'indexDiskQuotaGb',
+    block: 'index',
+    field: 'disk_quota_gb',
+    kind: 'int',
+    label: '磁盘配额（GB）',
+    helper: '0 = 不限制；数据根超限时新建索引任务返回 409',
   },
   {
     name: 'indexJava',
@@ -282,6 +309,9 @@ function toForm(settings: AdminSettings): FormState {
     askEnabled: settings.ask?.enabled === true,
     indexEnabled: settings.index?.enabled === true,
     indexJavaXmx: text(settings.index?.java_xmx),
+    indexChunkClasses: text(settings.index?.chunk_classes),
+    indexThreads: text(settings.index?.threads),
+    indexDiskQuotaGb: text(settings.index?.disk_quota_gb),
     indexJava: text(settings.index?.java),
     indexVineflowerJar: text(settings.index?.vineflower_jar),
     indexSpecialsourceJar: text(settings.index?.specialsource_jar),

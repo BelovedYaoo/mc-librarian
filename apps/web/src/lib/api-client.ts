@@ -330,6 +330,11 @@ export function patchUser(userId: string, body: PatchUserRequest): Promise<User>
 }
 
 /** 删除用户：会话/问答历史随人删，审计与用量保留（引用置空）。 */
+/** 删除版本：索引 sqlite + 源码树 + 下载缓存一起删（管理员）。 */
+export function deleteVersion(version: string): Promise<void> {
+  return request<void>(`/v1/admin/versions/${encodeURIComponent(version)}`, { method: 'DELETE' });
+}
+
 export function deleteUser(userId: string): Promise<void> {
   return request<void>(`/v1/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
 }

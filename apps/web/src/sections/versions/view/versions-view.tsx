@@ -26,7 +26,7 @@ import { useAuth } from 'src/auth';
 
 import { useAdminSettings, useMinecraftVersions, useVersions } from 'src/hooks';
 
-import { ApiError, createJob, registerVersion } from 'src/lib/api-client';
+import { ApiError, createJob, deleteVersion, registerVersion } from 'src/lib/api-client';
 
 import { paths } from 'src/routes/paths';
 
@@ -42,9 +42,30 @@ export function VersionsView() {
   const [registerOpen, setRegisterOpen] = useState(false);
   const isAdmin = user?.role === 'admin';
   const { state: settingsState } = useAdminSettings(isAdmin);
-  // 只在明确读到 `index.enabled === false` 时才隐藏入口；读不到（加载中/失败）不假设关闭。
+  // 用 `jobs_enabled` 而不是 `enabled`：拆分 worker 后 API 自己不跑索引（enabled=false），
+  // 但仍允许入队。读不到（加载中/失败）时不假设关闭。
   const indexDisabled =
-    settingsState.status === 'ready' && settingsState.settings?.index?.enabled === false;
+    settingsState.status === 'ready' && settingsState.settings?.index?.jobs_enabled === false;
+  const [pendingDelete, setPendingDelete] = useState<VersionInfo | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDelete = async () => {
+    if (pendingDelete === null) return;
+
+    setDeleting(true);
+    setDeleteError(null);
+
+    try {
+      await deleteVersion(pendingDelete.version);
+      setPendingDelete(null);
+      refresh();
+    } catch (cause) {
+      setDeleteError(cause instanceof ApiError ? cause.message : String(cause));
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <Stack spacing={3}>
@@ -105,6 +126,35 @@ export function VersionsView() {
       {isAdmin && !indexDisabled && (
         <IndexDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onCreated={refresh} />
       )}
+
+      <Dialog
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        fullWidth
+        maxWidth="sm"
+        slotProps={{ backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } } }}
+      >
+        <DialogTitle>删除版本 {pendingDelete?.version}？</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            会一并删除该版本的索引 sqlite、源码树与下载缓存，无法恢复。有任务在排队或运行时请先取消。
+          </Typography>
+
+          {deleteError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {deleteError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPendingDelete(null)} disabled={deleting} sx={{ color: 'text.secondary' }}>
+            取消
+          </Button>
+          <Button color="error" variant="contained" onClick={() => void handleDelete()} disabled={deleting}>
+            {deleting ? '删除中…' : '删除'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 
@@ -134,7 +184,12 @@ export function VersionsView() {
     return (
       <Stack divider={<Divider flexItem />} spacing={2}>
         {state.versions.map((item) => (
-          <VersionRow key={item.version} version={item} />
+          <VersionRow
+            key={item.version}
+            version={item}
+            canDelete={isAdmin}
+            onDelete={() => setPendingDelete(item)}
+          />
         ))}
       </Stack>
     );
@@ -143,7 +198,15 @@ export function VersionsView() {
 
 // ----------------------------------------------------------------------
 
-function VersionRow({ version }: { version: VersionInfo }) {
+function VersionRow({
+  version,
+  canDelete,
+  onDelete,
+}: {
+  version: VersionInfo;
+  canDelete: boolean;
+  onDelete: () => void;
+}) {
   const coverage = coverageLabel(version);
 
   return (
@@ -160,11 +223,20 @@ function VersionRow({ version }: { version: VersionInfo }) {
           color={version.has_summaries ? 'success' : 'default'}
           label={version.has_summaries ? '有中文摘要' : '无摘要'}
         />
+
+        <Box sx={{ flex: '1 1 auto' }} />
+
+        {canDelete && (
+          <Button size="small" color="error" onClick={onDelete}>
+            删除
+          </Button>
+        )}
       </Stack>
 
       <Typography variant="body2" sx={{ color: 'text.secondary' }}>
         文件 {version.files.toLocaleString('zh-CN')} · token 估算{' '}
-        {version.tokens.toLocaleString('zh-CN')} · 索引于 {formatTime(version.indexed_at)}
+        {version.tokens.toLocaleString('zh-CN')} · 索引 {formatBytes(version.index_size_bytes)} ·
+        源码 {formatBytes(version.source_size_bytes)} · 索引于 {formatTime(version.indexed_at)}
       </Typography>
 
       {coverage && (
@@ -174,6 +246,22 @@ function VersionRow({ version }: { version: VersionInfo }) {
       )}
     </Stack>
   );
+}
+
+/** 字节数 → 人类可读。`null` / 0 显示 `—`。 */
+function formatBytes(value: number | null | undefined): string {
+  if (value == null || value <= 0) return '—';
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unit = 0;
+
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 /** 摘要覆盖率（已生成 / 类总数，issue #7 规格 §8）；索引未登记或读不到时返回 null。 */

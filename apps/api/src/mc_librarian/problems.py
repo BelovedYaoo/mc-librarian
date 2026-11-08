@@ -36,6 +36,7 @@ HTTP_TITLES: Final[dict[int, str]] = {
 # API 层常用的两个标题，直接从 `HTTP_TITLES` 取——各模块不要再各写一份字面量。
 TITLE_BAD_REQUEST: Final = HTTP_TITLES[422]
 TITLE_NOT_FOUND: Final = HTTP_TITLES[404]
+TITLE_CONFLICT: Final = HTTP_TITLES[409]
 
 
 class Problem(BaseModel):

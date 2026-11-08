@@ -8,19 +8,27 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from mc_librarian import audit
 from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
 from mc_librarian.db import transaction
+from mc_librarian.fetch.pipeline import cache_dir_for
 from mc_librarian.indexing.build import source_tree_size_bytes
 from mc_librarian.indexing.layout import index_path, source_root
 from mc_librarian.jobs import store
-from mc_librarian.problems import TITLE_BAD_REQUEST, ProblemException, problem_response
+from mc_librarian.problems import (
+    TITLE_BAD_REQUEST,
+    TITLE_CONFLICT,
+    TITLE_NOT_FOUND,
+    ProblemException,
+    problem_response,
+)
 from mc_librarian.schemas import RegisterVersionRequest, VersionInfo
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -88,6 +96,69 @@ def _sum_tokens(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COALESCE(SUM(tokens), 0) AS total FROM files").fetchone()
 
     return int(row[0]) if row is not None else 0
+
+
+@router.delete(
+    "/versions/{version}",
+    status_code=204,
+    summary="删除版本",
+    description=(
+        "删除该版本的索引 sqlite、源码树与下载缓存，并从版本注册表移除。"
+        "有排队/运行中的任务时返回 409（先取消任务）。"
+    ),
+    operation_id="deleteVersion",
+    responses={
+        403: problem_response("需要管理员权限"),
+        404: problem_response("版本未注册"),
+        409: problem_response("该版本还有任务在排队或运行"),
+    },
+)
+def delete_version(
+    version: str,
+    request: Request,
+    conn: DbConn,
+    admin: CurrentAdmin,
+    settings: SettingsDep,
+) -> Response:
+    if store.find_version(conn, version) is None:
+        raise ProblemException(404, TITLE_NOT_FOUND, f"版本未注册：{version}")
+
+    if store.has_active_job(conn, version):
+        raise ProblemException(
+            409, TITLE_CONFLICT, f"版本 {version} 还有任务在排队或运行，先取消再删除"
+        )
+
+    # 先删文件、再删注册行：文件删到一半失败时注册行还在，用户能重试；反过来会留下
+    # 「列表里有、文件没了」的行，只能人工清库。
+    _remove_version_files(settings.data_dir, version)
+
+    with transaction(conn):
+        store.delete_version(conn, version)
+        audit.record(
+            conn,
+            actor_id=admin.id,
+            action=audit.ACTION_VERSION_DELETED,
+            target=version,
+            detail={},
+            ip=client_ip(request),
+        )
+
+    return Response(status_code=204)
+
+
+def _remove_version_files(data_dir: Path, version: str) -> None:
+    """db（含 -wal/-shm）、src 与 cache 三处产物一起删。"""
+    db = index_path(data_dir, version)
+
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(f"{db}{suffix}")
+
+        if candidate.is_file():
+            candidate.unlink()
+
+    for path in (source_root(data_dir, version), cache_dir_for(data_dir, version)):
+        if path.is_dir():
+            shutil.rmtree(path)
 
 
 @router.post(

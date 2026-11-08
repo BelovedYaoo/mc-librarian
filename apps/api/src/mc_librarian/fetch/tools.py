@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 from urllib.request import urlopen
 
 from mc_librarian.config import Settings
+from mc_librarian.fetch.chunks import class_names_of, plan_chunks, select_classes
 from mc_librarian.fetch.errors import FetchError
 from mc_librarian.fetch.manifest import HttpManifestResolver, ManifestResolver
 
@@ -68,6 +70,8 @@ class SpecialSourceRemapper:
 
     jar_path: Path | None = None
     java: str = "java"
+    # 实测峰值 ~600 MB：不设上限时 JVM 按物理内存 1/4 预留，节点上没必要。
+    memory: str = "512m"
 
     def remap(self, jar: Path, mappings: Path, dest: Path) -> Path:
         jar_path = _require_jar(self.jar_path, "SpecialSource")
@@ -75,6 +79,7 @@ class SpecialSourceRemapper:
         run_command(
             [
                 self.java,
+                f"-Xmx{self.memory}",
                 "-jar",
                 str(jar_path),
                 "-i",
@@ -97,11 +102,23 @@ class Decompiler(Protocol):
 
 @dataclass(frozen=True)
 class VineflowerDecompiler:
-    """Vineflower 子进程。`dest` 已存在时先删掉，避免残留上一次的半成品。"""
+    """Vineflower 子进程，按类名前缀**分块**跑。
+
+    分块的理由见 `fetch.chunks` 的模块注释：内存峰值取决于单次处理的类数量。
+    每块输出到临时目录，全部跑完后合并进 `dest`——中途失败不会留下「半个源码树」。
+
+    JVM 参数也是省内存的一部分（实测整包 1.20.1：1906 MB → 1719 MB）：
+
+    - `MaxMetaspaceSize` / `ReservedCodeCacheSize` 给上限，不让 JVM 按「无上限」预留；
+    - `ActiveProcessorCount` + `--thread-count` 与节点核数对齐：默认 32 线程每个都要栈和上下文；
+    - 不开 SerialGC：实测它把 54s 拖到 477s，省的那点内存不值。
+    """
 
     jar_path: Path | None = None
     java: str = "java"
-    memory: str = "4G"
+    memory: str = "1G"
+    chunk_classes: int = 1600
+    threads: int = 2
 
     def decompile(self, jar: Path, dest: Path) -> Path:
         jar_path = _require_jar(self.jar_path, "Vineflower")
@@ -109,22 +126,98 @@ class VineflowerDecompiler:
         if dest.exists():
             shutil.rmtree(dest)
 
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.mkdir(parents=True, exist_ok=True)
-        run_command(
-            [
-                self.java,
-                f"-Xmx{self.memory}",
-                "-jar",
-                str(jar_path),
-                "--folder",
-                "--skip-extra-files",
-                str(jar),
-                str(dest),
-            ],
-            label="Vineflower 反编译",
-        )
+
+        try:
+            names = class_names_of(jar)
+        except zipfile.BadZipFile:
+            # 不是合法 jar：交给 Vineflower 报原始错误，别在分块阶段吞掉真正的原因。
+            names = []
+
+        if self.chunk_classes <= 0 or len(names) <= self.chunk_classes:
+            self._run(jar_path, jar, dest, label=f"Vineflower 反编译（{len(names)} 类）")
+            return dest
+
+        chunks = plan_chunks(names, max_classes=self.chunk_classes)
+        staging = dest.parent / f".{dest.name}.chunks"
+
+        if staging.exists():
+            shutil.rmtree(staging)
+
+        try:
+            for index, (prefixes, count) in enumerate(chunks, start=1):
+                block = staging / f"{index:03d}"
+                block.mkdir(parents=True)
+                # 抽一个只含本块类的子 jar：Vineflower 1.12 在多个 `--only` 时会往不存在的
+                # 目录写文件（`NoSuchFileException`）并退出 1，实测不可用。子 jar 没有这个
+                # 问题，还省掉了「前缀匹配会不会漏类」的推理。
+                subset = staging / f"{index:03d}.jar"
+                _write_subset_jar(jar, select_classes(names, prefixes), subset)
+
+                label = (
+                    f"Vineflower 反编译 第 {index}/{len(chunks)} 块"
+                    f"（{count} 类：{', '.join(prefixes[:3])}{'…' if len(prefixes) > 3 else ''}）"
+                )
+                self._run(jar_path, subset, block, label=label)
+                subset.unlink()
+                # 逐块合并：即使后面某块失败，已完成的块也都在 `dest` 里（阶段会整体重跑）。
+                _merge_tree(block, dest)
+                shutil.rmtree(block)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
         return dest
+
+    def _run(
+        self,
+        jar_path: Path,
+        jar: Path,
+        out: Path,
+        *,
+        label: str,
+    ) -> None:
+        command = [
+            self.java,
+            f"-Xmx{self.memory}",
+            "-XX:MaxMetaspaceSize=192m",
+            "-XX:ReservedCodeCacheSize=64m",
+            f"-XX:ActiveProcessorCount={self.threads}",
+            "-jar",
+            str(jar_path),
+            "--folder",
+            "--skip-extra-files",
+            f"--thread-count={self.threads}",
+            str(jar),
+            str(out),
+        ]
+        run_command(command, label=label)
+
+
+def _write_subset_jar(source: Path, class_names: list[str], target: Path) -> None:
+    """从原 jar 抽出指定类，写成子 jar（保持原条目路径与压缩）。"""
+    with zipfile.ZipFile(source) as archive, zipfile.ZipFile(
+        target, "w", compression=zipfile.ZIP_DEFLATED
+    ) as subset:
+        for name in class_names:
+            entry = f"{name}.class"
+            try:
+                data = archive.read(entry)
+            except KeyError:
+                continue
+
+            subset.writestr(entry, data)
+
+
+def _merge_tree(source: Path, dest: Path) -> None:
+    """把一块的产物合并进目标树（同名覆盖，不删已有文件）。"""
+    for item in source.iterdir():
+        target = dest / item.name
+
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target)
 
 
 @dataclass(frozen=True)
@@ -144,6 +237,8 @@ def default_tools(
     specialsource_jar: Path | None = None,
     java: str | None = None,
     memory: str | None = None,
+    chunk_classes: int | None = None,
+    threads: int | None = None,
 ) -> PipelineTools:
     """真实工具链。参数为 `None` 时退回 `Settings`（即 `MC_LIBRARIAN_*` 环境变量）。"""
     java_bin = java or settings.java
@@ -159,6 +254,10 @@ def default_tools(
             jar_path=vineflower_jar or settings.vineflower_jar,
             java=java_bin,
             memory=memory or settings.decompile_memory,
+            chunk_classes=(
+                settings.decompile_chunk_classes if chunk_classes is None else chunk_classes
+            ),
+            threads=settings.decompile_threads if threads is None else threads,
         ),
     )
 

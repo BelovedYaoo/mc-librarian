@@ -570,6 +570,25 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/BadRequest" }
 
+  /v1/admin/versions/{version}:
+    delete:
+      tags: [admin]
+      summary: 删除版本
+      description: |
+        删除该版本的索引 sqlite、源码树与下载缓存，并从版本注册表移除。
+        有排队/运行中的任务时返回 409（先取消任务）。
+      operationId: deleteVersion
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: 已删除 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
   /v1/admin/users:
     get:
       tags: [admin]
@@ -1001,6 +1020,11 @@ components:
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: 与当前状态冲突（例如版本还有任务在排队/运行、磁盘配额已满）
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
     BadGateway:
       description: 上游不可用（例如拉取 Mojang 版本清单失败且没有可用缓存）
       content:
@@ -1041,6 +1065,7 @@ components:
         obfuscated: { type: boolean, description: 源码是否经官方映射重映射（remap） }
         has_summaries: { type: boolean, description: 登记时索引库是否已带摘要（任务跑过 `summarize` 时为真） }
         source_size_bytes: { type: integer, description: 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） }
+        index_size_bytes: { type: integer, description: 索引 sqlite 的字节数（实时读文件大小；文件缺失为 null） }
         summary_count: { type: integer, description: 已生成的摘要条数（从索引库实时读，`summaries` 的行数） }
         class_count: { type: integer, description: 类总数（摘要覆盖率的分母，从索引库实时读） }
         loader:
@@ -1656,19 +1681,46 @@ components:
     IndexSettings:
       type: object
       required:
-        [enabled, java_xmx, java, data_dir, summary_batch_size, summary_concurrency]
+        [enabled, jobs_enabled, java_xmx, chunk_classes, threads, disk_quota_gb,
+         java, data_dir, summary_batch_size, summary_concurrency]
       properties:
         enabled:
           type: boolean
           default: true
           description: |
-            索引构建闸门。`false` 时本实例不构建索引：`POST /v1/admin/jobs` 返回 403，
-            索引改在本地工作站产出后用 `POST /v1/admin/versions` 注册。
+            本进程是否**执行**索引任务。拆分 worker 后：API 设 `false`（只入队），
+            worker 设 `true`（真正跑任务）。两者都不影响版本注册与检索。
+        jobs_enabled:
+          type: boolean
+          default: true
+          description: |
+            是否允许通过 `POST /v1/admin/jobs` **创建**索引任务。与 `enabled` 分开：
+            API 进程不跑索引但仍要能入队，所以节点上通常是 `enabled=false, jobs_enabled=true`。
         java_xmx:
           type: string
-          default: "4G"
+          default: "1G"
           pattern: '^\d+[kKmMgG]$'
-          description: 反编译时传给 java 的 `-Xmx`
+          description: |
+            反编译时传给 java 的 `-Xmx`。分块后 1G 足够（整包 26.3 连 2G 都 OOM，
+            按包切块后 1G 峰值约 1.2 GB）。
+        chunk_classes:
+          type: integer
+          default: 1600
+          minimum: 0
+          maximum: 20000
+          description: 每块最多多少类；0 = 整包一次反编译（大内存机器可用）
+        threads:
+          type: integer
+          default: 2
+          minimum: 1
+          maximum: 32
+          description: Vineflower 线程数（与节点核数对齐）
+        disk_quota_gb:
+          type: integer
+          default: 0
+          minimum: 0
+          maximum: 10000
+          description: 数据根磁盘配额（GB）；0 = 不限制。超限时建任务返回 409
         java:
           type: string
           default: "java"
@@ -1759,7 +1811,11 @@ components:
       additionalProperties: false
       properties:
         enabled: { type: [boolean, "null"] }
+        jobs_enabled: { type: [boolean, "null"] }
         java_xmx: { type: [string, "null"], pattern: '^\d+[kKmMgG]$' }
+        chunk_classes: { type: [integer, "null"], minimum: 0, maximum: 20000 }
+        threads: { type: [integer, "null"], minimum: 1, maximum: 32 }
+        disk_quota_gb: { type: [integer, "null"], minimum: 0, maximum: 10000 }
         java: { type: [string, "null"], maxLength: 1000 }
         vineflower_jar: { type: [string, "null"], maxLength: 1000 }
         specialsource_jar: { type: [string, "null"], maxLength: 1000 }

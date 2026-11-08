@@ -60,6 +60,35 @@ services:
     networks:
       - internal
 
+  # 索引 worker：与 api 同镜像、同数据卷，只消费 `jobs` 队列（不提供 HTTP）。
+  # 拆分理由见 `apps/api/src/mc_librarian/jobs/worker.py`：反编译峰值 ~1.2 GB、
+  # 单版本 15–30 分钟，和 API 同进程会互相影响。
+  indexer:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    image: mc-librarian-api:local
+    restart: unless-stopped
+    command: ["python", "-m", "mc_librarian", "worker"]
+    environment:
+      MC_LIBRARIAN_DATA_DIR: /data
+      MC_LIBRARIAN_ENV: ${MC_LIBRARIAN_ENV:-production}
+      MC_LIBRARIAN_COOKIE_SECURE: ${MC_LIBRARIAN_COOKIE_SECURE:-true}
+      # worker 才真正构建索引；API 那边保持 false。
+      MC_LIBRARIAN_INDEX_ENABLED: "true"
+      # worker 不接 HTTP，任务创建与它无关；显式关掉避免语义含糊。
+      MC_LIBRARIAN_INDEX_JOBS_ENABLED: "false"
+      MC_LIBRARIAN_SECRET: ${MC_LIBRARIAN_SECRET:?设置 MC_LIBRARIAN_SECRET（至少 16 个字符，例如 openssl rand -hex 32）}
+    volumes:
+      - ${MC_LIBRARIAN_DATA_DIR:-../../mc-librarian-data}:/data
+    # 反编译 1G 堆 + JVM 非堆 ≈ 1.2 GB；给 2G 上限留余量，别让它把 API 挤掉。
+    mem_limit: 2g
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+
   web:
     build:
       context: ..

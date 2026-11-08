@@ -12,6 +12,7 @@ from fastapi import APIRouter, Query, Request
 
 from mc_librarian import audit
 from mc_librarian.auth.deps import CurrentAdmin, DbConn, SettingsDep, client_ip
+from mc_librarian.config import Settings
 from mc_librarian.db import transaction
 from mc_librarian.jobs import store
 from mc_librarian.problems import (
@@ -54,9 +55,34 @@ NULL_OBFUSCATED_DETAIL = (
 
 # `MC_LIBRARIAN_INDEX_ENABLED=false` 时本实例不构建索引（节点内存不够跑反编译）。
 INDEX_DISABLED_DETAIL = (
-    "本实例已关闭索引构建（MC_LIBRARIAN_INDEX_ENABLED=false），"
+    "本实例不接收索引任务（MC_LIBRARIAN_INDEX_JOBS_ENABLED=false），"
     "请在本地工作站生成索引后用 POST /v1/admin/versions 注册"
 )
+
+
+def _require_disk_headroom(settings: Settings) -> None:
+    """索引磁盘配额：数据根已用超过配额时拒绝新任务（0 = 不限制）。"""
+    quota_gb = settings.index_disk_quota_gb
+
+    if quota_gb <= 0:
+        return
+
+    limit = quota_gb * 1024**3
+    used = 0
+
+    # 累加到超限就停：配额只关心「有没有超」，不需要精确的总量（几万文件全量统计很慢）。
+    for path in settings.data_dir.rglob("*"):
+        if not path.is_file():
+            continue
+
+        used += path.stat().st_size
+
+        if used > limit:
+            raise ProblemException(
+                409,
+                CONFLICT_TITLE,
+                f"索引磁盘已用超过配额（{quota_gb} GB）：请先删除旧版本，或在设置页调大配额",
+            )
 
 
 def _require_job(conn: DbConn, job_id: str) -> Job:
@@ -94,8 +120,10 @@ def create_job(
     settings: SettingsDep,
 ) -> Job:
     # 实例能力闸门：先于入参校验，关闭时任何索引任务都建不出来（与 payload 无关）。
-    if not settings.index_enabled:
+    if not settings.index_jobs_enabled:
         raise ProblemException(403, FORBIDDEN_TITLE, INDEX_DISABLED_DETAIL)
+
+    _require_disk_headroom(settings)
 
     options = payload.options
 
@@ -258,7 +286,7 @@ def retry_job(
         job = _require_job(conn, jobId)
 
         # 闸门关闭时重排会让 runner 跑反编译，与「本实例不构建索引」的承诺不符，同样回 403。
-        if not settings.index_enabled:
+        if not settings.index_jobs_enabled:
             raise ProblemException(403, FORBIDDEN_TITLE, INDEX_DISABLED_DETAIL)
 
         # 判定与写入同一 `BEGIN IMMEDIATE` 事务，UPDATE 带状态守卫（只认 failed/canceled）。

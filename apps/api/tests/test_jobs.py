@@ -326,7 +326,12 @@ def test_get_settings_derives_values_from_runtime_config(
 
 def test_index_disabled_gate(tmp_path: Path) -> None:
     """`MC_LIBRARIAN_INDEX_ENABLED=false`：任务一律 403，`GET` 能读到开关为 false。"""
-    settings = Settings(data_dir=tmp_path / "data", index_enabled=False, secret=TEST_SECRET)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        index_enabled=False,
+        index_jobs_enabled=False,
+        secret=TEST_SECRET,
+    )
 
     with TestClient(create_app(settings)) as client:
         created = client.post(
@@ -345,7 +350,7 @@ def test_index_disabled_gate(tmp_path: Path) -> None:
 
             assert response.status_code == 403, response.text
             assert response.headers["content-type"].startswith("application/problem+json")
-            assert "关闭索引构建" in response.json()["detail"]
+            assert "不接收索引任务" in response.json()["detail"]
 
         assert client.get("/v1/admin/jobs").json()["jobs"] == []
 
@@ -1224,7 +1229,12 @@ def test_admin_endpoints_reject_non_admin(user_client: TestClient, source_dir: P
 
 def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
     """闸门关闭时 retry 也回 403：重排会让 runner 跑反编译，与「本实例不构建索引」不符。"""
-    settings = Settings(data_dir=tmp_path / "data", index_enabled=False, secret=TEST_SECRET)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        index_enabled=False,
+        index_jobs_enabled=False,
+        secret=TEST_SECRET,
+    )
 
     with TestClient(create_app(settings)) as client:
         created = client.post(
@@ -1242,7 +1252,7 @@ def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
 
         assert response.status_code == 403, response.text
         assert response.headers["content-type"].startswith("application/problem+json")
-        assert "关闭索引构建" in response.json()["detail"]
+        assert "不接收索引任务" in response.json()["detail"]
 
         # 任务仍是 failed，没有被重排。
         assert client.get(f"/v1/admin/jobs/{job.id}").json()["status"] == "failed"
@@ -1250,7 +1260,12 @@ def test_retry_is_blocked_when_index_disabled(tmp_path: Path) -> None:
 
 def test_retry_unknown_job_is_404_even_when_index_disabled(tmp_path: Path) -> None:
     """闸门关闭时也要先分辨任务是否存在：不存在的 id 回 404，而不是一律 403。"""
-    settings = Settings(data_dir=tmp_path / "data", index_enabled=False, secret=TEST_SECRET)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        index_enabled=False,
+        index_jobs_enabled=False,
+        secret=TEST_SECRET,
+    )
 
     with TestClient(create_app(settings)) as client:
         created = client.post(
@@ -1841,3 +1856,69 @@ def test_create_job_rejects_unknown_source_kind(admin_client: TestClient) -> Non
     )
 
     assert response.status_code == 422
+
+
+def test_delete_version_removes_files_and_registry_row(
+    admin_client: TestClient, settings: Settings, conn: sqlite3.Connection
+) -> None:
+    """删除版本：db（含 -wal/-shm）、源码树、下载缓存与注册行一起消失，并记审计。"""
+    db = settings.data_dir / "db" / "26.3.sqlite"
+    write_index(db, tokens=1200, summaries=True)
+    Path(f"{db}-wal").write_bytes(b"wal")
+
+    source = settings.data_dir / "src" / "26.3"
+    source.mkdir(parents=True)
+    (source / "A.java").write_text("class A {}", encoding="utf-8")
+
+    cache = settings.data_dir / "cache" / "26.3"
+    cache.mkdir(parents=True)
+    (cache / "client.jar").write_bytes(b"jar")
+
+    assert admin_client.post("/v1/admin/versions", json={"version": "26.3"}).status_code == 201
+
+    response = admin_client.delete("/v1/admin/versions/26.3")
+
+    assert response.status_code == 204, response.text
+    assert not db.exists()
+    assert not Path(f"{db}-wal").exists()
+    assert not source.exists()
+    assert not cache.exists()
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS n FROM versions WHERE version = '26.3'"
+    ).fetchone()
+    assert remaining["n"] == 0
+
+    audited = conn.execute(
+        "SELECT COUNT(*) AS n FROM audit"
+        " WHERE action = 'version.deleted' AND target = '26.3'"
+    ).fetchone()
+    assert audited["n"] == 1
+
+    # 再删一次：版本已不存在 → 404（不是 204 的静默成功）。
+    assert admin_client.delete("/v1/admin/versions/26.3").status_code == 404
+
+
+def test_create_job_rejects_when_disk_quota_exceeded(tmp_path: Path) -> None:
+    """磁盘配额（GB）：数据根已用超限时新建任务 409，不排队。"""
+    settings = Settings(
+        data_dir=tmp_path / "data", index_disk_quota_gb=1, secret=TEST_SECRET
+    )
+
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/setup", json={"username": "admin", "password": "admin-password-1"}
+        )
+        assert created.status_code == 201, created.text
+
+        big = settings.data_dir / "cache" / "big.bin"
+        big.parent.mkdir(parents=True, exist_ok=True)
+
+        # 稀疏文件：只声明 1.2 GB 大小，不真写盘（配额按 stat 大小累加）。
+        with big.open("wb") as handle:
+            handle.truncate(1_200_000_000)
+
+        response = client.post("/v1/admin/jobs", json={"kind": "index", "version": "26.3"})
+
+        assert response.status_code == 409, response.text
+        assert "配额" in response.json()["detail"]
+        assert client.get("/v1/admin/jobs").json()["jobs"] == []

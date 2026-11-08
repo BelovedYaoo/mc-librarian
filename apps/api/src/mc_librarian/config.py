@@ -139,7 +139,13 @@ class Settings(BaseSettings):
     java: str = "java"
     vineflower_jar: Path | None = None
     specialsource_jar: Path | None = None
-    decompile_memory: str = "4G"
+    # 反编译的 `-Xmx`。分块（见 `fetch.chunks`）之后 1G 就够：整包 26.3 连 2G 都 OOM，
+    # 按 2,000 类切块后 1G 峰值约 1.2 GB。设置页可改回更大的值（分块仍生效）。
+    decompile_memory: str = "1G"
+    # 每块最多多少类；0 = 整个 jar 一次反编译（本地大内存机器可以用）。
+    decompile_chunk_classes: int = Field(default=1600, ge=0, le=20000)
+    # Vineflower 的线程数（与节点核数对齐；默认 32 线程会白白多占栈和上下文）。
+    decompile_threads: int = Field(default=2, ge=1, le=32)
 
     # 中文摘要（#7）：LLM 配置默认只从环境变量读，`#11` 落地后 `settings` 表里的覆盖优先
     # （读取收敛在 `resolve_llm_config` 一个函数里，覆盖由调用方先叠好）。未配置时
@@ -180,6 +186,11 @@ class Settings(BaseSettings):
     # 契约里 `settings.index.enabled` 与 `Settings` 表里的覆盖一致：默认 true（本地开箱可用），
     # 节点可以用环境变量或设置页关掉。
     index_enabled: bool = True
+    # API 进程是否允许**创建**索引任务（`POST /v1/admin/jobs`）。与 `index_enabled` 分开：
+    # 拆分 worker 之后，API 自己不跑索引（index_enabled=false），但仍要能入队。
+    index_jobs_enabled: bool = True
+    # 数据根磁盘配额（GB，0 = 不限制）：建任务前检查，超限返回 409。
+    index_disk_quota_gb: int = Field(default=0, ge=0, le=10_000)
 
     # 用量告警（`#12` 读它）：超阈值只推 Webhook，不自动暂停服务（D23，不设自动预算上限）。
     # 契约里「未配置」用 `None`（`GET /v1/admin/settings` 整字段省略）；阈值下限是 0——

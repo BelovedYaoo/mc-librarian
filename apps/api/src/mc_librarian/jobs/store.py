@@ -647,6 +647,13 @@ def insert_version_if_absent(
     return inserted
 
 
+def delete_version(conn: sqlite3.Connection, version: str) -> bool:
+    """从注册表删一行；返回是否真的删掉。文件（db/src/cache）由调用方负责。"""
+    cursor = conn.execute("DELETE FROM versions WHERE version = ?", (version,))
+
+    return cursor.rowcount > 0
+
+
 def find_version(conn: sqlite3.Connection, version: str) -> VersionInfo | None:
     row = conn.execute(
         f"SELECT {_VERSION_COLUMNS} FROM versions WHERE version = ?", (version,)

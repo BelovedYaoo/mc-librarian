@@ -28,6 +28,7 @@ ACTION_JOB_CANCELED: Final = "job.canceled"
 ACTION_JOB_RETRIED: Final = "job.retried"
 ACTION_VERSION_REGISTERED: Final = "version.registered"
 ACTION_VERSION_RECORDED: Final = "version.recorded"
+ACTION_VERSION_DELETED: Final = "version.deleted"
 ACTION_SETTINGS_UPDATED: Final = "settings.updated"
 
 # `actor` 对外用用户名（更好读），库里存 actor_id；用户不存在时退回 id。

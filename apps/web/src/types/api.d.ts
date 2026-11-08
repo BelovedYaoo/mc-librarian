@@ -442,6 +442,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 删除版本
+         * @description 删除该版本的索引 sqlite、源码树与下载缓存，并从版本注册表移除。
+         *     有排队/运行中的任务时返回 409（先取消任务）。
+         */
+        delete: operations["deleteVersion"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/users": {
         parameters: {
             query?: never;
@@ -731,6 +752,8 @@ export interface components {
             has_summaries?: boolean;
             /** @description 源码树字节数（`.java` 与 `data/` 下 `.json` 的总字节数，与任务产出一致） */
             source_size_bytes?: number;
+            /** @description 索引 sqlite 的字节数（实时读文件大小；文件缺失为 null） */
+            index_size_bytes?: number;
             /** @description 已生成的摘要条数（从索引库实时读，`summaries` 的行数） */
             summary_count?: number;
             /** @description 类总数（摘要覆盖率的分母，从索引库实时读） */
@@ -1220,16 +1243,38 @@ export interface components {
         };
         IndexSettings: {
             /**
-             * @description 索引构建闸门。`false` 时本实例不构建索引：`POST /v1/admin/jobs` 返回 403，
-             *     索引改在本地工作站产出后用 `POST /v1/admin/versions` 注册。
+             * @description 本进程是否**执行**索引任务。拆分 worker 后：API 设 `false`（只入队），
+             *     worker 设 `true`（真正跑任务）。两者都不影响版本注册与检索。
              * @default true
              */
             enabled: boolean;
             /**
-             * @description 反编译时传给 java 的 `-Xmx`
-             * @default 4G
+             * @description 是否允许通过 `POST /v1/admin/jobs` **创建**索引任务。与 `enabled` 分开：
+             *     API 进程不跑索引但仍要能入队，所以节点上通常是 `enabled=false, jobs_enabled=true`。
+             * @default true
+             */
+            jobs_enabled: boolean;
+            /**
+             * @description 反编译时传给 java 的 `-Xmx`。分块后 1G 足够（整包 26.3 连 2G 都 OOM，
+             *     按包切块后 1G 峰值约 1.2 GB）。
+             * @default 1G
              */
             java_xmx: string;
+            /**
+             * @description 每块最多多少类；0 = 整包一次反编译（大内存机器可用）
+             * @default 1600
+             */
+            chunk_classes: number;
+            /**
+             * @description Vineflower 线程数（与节点核数对齐）
+             * @default 2
+             */
+            threads: number;
+            /**
+             * @description 数据根磁盘配额（GB）；0 = 不限制。超限时建任务返回 409
+             * @default 0
+             */
+            disk_quota_gb: number;
             /**
              * @description java 可执行路径；留空 = 回退环境变量
              * @default java
@@ -1299,7 +1344,11 @@ export interface components {
         };
         IndexSettingsUpdate: {
             enabled?: boolean | null;
+            jobs_enabled?: boolean | null;
             java_xmx?: string | null;
+            chunk_classes?: number | null;
+            threads?: number | null;
+            disk_quota_gb?: number | null;
             java?: string | null;
             vineflower_jar?: string | null;
             specialsource_jar?: string | null;
@@ -1391,6 +1440,15 @@ export interface components {
         };
         /** @description 资源不存在 */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description 与当前状态冲突（例如版本还有任务在排队/运行、磁盘配额已满） */
+        Conflict: {
             headers: {
                 [name: string]: unknown;
             };
@@ -2044,6 +2102,29 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             422: components["responses"]["BadRequest"];
+        };
+    };
+    deleteVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已删除 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listUsers: {

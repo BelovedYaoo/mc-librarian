@@ -562,7 +562,8 @@ def test_specialsource_command_applies_mappings(
     )
 
     command = recorded[0]
-    assert command[:3] == ["java", "-jar", str(jar)]
+    assert command[:2] == ["java", "-Xmx512m"]
+    assert command[2:4] == ["-jar", str(jar)]
     assert command[command.index("-i") + 1] == str(client)
     assert command[command.index("-m") + 1] == str(mappings)
 

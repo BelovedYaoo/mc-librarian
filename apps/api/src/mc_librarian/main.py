@@ -136,7 +136,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 任务队列随应用启动：单进程内并发 1 串行消费，退出时等当前任务收尾。
     runner = JobRunner(settings, database)
     app.state.job_runner = runner
-    await runner.start()
+
+    # 拆分 worker 后 API 的 `index_enabled=false`：此时**不启动**消费循环——否则它会把队首
+    # queued 任务按「本实例已关闭索引构建」判失败，worker 再也拿不到。
+    if settings.index_enabled:
+        await runner.start()
 
     try:
         # MCP 的会话管理器必须在父 app 的 lifespan 里跑：只 mount 子 app 不跑它，请求会报

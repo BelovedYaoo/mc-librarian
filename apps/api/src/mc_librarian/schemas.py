@@ -342,6 +342,8 @@ class VersionInfo(BaseModel):
     obfuscated: bool | None = None
     has_summaries: bool | None = None
     source_size_bytes: int | None = None
+    # 索引 sqlite 的字节数（版本列表实时读文件大小；文件缺失为 None）。
+    index_size_bytes: int | None = None
     # 摘要覆盖率（#7 规格 §8）：已生成的摘要条数 / 类总数，从索引库实时读。
     summary_count: int | None = None
     class_count: int | None = None
@@ -401,7 +403,12 @@ class IndexSettings(BaseModel):
     """
 
     enabled: bool
+    # 与 `enabled` 分开：本进程是否构建索引 vs API 是否允许**创建**任务（拆分 worker 后两者相反）。
+    jobs_enabled: bool
     java_xmx: str
+    chunk_classes: int
+    threads: int
+    disk_quota_gb: int
     java: str
     vineflower_jar: str = ""
     specialsource_jar: str = ""
@@ -485,7 +492,11 @@ class IndexSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
+    jobs_enabled: bool | None = None
     java_xmx: str | None = Field(default=None, pattern=JAVA_XMX_PATTERN)
+    chunk_classes: int | None = Field(default=None, ge=0, le=20000)
+    threads: int | None = Field(default=None, ge=1, le=32)
+    disk_quota_gb: int | None = Field(default=None, ge=0, le=10_000)
     java: str | None = Field(default=None, max_length=1000)
     vineflower_jar: str | None = Field(default=None, max_length=1000)
     specialsource_jar: str | None = Field(default=None, max_length=1000)

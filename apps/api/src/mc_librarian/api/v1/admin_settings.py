@@ -115,7 +115,11 @@ def _view(settings: RuntimeSettings) -> Settings:
         index=IndexSettings(
             # `Settings.index.java_xmx` 就是反编译时传给 java 的 `-Xmx`。
             enabled=settings.index_enabled,
+            jobs_enabled=settings.index_jobs_enabled,
             java_xmx=settings.decompile_memory,
+            chunk_classes=settings.decompile_chunk_classes,
+            threads=settings.decompile_threads,
+            disk_quota_gb=settings.index_disk_quota_gb,
             java=settings.java,
             # 路径类字段在契约里是 `string`：运行时是 `Path | None`，空字符串 = 未配置。
             vineflower_jar=_path_to_str(settings.vineflower_jar),
