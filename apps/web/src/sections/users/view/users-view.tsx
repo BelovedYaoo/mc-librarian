@@ -268,26 +268,30 @@ export function UsersView() {
                 ，把下面这条一次性链接发给他：48 小时内有效，且只能用一次。
               </Alert>
 
-              <Stack
-                direction={{ xs: 'column', sm: 'row' }}
-                spacing={1}
-                sx={{ alignItems: { sm: 'center' } }}
+              {/* 链接单独一块等宽框：URL 很长必然折行，放在带边框的块里才不会读成两段。 */}
+              <Box
+                sx={{
+                  p: 1.5,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  borderRadius: 1,
+                  bgcolor: 'background.neutral',
+                  fontFamily: 'monospace',
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                  wordBreak: 'break-all',
+                  userSelect: 'all',
+                }}
               >
-                <Typography
-                  variant="body2"
-                  sx={{ fontFamily: 'monospace', wordBreak: 'break-all', flex: '1 1 auto' }}
-                >
-                  {absoluteInviteUrl(invite.invite_url)}
-                </Typography>
-
-                <Button size="small" variant="outlined" onClick={handleCopy} sx={{ flex: '0 0 auto' }}>
-                  {copied ? '已复制' : '复制链接'}
-                </Button>
-              </Stack>
+                {absoluteInviteUrl(invite.invite_url)}
+              </Box>
             </DialogContent>
 
             <DialogActions>
-              <Button onClick={closeCreate}>完成</Button>
+              <Button onClick={closeCreate}>关闭</Button>
+              <Button variant="contained" onClick={handleCopy}>
+                {copied ? '已复制' : '复制链接'}
+              </Button>
             </DialogActions>
           </>
         ) : (
