@@ -257,7 +257,13 @@ export function UsersView() {
       </Card>
 
       {/* 创建用户：低频动作，收进弹窗；创建成功后原地换成「一次性邀请链接」。 */}
-      <Dialog open={createOpen} onClose={closeCreate} fullWidth maxWidth="sm">
+      <Dialog
+        open={createOpen}
+        onClose={closeCreate}
+        fullWidth
+        maxWidth="sm"
+        slotProps={{ backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } } }}
+      >
         <DialogTitle>{invite ? '用户已创建' : '新建用户'}</DialogTitle>
 
         {invite ? (
@@ -288,7 +294,9 @@ export function UsersView() {
             </DialogContent>
 
             <DialogActions>
-              <Button onClick={closeCreate}>关闭</Button>
+              <Button onClick={closeCreate} sx={{ color: 'text.secondary' }}>
+                关闭
+              </Button>
               <Button variant="contained" onClick={handleCopy}>
                 {copied ? '已复制' : '复制链接'}
               </Button>
@@ -322,7 +330,7 @@ export function UsersView() {
             </DialogContent>
 
             <DialogActions>
-              <Button onClick={closeCreate} disabled={creating}>
+              <Button onClick={closeCreate} disabled={creating} sx={{ color: 'text.secondary' }}>
                 取消
               </Button>
               <Button
@@ -338,7 +346,11 @@ export function UsersView() {
       </Dialog>
 
       {/* 删除是破坏性动作：二次确认，并把「会一起删掉什么」写清楚。 */}
-      <Dialog open={pendingDelete !== null} onClose={() => setPendingDelete(null)}>
+      <Dialog
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        slotProps={{ backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } } }}
+      >
         <DialogTitle>删除用户 {pendingDelete?.username}？</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
