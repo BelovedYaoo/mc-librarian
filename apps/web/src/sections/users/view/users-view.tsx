@@ -108,6 +108,25 @@ export function UsersView() {
   const [pendingDelete, setPendingDelete] = useState<User | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // 创建用户收进模态窗：列表页的主任务是「看用户」，创建是低频动作。
+  const [createOpen, setCreateOpen] = useState(false);
+
+  const openCreate = () => {
+    setUsername('');
+    setRole('user');
+    setInvite(null);
+    setCopied(false);
+    setCreateOpen(true);
+  };
+
+  const closeCreate = () => {
+    setCreateOpen(false);
+    setInvite(null);
+    setCopied(false);
+    setUsername('');
+    setRole('user');
+  };
+
   const handleDelete = async () => {
     if (pendingDelete === null) return;
 
@@ -168,75 +187,6 @@ export function UsersView() {
 
       {actionError && <Alert severity="error">{actionError}</Alert>}
 
-      {invite && (
-        <Alert severity="success" onClose={() => setInvite(null)}>
-          <Typography variant="body2">
-            已创建 <b>{invite.user.username}</b>
-            ，把这条一次性链接发给他：48 小时内有效，且只能用一次。
-          </Typography>
-
-          <Stack
-            direction={{ xs: 'column', sm: 'row' }}
-            spacing={1}
-            sx={{ mt: 1.5, alignItems: { sm: 'center' } }}
-          >
-            <Typography
-              variant="body2"
-              sx={{ fontFamily: 'monospace', wordBreak: 'break-all', flex: '1 1 auto' }}
-            >
-              {absoluteInviteUrl(invite.invite_url)}
-            </Typography>
-
-            <Button size="small" variant="outlined" onClick={handleCopy} sx={{ flex: '0 0 auto' }}>
-              {copied ? '已复制' : '复制链接'}
-            </Button>
-          </Stack>
-        </Alert>
-      )}
-
-      <Card>
-        <CardContent>
-          <Typography variant="h6" sx={{ mb: 2 }}>
-            创建用户
-          </Typography>
-
-          <Divider sx={{ mb: 2 }} />
-
-          <Stack component="form" spacing={2} onSubmit={handleCreate} noValidate>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-              <TextField
-                label="用户名"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                helperText="3–32 位，允许字母、数字、下划线、点和短横线"
-                required
-                sx={{ flex: '1 1 320px', maxWidth: 380 }}
-              />
-
-              <TextField
-                select
-                label="角色"
-                value={role}
-                onChange={(event) => setRole(event.target.value as Role)}
-                sx={{ minWidth: 140 }}
-              >
-                <MenuItem value="user">普通用户</MenuItem>
-                <MenuItem value="admin">管理员</MenuItem>
-              </TextField>
-
-              <Button
-                type="submit"
-                variant="contained"
-                disabled={creating || username.trim().length === 0}
-                sx={{ whiteSpace: 'nowrap', height: 56 }}
-              >
-                {creating ? '创建中…' : '创建'}
-              </Button>
-            </Stack>
-          </Stack>
-        </CardContent>
-      </Card>
-
       <Card>
         <CardContent>
           <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
@@ -245,6 +195,9 @@ export function UsersView() {
             {state.status === 'loading' && <CircularProgress size={16} />}
             <Button size="small" variant="outlined" onClick={() => void load()}>
               刷新
+            </Button>
+            <Button size="small" variant="contained" onClick={openCreate}>
+              新建用户
             </Button>
           </Stack>
 
@@ -302,6 +255,83 @@ export function UsersView() {
           )}
         </CardContent>
       </Card>
+
+      {/* 创建用户：低频动作，收进弹窗；创建成功后原地换成「一次性邀请链接」。 */}
+      <Dialog open={createOpen} onClose={closeCreate} fullWidth maxWidth="sm">
+        <DialogTitle>{invite ? '用户已创建' : '新建用户'}</DialogTitle>
+
+        {invite ? (
+          <>
+            <DialogContent>
+              <Alert severity="success" sx={{ mb: 2 }}>
+                已创建 <b>{invite.user.username}</b>
+                ，把下面这条一次性链接发给他：48 小时内有效，且只能用一次。
+              </Alert>
+
+              <Stack
+                direction={{ xs: 'column', sm: 'row' }}
+                spacing={1}
+                sx={{ alignItems: { sm: 'center' } }}
+              >
+                <Typography
+                  variant="body2"
+                  sx={{ fontFamily: 'monospace', wordBreak: 'break-all', flex: '1 1 auto' }}
+                >
+                  {absoluteInviteUrl(invite.invite_url)}
+                </Typography>
+
+                <Button size="small" variant="outlined" onClick={handleCopy} sx={{ flex: '0 0 auto' }}>
+                  {copied ? '已复制' : '复制链接'}
+                </Button>
+              </Stack>
+            </DialogContent>
+
+            <DialogActions>
+              <Button onClick={closeCreate}>完成</Button>
+            </DialogActions>
+          </>
+        ) : (
+          <Box component="form" onSubmit={handleCreate} noValidate>
+            <DialogContent>
+              <Stack spacing={2} sx={{ pt: 1 }}>
+                <TextField
+                  label="用户名"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  helperText="3–32 位，允许字母、数字、下划线、点和短横线"
+                  required
+                  autoFocus
+                  fullWidth
+                />
+
+                <TextField
+                  select
+                  label="角色"
+                  value={role}
+                  onChange={(event) => setRole(event.target.value as Role)}
+                  fullWidth
+                >
+                  <MenuItem value="user">普通用户</MenuItem>
+                  <MenuItem value="admin">管理员</MenuItem>
+                </TextField>
+              </Stack>
+            </DialogContent>
+
+            <DialogActions>
+              <Button onClick={closeCreate} disabled={creating}>
+                取消
+              </Button>
+              <Button
+                type="submit"
+                variant="contained"
+                disabled={creating || username.trim().length === 0}
+              >
+                {creating ? '创建中…' : '创建'}
+              </Button>
+            </DialogActions>
+          </Box>
+        )}
+      </Dialog>
 
       {/* 删除是破坏性动作：二次确认，并把「会一起删掉什么」写清楚。 */}
       <Dialog open={pendingDelete !== null} onClose={() => setPendingDelete(null)}>
