@@ -49,6 +49,8 @@ export function MainLayout({ children, maxWidth = 'xl' }: MainLayoutProps) {
     { label: '版本', to: paths.versions },
     { label: '检索', to: paths.browse },
     { label: '问答', to: paths.ask },
+    // 账号级页面：放在通用项末尾，普通用户也能看到（管理员在页面内还有实例设置）。
+    { label: '访问令牌', to: paths.settings },
     ...(user?.role === 'admin'
       ? [
           { label: '任务', to: paths.jobs },
@@ -72,19 +74,6 @@ export function MainLayout({ children, maxWidth = 'xl' }: MainLayoutProps) {
           <Box sx={{ flex: '1 1 auto' }} />
 
           <ThemeModeToggle sx={{ mr: 1 }} />
-
-          <Button size="small" color="inherit" onClick={() => navigate(paths.home)} sx={{ mr: 1 }}>
-            首页
-          </Button>
-
-          <Button
-            size="small"
-            color="inherit"
-            onClick={() => navigate(paths.settings)}
-            sx={{ mr: 2 }}
-          >
-            访问令牌
-          </Button>
 
           {user && (
             <>
