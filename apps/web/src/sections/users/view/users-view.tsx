@@ -262,7 +262,10 @@ export function UsersView() {
         onClose={closeCreate}
         fullWidth
         maxWidth="sm"
-        slotProps={{ backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } } }}
+        slotProps={{
+          backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } },
+          paper: { sx: { border: '1px solid', borderColor: 'divider' } },
+        }}
       >
         <DialogTitle>{invite ? '用户已创建' : '新建用户'}</DialogTitle>
 
@@ -305,7 +308,7 @@ export function UsersView() {
         ) : (
           <Box component="form" onSubmit={handleCreate} noValidate>
             <DialogContent>
-              <Stack spacing={2} sx={{ pt: 1 }}>
+              <Stack spacing={2}>
                 <TextField
                   label="用户名"
                   value={username}
@@ -349,7 +352,10 @@ export function UsersView() {
       <Dialog
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
-        slotProps={{ backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } } }}
+        slotProps={{
+          backdrop: { sx: { backgroundColor: 'rgba(0, 0, 0, 0.6)' } },
+          paper: { sx: { border: '1px solid', borderColor: 'divider' } },
+        }}
       >
         <DialogTitle>删除用户 {pendingDelete?.username}？</DialogTitle>
         <DialogContent>
