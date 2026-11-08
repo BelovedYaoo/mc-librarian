@@ -172,7 +172,7 @@ function Report({ report, groupBy }: { report: UsageReport; groupBy: UsageGroupB
         </Typography>
       ) : (
         <>
-          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ alignItems: 'flex-start' }}>
+          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ alignItems: 'stretch' }}>
             <Card variant="outlined" sx={{ flex: '1 1 62%', minWidth: 0 }}>
               <CardContent>
                 <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', mb: 1 }}>
@@ -190,13 +190,21 @@ function Report({ report, groupBy }: { report: UsageReport; groupBy: UsageGroupB
               </CardContent>
             </Card>
 
-            <Card variant="outlined" sx={{ flex: '1 1 38%', minWidth: 0 }}>
-              <CardContent>
+            <Card variant="outlined" sx={{ flex: '1 1 38%', minWidth: 0, display: 'flex' }}>
+              <CardContent
+                sx={{ flex: '1 1 auto', display: 'flex', flexDirection: 'column', minWidth: 0 }}
+              >
                 <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
                   占比前 5
                 </Typography>
 
                 <TopList buckets={buckets} total={totalTokens} />
+
+                <Box sx={{ flex: '1 1 auto' }} />
+
+                <Typography variant="caption" sx={{ color: 'text.secondary', mt: 2 }}>
+                  共 {buckets.length} 组 · 合计 {compactNumber(totalTokens)} token
+                </Typography>
               </CardContent>
             </Card>
           </Stack>
@@ -245,7 +253,8 @@ function UsageChart({ buckets }: { buckets: UsageBucket[] }) {
   const plotHeight = height - padding.top - padding.bottom;
 
   const totals = buckets.map((bucket) => bucket.prompt_tokens + bucket.completion_tokens);
-  const max = Math.max(...totals, 1);
+  // 留 8% 顶部余量：最高柱贴到顶刻度会像被截断。
+  const max = Math.max(...totals, 1) * 1.08;
   const slot = plotWidth / buckets.length;
   const barWidth = Math.min(46, Math.max(8, slot * 0.55));
 
@@ -291,7 +300,7 @@ function UsageChart({ buckets }: { buckets: UsageBucket[] }) {
           const rawCompletion = (bucket.completion_tokens / max) * plotHeight;
           // 非零但极小的分量（completion 常只占 2%）给 2px 下限，否则堆叠段完全看不见。
           const completion =
-            bucket.completion_tokens > 0 ? Math.max(rawCompletion, 2) : 0;
+            bucket.completion_tokens > 0 ? Math.max(rawCompletion, 3) : 0;
           const prompt = Math.max(full - completion, 0);
           const x = padding.left + slot * index + (slot - barWidth) / 2;
           const baseY = padding.top + plotHeight;
@@ -411,7 +420,7 @@ function BucketRow({ bucket, total }: { bucket: UsageBucket; total: number }) {
           <LinearProgress
             variant="determinate"
             value={Math.min(share, 100)}
-            sx={{ flex: '1 1 auto', height: 6, borderRadius: 3 }}
+            sx={{ flex: '1 1 auto', height: 6, borderRadius: 3, bgcolor: 'action.hover' }}
           />
           <Typography
             variant="caption"
