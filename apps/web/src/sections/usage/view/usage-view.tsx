@@ -9,7 +9,6 @@ import CardContent from '@mui/material/CardContent';
 import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
-import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
@@ -390,11 +389,7 @@ function TopList({ buckets, total }: { buckets: UsageBucket[]; total: number }) 
                 {share.toFixed(1)}%
               </Typography>
             </Stack>
-            <LinearProgress
-              variant="determinate"
-              value={Math.min(share, 100)}
-              sx={{ height: 6, borderRadius: 3 }}
-            />
+            <ShareBar value={share} />
           </Box>
         );
       })}
@@ -417,11 +412,9 @@ function BucketRow({ bucket, total }: { bucket: UsageBucket; total: number }) {
       <TableCell align="right">{formatLatency(avgLatency)}</TableCell>
       <TableCell>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-          <LinearProgress
-            variant="determinate"
-            value={Math.min(share, 100)}
-            sx={{ flex: '1 1 auto', height: 6, borderRadius: 3, '&&': { bgcolor: 'action.hover' } }}
-          />
+          <Box sx={{ flex: '1 1 auto' }}>
+            <ShareBar value={share} />
+          </Box>
           <Typography
             variant="caption"
             sx={{ color: 'text.secondary', width: 44, textAlign: 'right' }}
@@ -431,6 +424,21 @@ function BucketRow({ bucket, total }: { bucket: UsageBucket; total: number }) {
         </Stack>
       </TableCell>
     </TableRow>
+  );
+}
+
+/**
+ * 占比条：自己画，不用 `LinearProgress`。
+ *
+ * MUI 的轨道底色写死在 `.MuiLinearProgress-root` + `.MuiLinearProgress-colorPrimary` 上，
+ * 深色下是主色 24% 的绿——4% 的填充和满格轨道几乎同色，看起来像「全都是进度」。
+ * 这里用中性轨道 + 主色填充，长度就是真实占比。
+ */
+function ShareBar({ value }: { value: number }) {
+  return (
+    <Box sx={{ height: 6, borderRadius: 3, bgcolor: 'action.hover', overflow: 'hidden' }}>
+      <Box sx={{ height: '100%', width: `${Math.min(Math.max(value, 0), 100)}%`, bgcolor: 'primary.main' }} />
+    </Box>
   );
 }
 
