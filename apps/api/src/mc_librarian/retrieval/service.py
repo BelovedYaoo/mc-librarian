@@ -16,12 +16,13 @@ from typing import Final
 
 from mc_librarian.config import Settings
 from mc_librarian.indexing import java, query
-from mc_librarian.indexing.layout import source_root
+from mc_librarian.indexing.layout import source_root, src_official_root
 from mc_librarian.indexing.text import count_tokens, split_lines
 from mc_librarian.retrieval.channels import (
     Candidate,
     Channel,
     literal_candidates,
+    param_candidates,
     patch_candidates,
     reference_candidates,
     summary_candidates,
@@ -99,6 +100,11 @@ def _channels(
             request.query,
             path_prefix=request.path_prefix,
             source=request.source,
+        ),
+        "param": by_names(
+            lambda name: param_candidates(
+                connection, name, path_prefix=request.path_prefix, source=request.source
+            )
         ),
         "symbol": by_names(
             lambda name: symbol_candidates(
@@ -273,13 +279,26 @@ def reference_list(
     )
 
 
-def read_source(settings: Settings, version: str, path: str) -> str | None:
-    """读 `<data_dir>/src/<version>/<path>` 的文本；缺失或越出源码根返回 None。
+def read_source(
+    settings: Settings, version: str, path: str, *, names: str = "parchment"
+) -> str | None:
+    """读源码树里的文本；缺失或越出源码根返回 None。
+
+    `names` 选读哪一层：`parchment`（默认，被索引的可读树）或 `original`（`src-official/`，
+    原始 `$$0`/`p_xxx_` 参数名）。没有原树副本时回退到可读树。
 
     `GET /v1/outline`、`GET /v1/read` 与 ask 的 `outline`/`read` 工具共用这一个入口：
     路径穿越（`../`）在这里就被挡掉，不在每个调用方各写一遍。
     """
-    root = source_root(settings.data_dir, version).resolve()
+    root = source_root(settings.data_dir, version)
+
+    if names == "original":
+        official = src_official_root(settings.data_dir, version)
+
+        if official.is_dir():
+            root = official
+
+    root = root.resolve()
     candidate = (root / path).resolve()
 
     if not candidate.is_relative_to(root) or not candidate.is_file():

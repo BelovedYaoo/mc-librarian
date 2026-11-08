@@ -19,6 +19,7 @@ from typing import Final
 
 DB_DIR_NAME: Final = "db"
 SRC_DIR_NAME: Final = "src"
+SRC_OFFICIAL_DIR_NAME: Final = "src-official"
 
 
 def index_path(data_dir: Path, version: str) -> Path:
@@ -27,5 +28,10 @@ def index_path(data_dir: Path, version: str) -> Path:
 
 
 def source_root(data_dir: Path, version: str) -> Path:
-    """`<data_dir>/src/<version>/`：该版本的源码根。"""
+    """`<data_dir>/src/<version>/`：该版本的源码根（Parchment 可读树，被索引的那份）。"""
     return data_dir / SRC_DIR_NAME / version
+
+
+def src_official_root(data_dir: Path, version: str) -> Path:
+    """`<data_dir>/src-official/<version>/`：原始参数名源码树（只读，`read?names=original`）。"""
+    return data_dir / SRC_OFFICIAL_DIR_NAME / version

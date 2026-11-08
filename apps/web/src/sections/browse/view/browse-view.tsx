@@ -42,6 +42,7 @@ const KIND_OPTIONS: { value: SymbolKind; label: string }[] = [
 const CHANNEL_LABELS: Record<HitChannel, string> = {
   summary: '摘要',
   symbol: '符号',
+  param: '参数',
   literal: '字面量',
   reference: '引用',
   patch: '补丁',
@@ -50,6 +51,8 @@ const CHANNEL_LABELS: Record<HitChannel, string> = {
 const CHANNEL_COLORS: Record<HitChannel, 'success' | 'primary' | 'warning' | 'secondary'> = {
   summary: 'success',
   symbol: 'primary',
+  // 参数命中比类/方法名弱一档，用次要色，避免在 why 里抢视觉。
+  param: 'secondary',
   literal: 'warning',
   reference: 'secondary',
   patch: 'warning',

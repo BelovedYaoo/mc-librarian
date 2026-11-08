@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query
 
@@ -219,10 +219,11 @@ def read_file(
     start: Annotated[int, Query(description="起始行（1-based，闭区间）")],
     end: Annotated[int, Query(description="结束行（1-based，闭区间）")],
     max_tokens: Annotated[int, Query(ge=100, le=32000)] = 4000,
+    names: Annotated[Literal["parchment", "original"], Query()] = "parchment",
 ) -> FileSlice:
     # 行号校验自己做（规格 §8）：三条越界都要在 detail 里带上文件总行数。
     index_path = require_index(conn, settings, version)
-    text = read_source(settings, version, path)
+    text = read_source(settings, version, path, names=names)
 
     if text is None:
         # 补丁正文在索引库里（`patches` 表的 hunk），不在源码树上——与 ask 的 `read` 工具

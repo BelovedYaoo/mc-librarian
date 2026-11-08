@@ -23,7 +23,14 @@ RRF_K: Final = 60
 # 于是一个「引用通道第 2 名」（说明这个词确实被谁调用）根本浮不上来。截断到 10 条后，
 # 各路的名次才有可比性——实测 30 题中文评测从 12/30 提到 14/30（issue #23）。
 CHANNEL_CANDIDATE_CAP: Final = 10
-WHY_ORDER: Final[tuple[Channel, ...]] = ("summary", "symbol", "literal", "reference", "patch")
+WHY_ORDER: Final[tuple[Channel, ...]] = (
+    "summary",
+    "symbol",
+    "param",
+    "literal",
+    "reference",
+    "patch",
+)
 
 
 @dataclass(frozen=True)

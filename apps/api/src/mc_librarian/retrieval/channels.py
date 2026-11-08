@@ -37,7 +37,7 @@ from mc_librarian.schemas import HitType, SymbolKind
 
 logger = logging.getLogger("mc_librarian.retrieval")
 
-Channel = Literal["summary", "symbol", "literal", "reference", "patch"]
+Channel = Literal["summary", "symbol", "param", "literal", "reference", "patch"]
 
 # 每路各取前 50 条候选（规格 §1）。
 CHANNEL_LIMIT: Final = 50
@@ -501,3 +501,74 @@ def _rg_text(field: object) -> str | None:
         return text
 
     return None
+
+
+def param_candidates(
+    connection: sqlite3.Connection,
+    name: str,
+    *,
+    path_prefix: str | None,
+    source: str | None = None,
+) -> list[Candidate]:
+    """参数通道：按参数名找所属方法（Parchment 名与原名都参与匹配）。
+
+    老索引没有 `params` 表时返回空（与 `source` 列的守卫同一套思路），不报错。
+    每个方法只出一次（同一个方法可能有多个参数同名？取名字命中的第一条）。
+    """
+    if not query.has_table(connection, "params"):
+        return []
+
+    sql = (
+        "SELECT c.fqn AS fqn, c.kind AS kind, f.path AS path,"
+        " m.name AS method_name, m.start_line AS start_line, m.end_line AS end_line,"
+        " p.name AS param_name, p.original AS param_original"
+        " FROM params p"
+        " JOIN methods m ON m.id = p.method_id"
+        " JOIN classes c ON c.id = m.class_id"
+        " JOIN files f ON f.id = c.file_id"
+        " WHERE (p.name = ? COLLATE NOCASE OR p.original = ? COLLATE NOCASE)"
+    )
+    params: list[object] = [name, name]
+
+    if source is not None and query.has_column(connection, "params", "source"):
+        sql += " AND p.source = ?"
+        params.append(source)
+
+    if path_prefix:
+        sql += " AND substr(f.path, 1, length(?)) = ?"
+        params.extend([path_prefix, path_prefix])
+
+    sql += " ORDER BY p.id LIMIT ?"
+    params.append(CHANNEL_LIMIT)
+
+    try:
+        rows = connection.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        logger.warning("参数通道查询失败，该路返回空")
+
+        return []
+
+    seen: set[str] = set()
+    candidates: list[Candidate] = []
+
+    for row in rows:
+        symbol = f"{row['fqn']}#{row['method_name']}"
+
+        if symbol in seen:
+            continue
+
+        seen.add(symbol)
+        candidates.append(
+            Candidate(
+                channel="param",
+                path=row["path"],
+                symbol=symbol,
+                kind=hit_type(row["kind"]),
+                start_line=int(row["start_line"]),
+                end_line=int(row["end_line"]),
+                summary=f"参数 {row['param_name']}"
+                + (f"（原名 {row['param_original']}）" if row["param_original"] else ""),
+            )
+        )
+
+    return candidates

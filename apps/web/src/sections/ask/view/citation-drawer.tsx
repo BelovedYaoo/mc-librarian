@@ -63,6 +63,8 @@ export function CitationDrawer({
   const [copied, setCopied] = useState(false);
   // 自动换行：抽屉很高，横向滚动条会落在最底部够不到（实测长行被右缘截断）。
   const [wrap, setWrap] = useState(true);
+  // 参数名层：可读（Parchment）/ 原始占位名（$$0、p_xxx_）。两棵树行号 1:1，切换不丢位置。
+  const [names, setNames] = useState<'parchment' | 'original'>('parchment');
   // 只看引用：大文件里引用常常在第 900 行，全文铺开时找不到重点。
   const [focusOnly, setFocusOnly] = useState(false);
   // 结构信息（类/方法 + 精确行区间）：方法折叠、大纲侧栏、当前符号三处共用一次请求。
@@ -93,9 +95,16 @@ export function CitationDrawer({
 
     void (async () => {
       try {
-        const probe = await readFile({ version, path, start, end });
+        const probe = await readFile({ version, path, start, end, names });
         const total = probe.total_lines ?? probe.end;
-        const slice = await readFile({ version, path, start: 1, end: total, max_tokens: 32000 });
+        const slice = await readFile({
+          version,
+          path,
+          start: 1,
+          end: total,
+          max_tokens: 32000,
+          names,
+        });
 
         if (!cancelled) setState({ status: 'ready', slice, total });
       } catch (cause) {
@@ -111,7 +120,7 @@ export function CitationDrawer({
     return () => {
       cancelled = true;
     };
-  }, [open, citation, version]);
+  }, [open, citation, version, names]);
 
   useEffect(() => {
     if (!open) setCopied(false);
@@ -199,6 +208,19 @@ export function CitationDrawer({
                   size="small"
                   checked={focusOnly}
                   onChange={(e) => setFocusOnly(e.target.checked)}
+                />
+              </Stack>
+
+              <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  原始参数名
+                </Typography>
+                <Switch
+                  size="small"
+                  checked={names === 'original'}
+                  onChange={(event) =>
+                    setNames(event.target.checked ? 'original' : 'parchment')
+                  }
                 />
               </Stack>
 

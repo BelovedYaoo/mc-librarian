@@ -832,7 +832,7 @@ export interface components {
             lines: number[];
             /** Format: float */
             score: number;
-            why: ("summary" | "symbol" | "literal" | "reference" | "patch")[];
+            why: ("summary" | "symbol" | "param" | "literal" | "reference" | "patch")[];
             /** @description 只对 `type = patch` 给出：补丁改的源文件（从 patch 头解析） */
             target?: string | null;
             summary?: string;
@@ -1730,6 +1730,8 @@ export interface operations {
                 start: number;
                 end: number;
                 max_tokens?: number;
+                /** @description 参数名用哪一层：`parchment`（可读，默认）或 `original`（原始占位名） */
+                names?: "parchment" | "original";
             };
             header?: never;
             path?: never;

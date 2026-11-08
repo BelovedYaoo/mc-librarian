@@ -641,7 +641,7 @@ SearchDetail = Literal["locate", "snippet"]
 HitType = Literal["class", "method", "field", "file", "patch"]
 # `why` 的取值域与固定顺序（issue #6 规格 §4；`patch` 由 issue #24 追加）。
 # `summary` 需要索引库里有 `summaries_fts`（#7），`patch` 需要 `patches_fts`（#24）。
-WhyChannel = Literal["summary", "symbol", "literal", "reference", "patch"]
+WhyChannel = Literal["summary", "symbol", "param", "literal", "reference", "patch"]
 
 
 class SearchRequest(BaseModel):

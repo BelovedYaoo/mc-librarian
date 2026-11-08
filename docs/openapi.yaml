@@ -283,6 +283,10 @@ paths:
         - name: max_tokens
           in: query
           schema: { type: integer, minimum: 100, maximum: 32000, default: 4000 }
+        - name: names
+          in: query
+          description: 参数名用哪一层：`parchment`（可读，默认）或 `original`（原始占位名）
+          schema: { type: string, enum: [parchment, original], default: parchment }
       responses:
         "200":
           description: OK
@@ -1163,7 +1167,7 @@ components:
         score: { type: number, format: float }
         why:
           type: array
-          items: { type: string, enum: [summary, symbol, literal, reference, patch] }
+          items: { type: string, enum: [summary, symbol, param, literal, reference, patch] }
         target:
           type: [string, "null"]
           description: 只对 `type = patch` 给出：补丁改的源文件（从 patch 头解析）

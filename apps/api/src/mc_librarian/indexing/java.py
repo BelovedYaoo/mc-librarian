@@ -88,6 +88,8 @@ class ParsedMethod:
     signature: str | None
     return_type: str | None
     params: list[str]
+    # 参数名（与 `params` 同序，纯标识符）。Parchment 重写与参数检索都用它。
+    param_names: list[str]
     modifiers: list[str]
     annotations: list[str]
     start_line: int
@@ -421,6 +423,7 @@ def _collect_class(
                 signature="static {}",
                 return_type=None,
                 params=[],
+                param_names=[],
                 modifiers=["static"],
                 annotations=[],
                 start_line=parsed.start_line,
@@ -481,6 +484,7 @@ def _build_method(node: Node, parsed_class: ParsedClass) -> ParsedMethod:
         signature=_method_signature(node, modifiers, return_type, name, params_node),
         return_type=return_type,
         params=_param_types(params_node),
+        param_names=_param_names(params_node),
         modifiers=modifiers,
         annotations=annotations,
         start_line=_line(node),
@@ -500,6 +504,7 @@ def _build_annotation_element(node: Node) -> ParsedMethod:
         signature=signature,
         return_type=return_type,
         params=[],
+        param_names=[],
         modifiers=modifiers,
         annotations=annotations,
         start_line=_line(node),
@@ -609,6 +614,29 @@ def _method_signature(
     params = _normalize(_text(params_node)) if params_node is not None else "()"
 
     return _normalize(f"{' '.join(parts)}{params}")
+
+
+def _param_names(params_node: Node | None) -> list[str]:
+    """参数名（与 `_param_types` 同序）。`receiver_parameter` 与 `spread_parameter` 也要计数。"""
+    if params_node is None:
+        return []
+
+    names: list[str] = []
+
+    for parameter in params_node.named_children:
+        name_node = parameter.child_by_field_name("name")
+
+        if name_node is not None:
+            names.append(_text(name_node))
+            continue
+
+        # 可变参数（`String... args`）的 name 在 declarator 上。
+        declarator = _first_child_of_type(parameter, "variable_declarator")
+
+        if declarator is not None:
+            names.append(_text(declarator.child_by_field_name("name")))
+
+    return names
 
 
 def _param_types(params_node: Node | None) -> list[str]:

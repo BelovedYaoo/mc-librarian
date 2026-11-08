@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import sqlite3
+import zipfile
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -57,6 +59,7 @@ from mc_librarian.fetch.pipeline import (
     write_checkpoint,
 )
 from mc_librarian.fetch.tools import PipelineTools, default_tools
+from mc_librarian.indexing import parchment as parchment_mod
 from mc_librarian.indexing.build import (
     BuildError,
     SourceSpec,
@@ -65,7 +68,7 @@ from mc_librarian.indexing.build import (
     read_index_totals,
     source_tree_size_bytes,
 )
-from mc_librarian.indexing.layout import index_path, source_root
+from mc_librarian.indexing.layout import index_path, source_root, src_official_root
 from mc_librarian.indexing.summarize import (
     FAILURE_SAMPLE,
     OpenAiCompatClient,
@@ -443,6 +446,42 @@ def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
     return stats
 
 
+def _apply_parchment(context: JobContext, root: Path) -> None:
+    """若缓存里有该版本的 Parchment 数据，就把可读树改名、原树备份到 `src-official/`。
+
+    Parchment 数据由运维预先放进 `cache/<version>/parchment-<mc>.zip`（离线部署不联网）。
+    没有数据时什么都不做：两棵树就是同一份，行为与改造前一致。
+    """
+    identity = store.version_identity(context.version)
+    cache = cache_dir_for(context.data_dir, context.version)
+    candidates = (
+        cache / f"parchment-{identity.mc_version}.zip",
+        cache / "parchment.zip",
+    )
+    archive = next((path for path in candidates if path.is_file()), None)
+
+    if archive is None:
+        return
+
+    try:
+        data = parchment_mod.load_parchment(archive)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        context.log("warn", f"Parchment 数据不可用，跳过参数名重写：{error}")
+        return
+
+    official = src_official_root(context.data_dir, context.version)
+
+    if official.exists():
+        shutil.rmtree(official)
+
+    shutil.copytree(root, official)
+    originals = parchment_mod.apply_tree(root, data)
+    context.log(
+        "info",
+        f"Parchment：{len(originals)} 个类的参数名已替换（原树备份到 {official}）",
+    )
+
+
 def _parse_stage(context: JobContext) -> dict[str, Any]:
     """就位源码树并把它解析成 `db/<version>.sqlite`（规格补充 §1/§3/§4/§14）。
 
@@ -478,6 +517,7 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
 
             place_source_tree(source.root, dest)
 
+        _apply_parchment(context, dest)
         result = build_index_from_sources(sources, index, log=context.log)
     except BuildError as error:
         raise StageError(str(error)) from error

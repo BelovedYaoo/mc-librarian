@@ -83,6 +83,20 @@ SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     )
     """,
     """
+    CREATE TABLE params (
+      id        INTEGER PRIMARY KEY,
+      method_id INTEGER NOT NULL REFERENCES methods (id),
+      ordinal   INTEGER NOT NULL,
+      name      TEXT NOT NULL,
+      original  TEXT,
+      type      TEXT,
+      source    TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_params_name ON params (name)",
+    "CREATE INDEX idx_params_original ON params (original)",
+    "CREATE INDEX idx_params_method ON params (method_id)",
+    """
     CREATE TABLE fields (
       id          INTEGER PRIMARY KEY,
       class_id    INTEGER NOT NULL REFERENCES classes (id),
@@ -321,6 +335,10 @@ def build_index_from_sources(
     total_tokens = 0
     total_size = 0
 
+    originals = _load_param_originals(
+        [source.root for source in sources if source.kind != "patch"]
+    )
+
     for source in sources:
         if source.kind == "patch":
             file_count, file_hunks = _collect_patches(source.root, log=log)
@@ -342,7 +360,7 @@ def build_index_from_sources(
             f"（阈值 {MAX_PARSE_FAILURE_RATIO:.0%}），请检查 tree-sitter 语法包是否匹配"
         )
 
-    _write_index(db_path, records, hunks)
+    _write_index(db_path, records, hunks, originals=originals)
 
     return BuildResult(
         files=len(records),
@@ -446,7 +464,11 @@ def _collect_patches(
 
 
 def _write_index(
-    db_path: Path, records: list[_FileRecord], hunks: list[patches.PatchHunk]
+    db_path: Path,
+    records: list[_FileRecord],
+    hunks: list[patches.PatchHunk],
+    *,
+    originals: dict[str, dict[int, dict[int, str]]] | None = None,
 ) -> None:
     """建库 + 写数据 + 原子替换。临时文件与目标同目录，`os.replace` 才是原子的。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -463,7 +485,7 @@ def _write_index(
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
 
-        _insert_records(connection, records)
+        _insert_records(connection, records, originals=originals)
         _insert_patches(connection, hunks)
         connection.commit()
     except BaseException:
@@ -476,7 +498,12 @@ def _write_index(
     os.replace(temp, db_path)
 
 
-def _insert_records(connection: sqlite3.Connection, records: list[_FileRecord]) -> None:
+def _insert_records(
+    connection: sqlite3.Connection,
+    records: list[_FileRecord],
+    *,
+    originals: dict[str, dict[int, dict[int, str]]] | None = None,
+) -> None:
     for record in records:
         cursor = connection.execute(
             "INSERT INTO files (path, pkg, loc, tokens, source) VALUES (?, ?, ?, ?, ?)",
@@ -508,6 +535,16 @@ def _insert_records(connection: sqlite3.Connection, records: list[_FileRecord]) 
                         method.end_line,
                         record.source,
                     ),
+                )
+                method_id = int(method_cursor.lastrowid or 0)
+                _insert_params(
+                    connection,
+                    method_id=method_id,
+                    method=method,
+                    originals=(originals or {}).get(record.relative, {}).get(
+                        method.start_line, {}
+                    ),
+                    source=record.source,
                 )
                 _insert_refs(
                     connection, int(method_cursor.lastrowid or 0), method.refs, record.source
@@ -562,6 +599,58 @@ def _insert_patches(
                 hunk.target,
                 segment(hunk.context),
             ),
+        )
+
+
+PARCHMENT_MAP_NAME: Final = ".parchment-map.json"
+
+
+def _load_param_originals(roots: Sequence[Path]) -> dict[str, dict[int, dict[int, str]]]:
+    """读重写阶段留下的原始参数名：`{文件相对路径: {方法起始行: {ordinal: 原名}}}`。
+
+    以「方法起始行」为键而不是方法名：两棵树行号 1:1，行号比重载方法名更可靠。
+    """
+    merged: dict[str, dict[int, dict[int, str]]] = {}
+
+    for root in roots:
+        path = root / PARCHMENT_MAP_NAME
+
+        if not path.is_file():
+            continue
+
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        for file_key, methods in loaded.items():
+            if not isinstance(methods, dict):
+                continue
+
+            target = merged.setdefault(str(file_key), {})
+
+            for line, params in methods.items():
+                if isinstance(params, dict):
+                    target[int(line)] = {int(k): str(v) for k, v in params.items()}
+
+    return merged
+
+
+def _insert_params(
+    connection: sqlite3.Connection,
+    *,
+    method_id: int,
+    method: java.ParsedMethod,
+    originals: dict[int, str],
+    source: SourceKind,
+) -> None:
+    """一行一个参数；`name` 是可读名（Parchment 重写后），`original` 是重写前的标识符。"""
+    for ordinal, name in enumerate(method.param_names):
+        type_text = method.params[ordinal] if ordinal < len(method.params) else None
+        connection.execute(
+            "INSERT INTO params (method_id, ordinal, name, original, type, source)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (method_id, ordinal, name, originals.get(ordinal), type_text, source),
         )
 
 

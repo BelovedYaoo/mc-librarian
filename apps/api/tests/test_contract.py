@@ -811,6 +811,7 @@ def test_search_response_schema_matches() -> None:
         assert hit["properties"]["why"]["items"]["enum"] == [
             "summary",
             "symbol",
+            "param",
             "literal",
             "reference",
             "patch",

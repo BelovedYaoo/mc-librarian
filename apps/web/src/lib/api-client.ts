@@ -509,7 +509,15 @@ export function getOutline(
 
 /** 源码切片：`start`/`end` 必填；超出 `max_tokens` 时服务端按行从尾部截断。 */
 export function readFile(
-  params: { version: string; path: string; start: number; end: number; max_tokens?: number },
+  params: {
+    version: string;
+    path: string;
+    start: number;
+    end: number;
+    max_tokens?: number;
+    /** 参数名选哪一层：`parchment`（可读，默认）或 `original`（原始占位名）。 */
+    names?: 'parchment' | 'original';
+  },
   signal?: AbortSignal
 ): Promise<FileSlice> {
   return request<FileSlice>(`/v1/read${buildQuery(params)}`, { signal });
