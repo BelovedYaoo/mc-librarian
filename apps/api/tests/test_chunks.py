@@ -97,7 +97,8 @@ def test_decompiler_runs_one_invocation_per_chunk_and_merges(
     assert all("-XX:MaxMetaspaceSize=192m" in command for command, _ in recorded)
     # 每块只带自己那些类（子 jar），不再用 --only。
     assert all("--only" not in " ".join(command) for command, _ in recorded)
-    assert sorted(sum((entries for _, entries in recorded), [])) == [
+    merged = [name for _command, entries in recorded for name in entries]
+    assert sorted(merged) == [
         "com/mojang/C",
         "net/minecraft/world/level/A",
         "net/minecraft/world/level/B",
