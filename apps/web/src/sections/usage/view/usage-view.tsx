@@ -139,7 +139,9 @@ export function UsageView() {
 // ----------------------------------------------------------------------
 
 function Report({ report, groupBy }: { report: UsageReport; groupBy: UsageGroupBy }) {
-  const buckets = report.buckets;
+  // 后端只返回「有数据的分组」：按天统计时没问答的那天会整个消失，折线/柱状图就断了。
+  // 这里按 [from, to] 补齐零值（只在 day 维度补；用户/版本/模型补零没有意义）。
+  const buckets = groupBy === 'day' ? fillDays(report.buckets, report.from, report.to) : report.buckets;
   const promptTokens = report.totals.prompt_tokens ?? 0;
   const completionTokens = report.totals.completion_tokens ?? 0;
   const totalTokens = promptTokens + completionTokens;
@@ -441,6 +443,35 @@ function StatCard({ label, value, hint }: { label: string; value: string; hint?:
 }
 
 // ----------------------------------------------------------------------
+
+/**
+ * 按天补零：把 `[from, to]` 里缺失的日期补成 0 请求的桶。
+ *
+ * 后端的分组是 `GROUP BY`，没有行的日期不会出现；图表上就少一根柱子，看起来像那几天
+ * 不存在。补零后横轴才是连续时间线（表格里也会显示 0，符合「区间内没有数据」的口径）。
+ */
+function fillDays(buckets: UsageBucket[], from: string, to: string): UsageBucket[] {
+  const existing = new Map(buckets.map((bucket) => [bucket.key, bucket]));
+  const filled: UsageBucket[] = [];
+  const cursor = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T00:00:00`);
+
+  while (cursor <= end) {
+    const key = asDateInput(cursor);
+    filled.push(
+      existing.get(key) ?? {
+        key,
+        requests: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        latency_ms: 0,
+      }
+    );
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return filled;
+}
 
 /** 大数字压缩：token 动辄百万，原样列出读不出量级。 */
 function compactNumber(value: number): string {
