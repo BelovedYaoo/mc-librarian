@@ -22,7 +22,7 @@ export default function SettingsPage() {
       <title>{metadata.title}</title>
 
       {/* 两列布局：设置卡片按 2 列排（lg 起），单列时输入框仍不会被拉成长条。 */}
-      <Box sx={{ maxWidth: 1160 }}>
+      <Box sx={{ maxWidth: 1160, mx: 'auto' }}>
         <Stack spacing={3}>
           <div>
             <Typography variant="h4" sx={{ mb: 1 }}>

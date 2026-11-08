@@ -209,8 +209,8 @@ export function UsersView() {
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
                 helperText="3–32 位，允许字母、数字、下划线、点和短横线"
-                fullWidth
                 required
+                sx={{ flex: '1 1 320px', maxWidth: 380 }}
               />
 
               <TextField
@@ -268,11 +268,13 @@ export function UsersView() {
                 <TableHead>
                   <TableRow>
                     <TableCell>用户</TableCell>
-                    <TableCell>角色</TableCell>
-                    <TableCell>状态</TableCell>
-                    <TableCell>创建时间</TableCell>
-                    <TableCell>最近登录</TableCell>
-                    <TableCell align="right">操作</TableCell>
+                    <TableCell sx={{ width: 150 }}>角色</TableCell>
+                    <TableCell sx={{ width: 110 }}>状态</TableCell>
+                    <TableCell sx={{ width: 190 }}>创建时间</TableCell>
+                    <TableCell sx={{ width: 190 }}>最近登录</TableCell>
+                    <TableCell align="right" sx={{ width: 150 }}>
+                      操作
+                    </TableCell>
                   </TableRow>
                 </TableHead>
 

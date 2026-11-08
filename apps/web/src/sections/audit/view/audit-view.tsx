@@ -141,16 +141,18 @@ export function AuditView() {
           )}
 
           {entries.length > 0 && (
-            <Box sx={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto' }}>
+            <Box sx={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', pb: 1 }}>
               <Table size="small" stickyHeader>
                 <TableHead>
                   <TableRow>
                     <TableCell>时间</TableCell>
                     <TableCell>操作者</TableCell>
-                    <TableCell>动作</TableCell>
-                    <TableCell>目标</TableCell>
+                    <TableCell sx={{ width: 120 }}>动作</TableCell>
+                    <TableCell sx={{ width: 200 }}>目标</TableCell>
                     <TableCell>详情</TableCell>
-                    <TableCell>IP</TableCell>
+                    <TableCell align="right" sx={{ width: 140 }}>
+                      IP
+                    </TableCell>
                   </TableRow>
                 </TableHead>
 
@@ -172,7 +174,9 @@ export function AuditView() {
                       </TableCell>
                       <TableCell>{entry.target ?? '—'}</TableCell>
                       <TableCell sx={{ wordBreak: 'break-word' }}>{formatDetail(entry)}</TableCell>
-                      <TableCell>{entry.ip ?? '—'}</TableCell>
+                      <TableCell align="right" sx={{ color: 'text.secondary', whiteSpace: 'nowrap' }}>
+                        {entry.ip ?? '—'}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

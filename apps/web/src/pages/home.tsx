@@ -5,6 +5,8 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 
 import { useAuth } from 'src/auth';
+
+import { formatTime } from 'src/utils/format-time';
 import { CONFIG } from 'src/global-config';
 
 import { HealthView } from 'src/sections/health';
@@ -44,7 +46,7 @@ export default function HomePage() {
                 label="角色"
                 value={user?.role === 'admin' ? '管理员 (admin)' : '普通用户 (user)'}
               />
-              <Row label="最近登录" value={user?.last_login_at ?? '—'} />
+              <Row label="最近登录" value={formatTime(user?.last_login_at)} />
             </Stack>
           </CardContent>
         </Card>
