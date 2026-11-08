@@ -283,7 +283,8 @@ export function BrowseView() {
                   label="智能检索"
                 />
                 <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                  先让模型改写查询再召回，并从真实候选里挑最相关的 5 条；通常 10–40 秒（取决于上游模型），额外消耗 token
+                  先让模型改写查询再召回，并从真实候选里挑最相关的 5 条；通常 10–40
+                  秒（取决于上游模型），额外消耗 token
                 </Typography>
 
                 <Box sx={{ flex: '1 1 auto' }} />
@@ -322,7 +323,10 @@ export function BrowseView() {
 
             {results.expanded_query && (
               // 智能检索实际用了哪些扩展词：结果和直觉不符时，这里是第一手线索。
-              <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 1 }}>
+              <Typography
+                variant="caption"
+                sx={{ color: 'text.secondary', display: 'block', mb: 1 }}
+              >
                 智能检索扩展词：{results.expanded_query}
               </Typography>
             )}

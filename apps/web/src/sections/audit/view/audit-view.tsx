@@ -6,6 +6,7 @@ import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
+import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
 import Stack from '@mui/material/Stack';
@@ -160,11 +161,17 @@ export function AuditView() {
                         {formatTime(entry.created_at)}
                       </TableCell>
                       <TableCell>{entry.actor}</TableCell>
-                      <TableCell sx={{ fontFamily: 'monospace' }}>{entry.action}</TableCell>
-                      <TableCell>{entry.target ?? '—'}</TableCell>
-                      <TableCell sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                        {formatDetail(entry)}
+                      <TableCell>
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          color={ACTION_META[entry.action]?.color ?? 'default'}
+                          label={ACTION_META[entry.action]?.label ?? entry.action}
+                          title={entry.action}
+                        />
                       </TableCell>
+                      <TableCell>{entry.target ?? '—'}</TableCell>
+                      <TableCell sx={{ wordBreak: 'break-word' }}>{formatDetail(entry)}</TableCell>
                       <TableCell>{entry.ip ?? '—'}</TableCell>
                     </TableRow>
                   ))}
@@ -180,9 +187,90 @@ export function AuditView() {
 
 // ----------------------------------------------------------------------
 
-/** `detail` 是自由 JSON；空对象（后端对无详情动作写 `{}`）显示成 `—`。 */
-function formatDetail(entry: AuditEntry): string {
-  const keys = Object.keys(entry.detail ?? {});
+/**
+ * 动作名 → 人话标签 + 颜色。
+ *
+ * `action` 是稳定的机器键（`version.registered`），直接摆在表格里对管理员没有意义：
+ * 这列是给人扫的，所以显示中文标签，机器键留在 `title` 里（悬停可见），排障时仍能查到。
+ */
+const ACTION_META: Record<
+  string,
+  { label: string; color: 'success' | 'error' | 'warning' | 'default' }
+> = {
+  'user.created': { label: '创建用户', color: 'success' },
+  'user.role_changed': { label: '修改角色', color: 'warning' },
+  'user.disabled': { label: '停用用户', color: 'error' },
+  'user.enabled': { label: '启用用户', color: 'success' },
+  'user.deleted': { label: '删除用户', color: 'error' },
+  'invite.created': { label: '创建邀请', color: 'success' },
+  'invite.accepted': { label: '接受邀请', color: 'default' },
+  'token.created': { label: '创建令牌', color: 'success' },
+  'token.revoked': { label: '吊销令牌', color: 'error' },
+  'job.created': { label: '创建任务', color: 'default' },
+  'job.canceled': { label: '取消任务', color: 'error' },
+  'job.retried': { label: '重试任务', color: 'warning' },
+  'version.registered': { label: '注册版本', color: 'success' },
+  'version.recorded': { label: '记录版本', color: 'default' },
+  'settings.updated': { label: '修改设置', color: 'warning' },
+};
 
-  return keys.length === 0 ? '—' : JSON.stringify(entry.detail);
+/** 大数字压缩：1,234 / 12.3 万 / 6.86M（token 动辄百万，原样列出没人读得出来）。 */
+function compactNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 10_000) return `${(value / 10_000).toFixed(1)} 万`;
+
+  return value.toLocaleString('zh-CN');
+}
+
+/**
+ * `detail` 是自由 JSON（各动作字段不同）。按动作翻译成人话，认不出的键值退回 `键 值` 拼接。
+ */
+function formatDetail(entry: AuditEntry): string {
+  const detail = (entry.detail ?? {}) as Record<string, unknown>;
+  const keys = Object.keys(detail);
+
+  if (keys.length === 0) return '—';
+
+  switch (entry.action) {
+    case 'version.registered':
+    case 'version.recorded': {
+      const parts = [
+        detail.files != null ? `${compactNumber(Number(detail.files))} 个文件` : null,
+        detail.tokens != null ? `${compactNumber(Number(detail.tokens))} token` : null,
+        detail.obfuscated ? '混淆' : null,
+        detail.has_summaries ? '含摘要' : null,
+      ].filter(Boolean);
+
+      return parts.length > 0 ? parts.join(' · ') : '—';
+    }
+    case 'settings.updated': {
+      const changed = Array.isArray(detail.keys) ? detail.keys : [];
+
+      return changed.length > 0 ? `修改 ${changed.join('、')}` : '—';
+    }
+    case 'invite.created':
+      return detail.expires_in_hours != null ? `有效期 ${detail.expires_in_hours} 小时` : '—';
+    case 'token.created': {
+      const parts = [
+        detail.name != null ? `名称 ${String(detail.name)}` : null,
+        detail.expires_in_days != null ? `有效期 ${detail.expires_in_days} 天` : null,
+      ].filter(Boolean);
+
+      return parts.length > 0 ? parts.join(' · ') : '—';
+    }
+    case 'user.created':
+    case 'user.deleted':
+      return detail.role != null ? `角色 ${detail.role}` : '—';
+    case 'user.disabled':
+      return detail.sessions_revoked != null ? `撤销 ${detail.sessions_revoked} 个会话` : '—';
+    case 'user.role_changed':
+      return detail.from != null && detail.to != null ? `${detail.from} → ${detail.to}` : '—';
+    case 'job.created':
+      return [detail.kind, detail.version].filter(Boolean).join(' · ') || '—';
+    case 'job.canceled':
+    case 'job.retried':
+      return detail.from_status != null ? `原状态 ${detail.from_status}` : '—';
+    default:
+      return keys.map((key) => `${key} ${String(detail[key])}`).join(' · ');
+  }
 }

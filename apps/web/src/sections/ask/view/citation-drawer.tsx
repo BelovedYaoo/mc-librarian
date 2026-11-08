@@ -233,7 +233,9 @@ export function CitationDrawer({
                 )}
 
                 <Box sx={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
-                  <Box sx={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0 }}>
+                  <Box
+                    sx={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0 }}
+                  >
                     {symbol !== null && (
                       <Box
                         sx={{
@@ -333,7 +335,12 @@ function importRegions(lines: string[], startLine: number): FoldRegion[] {
       break;
     }
 
-    regions.push({ start: startLine + first, end: startLine + last, label: 'import', kind: 'import' });
+    regions.push({
+      start: startLine + first,
+      end: startLine + last,
+      label: 'import',
+      kind: 'import',
+    });
     index = last + 1;
   }
 
@@ -477,7 +484,8 @@ function FileViewer({
       current.filter(
         (start) =>
           !regions.some(
-            (region) => region.start === start && focusLine >= region.start && focusLine <= region.end
+            (region) =>
+              region.start === start && focusLine >= region.start && focusLine <= region.end
           )
       )
     );
@@ -693,7 +701,8 @@ function FileViewer({
                 ▸
               </Box>
               <Box component="span">
-                {region.label} …（{region.end - region.start + 1} 行，第 {region.start}-{region.end} 行）
+                {region.label} …（{region.end - region.start + 1} 行，第 {region.start}-{region.end}{' '}
+                行）
               </Box>
             </Box>
           );
@@ -811,7 +820,12 @@ function OutlinePanel({
             <OutlineItem
               label={simpleName(cls.fqn ?? '')}
               line={classLines?.[0]}
-              active={currentLine !== null && classLines !== undefined && currentLine >= classLines[0] && currentLine <= classLines[1]}
+              active={
+                currentLine !== null &&
+                classLines !== undefined &&
+                currentLine >= classLines[0] &&
+                currentLine <= classLines[1]
+              }
               bold
               onJump={onJump}
             />
@@ -824,7 +838,12 @@ function OutlinePanel({
                   key={`${cls.fqn}#${method.name}-${lines?.[0] ?? 0}`}
                   label={method.name ?? ''}
                   line={lines?.[0]}
-                  active={currentLine !== null && lines !== undefined && currentLine >= lines[0] && currentLine <= lines[1]}
+                  active={
+                    currentLine !== null &&
+                    lines !== undefined &&
+                    currentLine >= lines[0] &&
+                    currentLine <= lines[1]
+                  }
                   onJump={onJump}
                 />
               );
@@ -870,7 +889,11 @@ function OutlineItem({
       title={label}
     >
       {label}
-      {line !== undefined && <Box component="span" sx={{ ml: 1, opacity: 0.6 }}>{line}</Box>}
+      {line !== undefined && (
+        <Box component="span" sx={{ ml: 1, opacity: 0.6 }}>
+          {line}
+        </Box>
+      )}
     </Box>
   );
 }

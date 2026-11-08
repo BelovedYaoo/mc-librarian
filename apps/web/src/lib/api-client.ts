@@ -91,8 +91,7 @@ export type JobCreate = components['schemas']['JobCreate'];
 export type JobLog = components['schemas']['JobLog'];
 
 /** 问答请求体（`POST /v1/ask`）；`version` 必选，模型不可改。 */
-export type AskRequest =
-  paths['/v1/ask']['post']['requestBody']['content']['application/json'];
+export type AskRequest = paths['/v1/ask']['post']['requestBody']['content']['application/json'];
 
 /** 一次性问答响应（`Accept: application/json`）：含 `steps` 与 `citations`。 */
 export type AskResponse = components['schemas']['AskResponse'];
@@ -452,10 +451,9 @@ export async function listAudit(
   params: { actor?: string; limit?: number } = {},
   signal?: AbortSignal
 ): Promise<AuditEntry[]> {
-  const body = await request<{ entries?: AuditEntry[] }>(
-    `/v1/admin/audit${buildQuery(params)}`,
-    { signal }
-  );
+  const body = await request<{ entries?: AuditEntry[] }>(`/v1/admin/audit${buildQuery(params)}`, {
+    signal,
+  });
 
   return body.entries ?? [];
 }
@@ -659,10 +657,9 @@ export function getConversation(
   conversationId: string,
   signal?: AbortSignal
 ): Promise<ConversationDetail> {
-  return request<ConversationDetail>(
-    `/v1/conversations/${encodeURIComponent(conversationId)}`,
-    { signal }
-  );
+  return request<ConversationDetail>(`/v1/conversations/${encodeURIComponent(conversationId)}`, {
+    signal,
+  });
 }
 
 /** 删除一个历史会话（级联删消息）；别人的会话后端回 404。 */

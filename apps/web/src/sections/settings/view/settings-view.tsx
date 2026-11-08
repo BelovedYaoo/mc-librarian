@@ -113,8 +113,8 @@ const FIELDS: FieldSpec[] = [
     kind: 'int',
     label: '最大检索步数',
     helper:
-      '上限数的是「模型轮次」，一轮里可以并发多个工具调用（实测 8 轮 = 16 次调用）。'
-        + '取值 1–200；问答请求省略 max_steps 时用它',
+      '上限数的是「模型轮次」，一轮里可以并发多个工具调用（实测 8 轮 = 16 次调用）。' +
+      '取值 1–200；问答请求省略 max_steps 时用它',
   },
   {
     name: 'askMaxAnswerTokens',
@@ -447,72 +447,81 @@ export function SettingsView() {
         只提交改动过的字段；留空表示回退到部署时的环境变量（不是改成 0）。
       </Typography>
 
-      {GROUPS.map((group) => (
-        <Card key={group.block}>
-          <CardContent>
-            <Typography variant="subtitle1">{group.title}</Typography>
-            {group.hint && (
-              <Typography variant="body2" sx={{ color: 'text.secondary', mb: 1 }}>
-                {group.hint}
-              </Typography>
-            )}
-
-            <Divider sx={{ my: 2 }} />
-
-            <Stack spacing={2}>
-              {FIELDS.filter((spec) => spec.block === group.block).map((spec) =>
-                spec.kind === 'bool' ? (
-                  <FormControlLabel
-                    key={spec.name}
-                    control={
-                      <Switch
-                        checked={form[spec.name] === true}
-                        onChange={(event) => set(spec.name, event.target.checked)}
-                      />
-                    }
-                    label={spec.label}
-                  />
-                ) : (
-                  <TextField
-                    key={spec.name}
-                    label={spec.label}
-                    helperText={spec.helper}
-                    value={String(form[spec.name])}
-                    onChange={(event) => set(spec.name, event.target.value)}
-                    type={spec.kind === 'text' ? 'text' : 'number'}
-                    size="small"
-                    fullWidth
-                  />
-                )
+      <Box
+        sx={{
+          display: 'grid',
+          gap: 3,
+          gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
+          alignItems: 'start',
+        }}
+      >
+        {GROUPS.map((group) => (
+          <Card key={group.block}>
+            <CardContent>
+              <Typography variant="subtitle1">{group.title}</Typography>
+              {group.hint && (
+                <Typography variant="body2" sx={{ color: 'text.secondary', mb: 1 }}>
+                  {group.hint}
+                </Typography>
               )}
 
-              {SECRETS.filter((secret) => secret.block === group.block).map((secret) => (
-                <SecretField
-                  key={secret.name}
-                  label={secret.label}
-                  helper={secret.helper}
-                  isSet={secret.isSet(settings)}
-                  cleared={cleared.includes(secret.name)}
-                  value={secretInput[secret.name]}
-                  onChange={(value) => {
-                    setSecretInput((current) => ({ ...current, [secret.name]: value }));
-                    setSaved(false);
-                  }}
-                  onClear={() => {
-                    setCleared((current) => [...current, secret.name]);
-                    setSecretInput((current) => ({ ...current, [secret.name]: '' }));
-                    setSaved(false);
-                  }}
-                  onReset={() => {
-                    setCleared((current) => current.filter((name) => name !== secret.name));
-                    setSaved(false);
-                  }}
-                />
-              ))}
-            </Stack>
-          </CardContent>
-        </Card>
-      ))}
+              <Divider sx={{ my: 2 }} />
+
+              <Stack spacing={2}>
+                {FIELDS.filter((spec) => spec.block === group.block).map((spec) =>
+                  spec.kind === 'bool' ? (
+                    <FormControlLabel
+                      key={spec.name}
+                      control={
+                        <Switch
+                          checked={form[spec.name] === true}
+                          onChange={(event) => set(spec.name, event.target.checked)}
+                        />
+                      }
+                      label={spec.label}
+                    />
+                  ) : (
+                    <TextField
+                      key={spec.name}
+                      label={spec.label}
+                      helperText={spec.helper}
+                      value={String(form[spec.name])}
+                      onChange={(event) => set(spec.name, event.target.value)}
+                      type={spec.kind === 'text' ? 'text' : 'number'}
+                      size="small"
+                      fullWidth
+                    />
+                  )
+                )}
+
+                {SECRETS.filter((secret) => secret.block === group.block).map((secret) => (
+                  <SecretField
+                    key={secret.name}
+                    label={secret.label}
+                    helper={secret.helper}
+                    isSet={secret.isSet(settings)}
+                    cleared={cleared.includes(secret.name)}
+                    value={secretInput[secret.name]}
+                    onChange={(value) => {
+                      setSecretInput((current) => ({ ...current, [secret.name]: value }));
+                      setSaved(false);
+                    }}
+                    onClear={() => {
+                      setCleared((current) => [...current, secret.name]);
+                      setSecretInput((current) => ({ ...current, [secret.name]: '' }));
+                      setSaved(false);
+                    }}
+                    onReset={() => {
+                      setCleared((current) => current.filter((name) => name !== secret.name));
+                      setSaved(false);
+                    }}
+                  />
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
+        ))}
+      </Box>
     </Stack>
   );
 }

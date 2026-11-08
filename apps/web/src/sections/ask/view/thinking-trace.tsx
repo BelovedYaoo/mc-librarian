@@ -333,7 +333,10 @@ function TraceRow({ step }: { step: StepTrace }) {
 
       <Box sx={{ flex: '1 1 auto' }} />
 
-      <Tooltip title={step.ok === false ? (step.error ?? '失败（服务端未带原因）') : ''} placement="left">
+      <Tooltip
+        title={step.ok === false ? (step.error ?? '失败（服务端未带原因）') : ''}
+        placement="left"
+      >
         <Typography
           variant="caption"
           sx={{

@@ -715,6 +715,8 @@ class UsageBucket(BaseModel):
     requests: int
     prompt_tokens: int
     completion_tokens: int
+    # 该分组内所有请求的耗时之和（毫秒）；页面用它算平均耗时（latency / requests）。
+    latency_ms: int
 
 
 class UsageReport(BaseModel):

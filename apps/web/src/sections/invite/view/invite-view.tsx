@@ -96,9 +96,7 @@ export function InviteView() {
 
   if (state.status === 'invalid') {
     return (
-      <Alert severity="warning">
-        这个邀请链接无效、已过期或已被使用。请联系管理员重新发一条。
-      </Alert>
+      <Alert severity="warning">这个邀请链接无效、已过期或已被使用。请联系管理员重新发一条。</Alert>
     );
   }
 

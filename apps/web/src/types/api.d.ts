@@ -1330,6 +1330,8 @@ export interface components {
                 requests: number;
                 prompt_tokens: number;
                 completion_tokens: number;
+                /** @description 该分组内全部请求的耗时之和（毫秒）；平均耗时 = latency_ms / requests */
+                latency_ms: number;
             }[];
         };
         AuditEntry: {

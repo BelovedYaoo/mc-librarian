@@ -137,7 +137,8 @@ def report(
         f"SELECT {_KEY_SQL[group_by]} AS key,"
         " COUNT(*) AS requests,"
         " COALESCE(SUM(usage.prompt_tokens), 0) AS prompt_tokens,"
-        " COALESCE(SUM(usage.completion_tokens), 0) AS completion_tokens"
+        " COALESCE(SUM(usage.completion_tokens), 0) AS completion_tokens,"
+        " COALESCE(SUM(usage.latency_ms), 0) AS latency_ms"
         f" {_FROM} {where}"
         " GROUP BY key ORDER BY key",
         [*key_params, *where_params],
@@ -158,6 +159,7 @@ def report(
                 requests=int(row["requests"]),
                 prompt_tokens=int(row["prompt_tokens"]),
                 completion_tokens=int(row["completion_tokens"]),
+                latency_ms=int(row["latency_ms"]),
             )
             for row in bucket_rows
         ],

@@ -21,8 +21,8 @@ export default function SettingsPage() {
     <>
       <title>{metadata.title}</title>
 
-      {/* 本页全是表单：外壳给到 `xl`，内容列自己收到 720，输入框不会被拉成长条。 */}
-      <Box sx={{ maxWidth: 720 }}>
+      {/* 两列布局：设置卡片按 2 列排（lg 起），单列时输入框仍不会被拉成长条。 */}
+      <Box sx={{ maxWidth: 1160 }}>
         <Stack spacing={3}>
           <div>
             <Typography variant="h4" sx={{ mb: 1 }}>

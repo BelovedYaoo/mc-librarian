@@ -1098,6 +1098,7 @@ def test_usage_report_schema_matches() -> None:
             "requests",
             "prompt_tokens",
             "completion_tokens",
+            "latency_ms",
         ]
         assert "cost_usd" not in bucket["properties"]
 

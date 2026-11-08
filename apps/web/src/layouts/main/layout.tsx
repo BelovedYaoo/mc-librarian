@@ -67,6 +67,13 @@ export function MainLayout({ children, maxWidth = 'xl' }: MainLayoutProps) {
       sx={fullWidth ? { height: '100dvh', overflow: 'hidden' } : undefined}
       headerSection={
         <HeaderSection>
+          <Box
+            component="img"
+            src="/logo.svg"
+            alt=""
+            sx={{ width: 26, height: 26, mr: 1, borderRadius: 0.75 }}
+          />
+
           <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
             {CONFIG.appName}
           </Typography>
@@ -114,7 +121,13 @@ export function MainLayout({ children, maxWidth = 'xl' }: MainLayoutProps) {
               flex: '1 1 auto',
               minWidth: 0,
               ...(fullWidth
-                ? { p: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }
+                ? {
+                    p: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    minHeight: 0,
+                    overflow: 'hidden',
+                  }
                 : { py: { xs: 5, md: 8 } }),
             }}
           >

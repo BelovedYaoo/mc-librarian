@@ -106,12 +106,14 @@ def test_report_totals_and_day_buckets(
         "requests": 2,
         "prompt_tokens": 300,
         "completion_tokens": 30,
+        "latency_ms": 3000,
     }
     assert body["buckets"][1] == {
         "key": DAY_TWO,
         "requests": 1,
         "prompt_tokens": 300,
         "completion_tokens": 30,
+        "latency_ms": 3000,
     }
 
 

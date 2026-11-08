@@ -13,6 +13,11 @@ import Divider from '@mui/material/Divider';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import Switch from '@mui/material/Switch';
+import Table from '@mui/material/Table';
+import TableBody from '@mui/material/TableBody';
+import TableCell from '@mui/material/TableCell';
+import TableHead from '@mui/material/TableHead';
+import TableRow from '@mui/material/TableRow';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
@@ -21,6 +26,8 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CreatedUser, PatchUserRequest, User } from 'src/lib/api-client';
 
 import { useAuth } from 'src/auth';
+
+import { formatTime } from 'src/utils/format-time';
 import { createUser, deleteUser, listUsers, patchUser } from 'src/lib/api-client';
 
 // ----------------------------------------------------------------------
@@ -255,24 +262,42 @@ export function UsersView() {
             </Typography>
           )}
 
-          {state.status === 'ready' &&
-            state.users.map((item) => (
-              <UserRow
-                key={item.id}
-                user={item}
-                isCurrent={item.id === currentUser?.id}
-                busy={busyId === item.id}
-                // 最后一个启用中的管理员既不能停用也不能降级，前端先说清楚，
-                // 别让开关弹回来还只在页面顶部挂一行错误。
-                isLastAdmin={
-                  item.role === 'admin' &&
-                  item.enabled &&
-                  state.users.filter((u) => u.role === 'admin' && u.enabled).length <= 1
-                }
-                onPatch={(body) => void handlePatch(item, body)}
-                onDelete={() => setPendingDelete(item)}
-              />
-            ))}
+          {state.status === 'ready' && state.users.length > 0 && (
+            <Box sx={{ overflowX: 'auto', mt: 1 }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>用户</TableCell>
+                    <TableCell>角色</TableCell>
+                    <TableCell>状态</TableCell>
+                    <TableCell>创建时间</TableCell>
+                    <TableCell>最近登录</TableCell>
+                    <TableCell align="right">操作</TableCell>
+                  </TableRow>
+                </TableHead>
+
+                <TableBody>
+                  {state.users.map((item) => (
+                    <UserTableRow
+                      key={item.id}
+                      user={item}
+                      isCurrent={item.id === currentUser?.id}
+                      busy={busyId === item.id}
+                      // 最后一个启用中的管理员既不能停用也不能降级，前端先说清楚，
+                      // 别让开关弹回来还只在页面顶部挂一行错误。
+                      isLastAdmin={
+                        item.role === 'admin' &&
+                        item.enabled &&
+                        state.users.filter((u) => u.role === 'admin' && u.enabled).length <= 1
+                      }
+                      onPatch={(body) => void handlePatch(item, body)}
+                      onDelete={() => setPendingDelete(item)}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+          )}
         </CardContent>
       </Card>
 
@@ -315,70 +340,80 @@ type UserRowProps = {
   onDelete: () => void;
 };
 
-function UserRow({ user, isCurrent, busy, isLastAdmin, onPatch, onDelete }: UserRowProps) {
+function UserTableRow({ user, isCurrent, busy, isLastAdmin, onPatch, onDelete }: UserRowProps) {
   return (
-    <Stack
-      direction={{ xs: 'column', sm: 'row' }}
-      spacing={2}
-      sx={{
-        alignItems: { sm: 'center' },
-        py: 1.5,
-        borderBottom: 1,
-        borderColor: 'divider',
-        '&:last-of-type': { borderBottom: 'none' },
-      }}
-    >
-      <Box sx={{ flex: '1 1 auto', minWidth: 0 }}>
+    <TableRow hover>
+      <TableCell>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
           <Typography variant="body2" sx={{ fontWeight: 600 }}>
             {user.username}
           </Typography>
           {isCurrent && <Chip size="small" label="我" />}
-          {!user.enabled && <Chip size="small" color="error" label="已禁用" />}
         </Stack>
-        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-          最近登录：{user.last_login_at ?? '从未'}
-        </Typography>
-      </Box>
+      </TableCell>
 
-      <TextField
-        select
-        size="small"
-        label="角色"
-        value={user.role}
-        disabled={busy || (isLastAdmin && user.role === 'admin')}
-        onChange={(event) => onPatch({ role: event.target.value as Role })}
-        sx={{ minWidth: 130 }}
-      >
-        <MenuItem value="user">普通用户</MenuItem>
-        <MenuItem value="admin">管理员</MenuItem>
-      </TextField>
-
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'center', minWidth: 96 }}>
-        <Switch
+      <TableCell>
+        <TextField
+          select
           size="small"
-          checked={user.enabled}
-          disabled={busy || (isLastAdmin && user.enabled)}
-          onChange={(event) => onPatch({ enabled: event.target.checked })}
-        />
-        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-          {user.enabled ? '启用' : '禁用'}
-        </Typography>
-      </Stack>
+          variant="standard"
+          value={user.role}
+          disabled={busy || (isLastAdmin && user.role === 'admin')}
+          onChange={(event) => onPatch({ role: event.target.value as Role })}
+          sx={{ minWidth: 104 }}
+        >
+          <MenuItem value="user">普通用户</MenuItem>
+          <MenuItem value="admin">管理员</MenuItem>
+        </TextField>
+      </TableCell>
 
-      <Tooltip title={isLastAdmin ? '系统里最后一个启用中的管理员，不能删除' : ''}>
-        <span>
-          <Button
-            size="small"
-            color="error"
-            disabled={busy || isLastAdmin}
-            onClick={onDelete}
-            sx={{ flexShrink: 0 }}
-          >
-            删除
-          </Button>
-        </span>
-      </Tooltip>
-    </Stack>
+      <TableCell>
+        <Chip
+          size="small"
+          variant="outlined"
+          color={user.enabled ? 'success' : 'error'}
+          label={user.enabled ? '启用' : '已禁用'}
+        />
+      </TableCell>
+
+      <TableCell sx={{ whiteSpace: 'nowrap', color: 'text.secondary' }}>
+        {formatTime(user.created_at)}
+      </TableCell>
+
+      <TableCell sx={{ whiteSpace: 'nowrap', color: 'text.secondary' }}>
+        {formatTime(user.last_login_at)}
+      </TableCell>
+
+      <TableCell align="right">
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: 'center', justifyContent: 'flex-end' }}
+        >
+          <Tooltip title={user.enabled ? '停用（会撤销全部会话）' : '启用'}>
+            <Switch
+              size="small"
+              checked={user.enabled}
+              disabled={busy || (isLastAdmin && user.enabled)}
+              onChange={(event) => onPatch({ enabled: event.target.checked })}
+            />
+          </Tooltip>
+
+          <Tooltip title={isLastAdmin ? '系统里最后一个启用中的管理员，不能删除' : ''}>
+            <span>
+              <Button
+                size="small"
+                color="error"
+                disabled={busy || isLastAdmin}
+                onClick={onDelete}
+                sx={{ minWidth: 0 }}
+              >
+                删除
+              </Button>
+            </span>
+          </Tooltip>
+        </Stack>
+      </TableCell>
+    </TableRow>
   );
 }

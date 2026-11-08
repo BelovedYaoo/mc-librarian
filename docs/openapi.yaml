@@ -1799,12 +1799,15 @@ components:
           type: array
           items:
             type: object
-            required: [key, requests, prompt_tokens, completion_tokens]
+            required: [key, requests, prompt_tokens, completion_tokens, latency_ms]
             properties:
               key: { type: string }
               requests: { type: integer }
               prompt_tokens: { type: integer }
               completion_tokens: { type: integer }
+              latency_ms:
+                type: integer
+                description: 该分组内全部请求的耗时之和（毫秒）；平均耗时 = latency_ms / requests
 
     AuditEntry:
       type: object

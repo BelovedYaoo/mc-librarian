@@ -128,7 +128,17 @@ export function ConversationList({
             <ListItemButton
               selected={item.id === activeId}
               onClick={() => onSelect(item.id)}
-              sx={{ borderRadius: 1, pr: 7 }}
+              sx={{
+                borderRadius: 1,
+                pr: 7,
+                // 常驻边框：之前只有 hover / 选中才看得见，列表在深色底上「浮」不起来，
+                // 也分不清可点区域。常驻一条 divider 细边，hover 加深、选中用主色。
+                border: '1px solid',
+                borderColor: 'divider',
+                mb: 0.5,
+                '&:hover': { borderColor: 'text.disabled' },
+                '&.Mui-selected': { borderColor: 'primary.main' },
+              }}
             >
               <ListItemText
                 primary={item.title}

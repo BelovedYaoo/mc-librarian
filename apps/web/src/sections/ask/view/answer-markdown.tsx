@@ -180,7 +180,10 @@ function splitReferences(
 
     const citation: Citation = {
       path: resolvePath(matched[1], citations),
-      lines: [Number(matched[2]), matched[3] === undefined ? Number(matched[2]) : Number(matched[3])],
+      lines: [
+        Number(matched[2]),
+        matched[3] === undefined ? Number(matched[2]) : Number(matched[3]),
+      ],
     };
 
     nodes.push(

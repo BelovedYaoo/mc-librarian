@@ -8,7 +8,7 @@ import { getHealth } from 'src/lib/api-client';
 
 export type HealthState =
   | { status: 'loading' }
-  | { status: 'ok'; data: HealthResponse; checkedAt: Date }
+  | { status: 'ok'; data: HealthResponse; checkedAt: Date; latencyMs: number }
   | { status: 'error'; message: string; checkedAt: Date };
 
 export type UseHealthReturn = {
@@ -26,9 +26,18 @@ export function useHealth(): UseHealthReturn {
 
     setState({ status: 'loading' });
 
+    const startedAt = performance.now();
+
     getHealth(controller.signal)
       .then((data) => {
-        if (active) setState({ status: 'ok', data, checkedAt: new Date() });
+        if (active) {
+          setState({
+            status: 'ok',
+            data,
+            checkedAt: new Date(),
+            latencyMs: Math.round(performance.now() - startedAt),
+          });
+        }
       })
       .catch((error: unknown) => {
         if (!active || controller.signal.aborted) return;
