@@ -420,7 +420,7 @@ function BucketRow({ bucket, total }: { bucket: UsageBucket; total: number }) {
           <LinearProgress
             variant="determinate"
             value={Math.min(share, 100)}
-            sx={{ flex: '1 1 auto', height: 6, borderRadius: 3, bgcolor: 'action.hover' }}
+            sx={{ flex: '1 1 auto', height: 6, borderRadius: 3, '&&': { bgcolor: 'action.hover' } }}
           />
           <Typography
             variant="caption"
