@@ -235,7 +235,7 @@ function formatDetail(entry: AuditEntry): string {
     case 'version.registered':
     case 'version.recorded': {
       const parts = [
-        detail.files != null ? `${compactNumber(Number(detail.files))} 个文件` : null,
+        detail.files != null ? `${Number(detail.files).toLocaleString('zh-CN')} 个文件` : null,
         detail.tokens != null ? `${compactNumber(Number(detail.tokens))} token` : null,
         detail.obfuscated ? '混淆' : null,
         detail.has_summaries ? '含摘要' : null,

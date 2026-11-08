@@ -172,7 +172,7 @@ function Report({ report, groupBy }: { report: UsageReport; groupBy: UsageGroupB
         </Typography>
       ) : (
         <>
-          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ alignItems: 'stretch' }}>
+          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{ alignItems: 'flex-start' }}>
             <Card variant="outlined" sx={{ flex: '1 1 62%', minWidth: 0 }}>
               <CardContent>
                 <Stack direction="row" spacing={1} sx={{ alignItems: 'baseline', mb: 1 }}>
@@ -288,8 +288,11 @@ function UsageChart({ buckets }: { buckets: UsageBucket[] }) {
         {buckets.map((bucket, index) => {
           const total = totals[index];
           const full = (total / max) * plotHeight;
-          const completion = (bucket.completion_tokens / max) * plotHeight;
-          const prompt = full - completion;
+          const rawCompletion = (bucket.completion_tokens / max) * plotHeight;
+          // 非零但极小的分量（completion 常只占 2%）给 2px 下限，否则堆叠段完全看不见。
+          const completion =
+            bucket.completion_tokens > 0 ? Math.max(rawCompletion, 2) : 0;
+          const prompt = Math.max(full - completion, 0);
           const x = padding.left + slot * index + (slot - barWidth) / 2;
           const baseY = padding.top + plotHeight;
 
@@ -473,10 +476,14 @@ function fillDays(buckets: UsageBucket[], from: string, to: string): UsageBucket
   return filled;
 }
 
-/** 大数字压缩：token 动辄百万，原样列出读不出量级。 */
+/**
+ * 大数字压缩：token 动辄百万，原样列出读不出量级。
+ *
+ * 统一用 K/M（不混「万」）：同一行里出现「11.78M · 29.8 万」两个单位体系会读不出比例。
+ */
 function compactNumber(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 10_000) return `${(value / 10_000).toFixed(1)} 万`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
 
   return Math.round(value).toLocaleString('zh-CN');
 }
