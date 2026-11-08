@@ -252,8 +252,8 @@ function UsageChart({ buckets }: { buckets: UsageBucket[] }) {
   const plotHeight = height - padding.top - padding.bottom;
 
   const totals = buckets.map((bucket) => bucket.prompt_tokens + bucket.completion_tokens);
-  // 留 8% 顶部余量：最高柱贴到顶刻度会像被截断。
-  const max = Math.max(...totals, 1) * 1.08;
+  // 顶部余量 + 取整刻度：直接乘 1.08 会得到 2.47M / 7.42M 这种刻度，读起来别扭。
+  const max = niceMax(Math.max(...totals, 1) * 1.08);
   const slot = plotWidth / buckets.length;
   const barWidth = Math.min(46, Math.max(8, slot * 0.55));
 
@@ -498,6 +498,15 @@ function fillDays(buckets: UsageBucket[], from: string, to: string): UsageBucket
  *
  * 统一用 K/M（不混「万」）：同一行里出现「11.78M · 29.8 万」两个单位体系会读不出比例。
  */
+/** 把刻度上限抬到 1/2/5×10ⁿ，纵轴刻度就落在整数上（如 10M → 0/2.5/5/7.5/10M）。 */
+function niceMax(value: number): number {
+  const power = 10 ** Math.floor(Math.log10(value));
+  const ratio = value / power;
+  const step = ratio <= 1 ? 1 : ratio <= 2 ? 2 : ratio <= 5 ? 5 : 10;
+
+  return step * power;
+}
+
 function compactNumber(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
