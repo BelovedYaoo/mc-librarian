@@ -81,6 +81,37 @@ def merge_ranked(lists: list[list[Candidate]]) -> list[Candidate]:
     return [candidate for _rank, _order, candidate in ordered]
 
 
+def _param_channel(
+    connection: sqlite3.Connection, names: tuple[str, ...], request: SearchRequest
+) -> list[Candidate]:
+    """参数通道：支持「类名 + 参数名」组合。
+
+    常见参数名（`amount`/`count`）在全库有几十个方法，单靠参数名无法定唯一答案；提问里若同时
+    出现类名，就用它把候选收窄到该类的参数。没有标识符时退回整句（与其它通道一致）。
+    """
+    if not names:
+        return param_candidates(
+            connection, request.query, path_prefix=request.path_prefix, source=request.source
+        )
+
+    lists: list[list[Candidate]] = []
+
+    for token in names:
+        hints = [None, *[other for other in names if other != token]]
+        lists.extend(
+            param_candidates(
+                connection,
+                token,
+                path_prefix=request.path_prefix,
+                source=request.source,
+                class_hint=hint,
+            )
+            for hint in hints
+        )
+
+    return merge_ranked(lists)
+
+
 def _channels(
     connection: sqlite3.Connection, settings: Settings, request: SearchRequest
 ) -> dict[Channel, list[Candidate]]:
@@ -101,11 +132,7 @@ def _channels(
             path_prefix=request.path_prefix,
             source=request.source,
         ),
-        "param": by_names(
-            lambda name: param_candidates(
-                connection, name, path_prefix=request.path_prefix, source=request.source
-            )
-        ),
+        "param": _param_channel(connection, names, request),
         "symbol": by_names(
             lambda name: symbol_candidates(
                 connection,

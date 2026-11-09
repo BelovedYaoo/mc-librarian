@@ -509,6 +509,7 @@ def param_candidates(
     *,
     path_prefix: str | None,
     source: str | None = None,
+    class_hint: str | None = None,
 ) -> list[Candidate]:
     """参数通道：按参数名找所属方法（Parchment 名与原名都参与匹配）。
 
@@ -529,6 +530,12 @@ def param_candidates(
         " WHERE (p.name = ? COLLATE NOCASE OR p.original = ? COLLATE NOCASE)"
     )
     params: list[object] = [name, name]
+
+    if class_hint:
+        # 「类名 + 参数名」组合：常见参数名（amount/count）单靠参数无法定唯一答案，
+        # 用提问里出现的类名收窄到那个类的参数。
+        sql += " AND (c.simple = ? COLLATE NOCASE OR c.fqn LIKE ?)"
+        params.extend([class_hint, f"%{class_hint}%"])
 
     if source is not None and query.has_column(connection, "params", "source"):
         sql += " AND p.source = ?"
