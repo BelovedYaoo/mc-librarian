@@ -1,0 +1,66 @@
+{
+ "name": "参数名检索（10 题，唯一参数名）",
+ "description": "按 Parchment 参数名找所属方法；参数名在全库唯一，答案确定。用于回归 param 通道。",
+ "questions": [
+  {
+   "id": "param-01",
+   "category": "定位",
+   "question": "哪个方法接收名为 aboveNoise 的参数（int）？",
+   "gold": ["net.minecraft.world.level.levelgen.placement.NoiseThresholdCountPlacement#of"]
+  },
+  {
+   "id": "param-02",
+   "category": "定位",
+   "question": "哪个方法接收名为 aboveSolidAmount 的参数（int）？",
+   "gold": ["net.minecraft.world.entity.ai.util.RandomPos#moveUpToAboveSolid"]
+  },
+  {
+   "id": "param-03",
+   "category": "定位",
+   "question": "哪个方法接收名为 absoluteVec3 的参数（Vec3）？",
+   "gold": ["net.minecraft.gametest.framework.GameTestHelper#relativeVec"]
+  },
+  {
+   "id": "param-04",
+   "category": "定位",
+   "question": "哪个方法接收名为 actionName 的参数（String）？",
+   "gold": ["net.minecraft.util.monitoring.jmx.MinecraftServerStatistics#invoke"]
+  },
+  {
+   "id": "param-05",
+   "category": "定位",
+   "question": "哪个方法接收名为 activeAttackTargetId 的参数（int）？",
+   "gold": ["net.minecraft.world.entity.monster.Guardian#setActiveAttackTarget"]
+  },
+  {
+   "id": "param-06",
+   "category": "定位",
+   "question": "哪个方法接收名为 activeList 的参数（ObjectSelectionList<?>）？",
+   "gold": ["net.minecraft.client.gui.screens.achievement.StatsScreen#setActiveList"]
+  },
+  {
+   "id": "param-07",
+   "category": "定位",
+   "question": "哪个方法接收名为 activities 的参数（List<Activity>）？",
+   "gold": ["net.minecraft.world.entity.ai.Brain#setActiveActivityToFirstValid"]
+  },
+  {
+   "id": "param-08",
+   "category": "定位",
+   "question": "哪个方法接收名为 actualRotation 的参数（float）？",
+   "gold": ["net.minecraft.util.Mth#rotateIfNecessary"]
+  },
+  {
+   "id": "param-09",
+   "category": "定位",
+   "question": "哪个方法接收名为 addChatLogPlayers 的参数（boolean）？",
+   "gold": ["net.minecraft.client.gui.screens.social.SocialInteractionsPlayerList#updatePlayerList"]
+  },
+  {
+   "id": "param-10",
+   "category": "定位",
+   "question": "哪个方法接收名为 addEllipsis 的参数（boolean）？",
+   "gold": ["net.minecraft.util.StringUtil#truncateStringIfNecessary"]
+  }
+ ]
+}
