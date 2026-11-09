@@ -446,40 +446,101 @@ def _fetch_stage(stage: str, context: JobContext) -> dict[str, Any]:
     return stats
 
 
-def _apply_parchment(context: JobContext, root: Path) -> None:
-    """若缓存里有该版本的 Parchment 数据，就把可读树改名、原树备份到 `src-official/`。
+def _prepare_sources(
+    context: JobContext, sources: list[SourceSpec], dest: Path
+) -> list[SourceSpec]:
+    """就位源码树；若缓存里有 Parchment 数据，则先重写**每个 Java 来源的副本**再建索引。
 
-    Parchment 数据由运维预先放进 `cache/<version>/parchment-<mc>.zip`（离线部署不联网）。
-    没有数据时什么都不做：两棵树就是同一份，行为与改造前一致。
+    为什么要按来源处理：`build_index_from_sources` 解析的是 `sources[].root`，不是合并后的
+    `dest`。直接重写 `dest` 会出现「读的是可读树、索引的是原始参数名」。所以：
+
+    1. 每个 Java 来源复制到工作目录（保留 `patched`/`loader` 标签）；
+    2. 原始副本先合并成 `src-official/<version>/`（只读的原始参数名树）；
+    3. 工作副本逐个重写参数名；
+    4. 重写后的副本合并进 `src/<version>/`，并作为 build 的输入。
     """
-    identity = store.version_identity(context.version)
-    cache = cache_dir_for(context.data_dir, context.version)
-    candidates = (
-        cache / f"parchment-{identity.mc_version}.zip",
-        cache / "parchment.zip",
-    )
-    archive = next((path for path in candidates if path.is_file()), None)
+    archive = _parchment_archive(context)
 
     if archive is None:
-        return
+        for source in sources:
+            if source.kind == "patch":
+                continue
+
+            if source.root.resolve() != dest.resolve():
+                context.log("info", f"parse：{source.kind} 源码树就位到 {dest}")
+
+            place_source_tree(source.root, dest)
+
+        return sources
 
     try:
         data = parchment_mod.load_parchment(archive)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         context.log("warn", f"Parchment 数据不可用，跳过参数名重写：{error}")
-        return
 
+        for source in sources:
+            if source.kind != "patch":
+                place_source_tree(source.root, dest)
+
+        return sources
+
+    work = context.data_dir / ".parchment-work" / context.version
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+
+    prepared: list[SourceSpec] = []
+
+    for source in sources:
+        if source.kind == "patch":
+            prepared.append(source)
+            continue
+
+        copy = work / source.kind
+        shutil.copytree(source.root, copy)
+        prepared.append(SourceSpec(kind=source.kind, root=copy))
+
+    # 原始树（未重写）先合并备份：`read?names=original` 读它。
     official = src_official_root(context.data_dir, context.version)
+    shutil.rmtree(official, ignore_errors=True)
+    official.mkdir(parents=True)
 
-    if official.exists():
-        shutil.rmtree(official)
+    for spec in prepared:
+        if spec.kind != "patch":
+            place_source_tree(spec.root, official)
 
-    shutil.copytree(root, official)
-    originals = parchment_mod.apply_tree(root, data)
+    rewritten = 0
+
+    for spec in prepared:
+        if spec.kind == "patch":
+            continue
+
+        rewritten += len(parchment_mod.apply_tree(spec.root, data))
+
+    # 重写后的副本合并进 `src/<version>/`（清空后重建，避免残留旧文件）。
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True)
+
+    for spec in prepared:
+        if spec.kind != "patch":
+            place_source_tree(spec.root, dest)
+
     context.log(
         "info",
-        f"Parchment：{len(originals)} 个类的参数名已替换（原树备份到 {official}）",
+        f"Parchment：{rewritten} 个类的参数名已替换（原始树备份到 {official}）",
     )
+
+    return prepared
+
+
+def _parchment_archive(context: JobContext) -> Path | None:
+    identity = store.version_identity(context.version)
+    cache = cache_dir_for(context.data_dir, context.version)
+
+    for candidate in (cache / f"parchment-{identity.mc_version}.zip", cache / "parchment.zip"):
+        if candidate.is_file():
+            return candidate
+
+    return None
 
 
 def _parse_stage(context: JobContext) -> dict[str, Any]:
@@ -508,17 +569,9 @@ def _parse_stage(context: JobContext) -> dict[str, Any]:
     carried = export_summaries(index)
 
     try:
-        for source in sources:
-            if source.kind == "patch":
-                continue
-
-            if source.root.resolve() != dest.resolve():
-                context.log("info", f"parse：{source.kind} 源码树就位到 {dest}")
-
-            place_source_tree(source.root, dest)
-
-        _apply_parchment(context, dest)
+        sources = _prepare_sources(context, sources, dest)
         result = build_index_from_sources(sources, index, log=context.log)
+        shutil.rmtree(context.data_dir / ".parchment-work" / context.version, ignore_errors=True)
     except BuildError as error:
         raise StageError(str(error)) from error
 
