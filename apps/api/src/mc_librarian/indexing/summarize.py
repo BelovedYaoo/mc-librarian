@@ -40,6 +40,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -1038,20 +1039,32 @@ async def summarize_index(
     补丁摘要写完后总重注一遍 `patches_fts`（`refresh_patch_fts`）：`parse` 重建库时 FTS 里
     只有 diff 正文（英文/代码），中文提问要命中补丁 hunk 必须把中文摘要也索引进去。
     """
-    class_stats = await _summarize_classes(
-        db_path,
-        client_factory=client_factory,
-        batch_size=batch_size,
-        concurrency=concurrency,
-        log=log,
+    # `client.summarize_batch` 走 `asyncio.to_thread`，而默认线程池只有
+    # `min(32, cpu_count + 4)` 个线程——2 核节点上就是 6 个，信号量开到 72 也只有 6 个真正在跑。
+    # 摘要全是网络等待，与 CPU 核数无关，这里换成按并发配置大小的专用线程池。
+    executor = ThreadPoolExecutor(
+        max_workers=max(concurrency, 4), thread_name_prefix="summary-llm"
     )
-    patch_stats = await _summarize_patches(
-        db_path,
-        client_factory=client_factory,
-        batch_size=batch_size,
-        concurrency=concurrency,
-        log=log,
-    )
+    asyncio.get_running_loop().set_default_executor(executor)
+    log("info", f"摘要：线程池 {max(concurrency, 4)} 个线程（并发配置 {concurrency}）")
+
+    try:
+        class_stats = await _summarize_classes(
+            db_path,
+            client_factory=client_factory,
+            batch_size=batch_size,
+            concurrency=concurrency,
+            log=log,
+        )
+        patch_stats = await _summarize_patches(
+            db_path,
+            client_factory=client_factory,
+            batch_size=batch_size,
+            concurrency=concurrency,
+            log=log,
+        )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     return SummaryStats(
         classes=class_stats.classes,
